@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+openpyxl
+bcrypt
+feedparser
+requests
+beautifulsoup4
+lxml
+# For semantic dedup (embedding similarity). Large download (~pulls in torch).
+# The app runs without it — dedup just falls back to no-embedding mode.
+sentence-transformers

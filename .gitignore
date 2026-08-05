@@ -1,0 +1,42 @@
+# ─── Data: never versioned ────────────────────────────────────────────────
+# data/ holds the live 73MB SQLite corpus AND real ERM business output
+# (approved daily reports, the Insight Sources keyword list, audit docs).
+# This repo is destined for GitHub + Actions cron, so none of it belongs in
+# history. The DB stays on disk and serves as the P1/P2/P3 fixture corpus.
+data/
+
+# ─── Python ───────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ─── Secrets ──────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets.json
+
+# ─── Editor / OS cruft ────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+# Office lock files (e.g. "~$ Audit.docx")
+~$*
+
+# ─── Local artifacts ──────────────────────────────────────────────────────
+*.log
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
