@@ -1,0 +1,1637 @@
+{
+  "_meta": {
+    "tier": "keywords_snapshot",
+    "generated": "20260806",
+    "source": "data/news.db keywords table, read-only SELECT",
+    "row_count": 271,
+    "note": "All rows created_at=2026-06-24, predating every P1/P2/P3 sample day used elsewhere in fixtures/ — safe to use as 'the keyword set in effect' for historical recompute."
+  },
+  "rows": [
+    {
+      "section": "Geopolitical",
+      "term_en": "hormuz",
+      "term_bn": "হরমুজ",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "lng",
+      "term_bn": "এলএনজি, তরলীকৃত প্রাকৃতিক গ্যাস",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "crude oil",
+      "term_bn": "অপরিশোধিত তেল, ক্রুড অয়েল",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Iran conflict",
+      "term_bn": "ইরান সংঘাত, ইরান যুদ্ধ",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Ukraine",
+      "term_bn": "ইউক্রেন",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Saarc",
+      "term_bn": "সার্ক",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "qatar ras laffan",
+      "term_bn": "রাস লাফফান",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Qatar LNG",
+      "term_bn": "কাতার এলএনজি",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "aramco",
+      "term_bn": "আরামকো",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "india",
+      "term_bn": "ভারত",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "qatar energy",
+      "term_bn": "কাতার এনার্জি",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "force majeure",
+      "term_bn": "ফোর্স ম্যাজিউর",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Iran–US",
+      "term_bn": "ইরান-যুক্তরাষ্ট্র, ইরান-মার্কিন",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "US tariff",
+      "term_bn": "মার্কিন শুল্ক, যুক্তরাষ্ট্রের শুল্ক",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "reciprocal tariff",
+      "term_bn": "পাল্টা শুল্ক, রিসিপ্রোকাল শুল্ক",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "USTR",
+      "term_bn": "ইউএসটিআর",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "forex reserve",
+      "term_bn": "বৈদেশিক মুদ্রার রিজার্ভ, ফরেক্স রিজার্ভ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "fx reserve",
+      "term_bn": "মুদ্রা রিজার্ভ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "exchange rate",
+      "term_bn": "বিনিময় হার, মুদ্রা বিনিময় হার",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "dollar reserve",
+      "term_bn": "ডলার রিজার্ভ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "private sector credit",
+      "term_bn": "বেসরকারি খাতের ঋণ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "fdi",
+      "term_bn": "এফডিআই, বিদেশি বিনিয়োগ, সরাসরি বিদেশি বিনিয়োগ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "NPL",
+      "term_bn": "খেলাপি ঋণ, এনপিএল",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "remittance",
+      "term_bn": "রেমিট্যান্স, প্রবাসী আয়",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "dollar purchase",
+      "term_bn": "ডলার ক্রয়",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "inflation",
+      "term_bn": "মূল্যস্ফীতি, মুদ্রাস্ফীতি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "ficci",
+      "term_bn": "এফআইসিসিআই",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "inflationary",
+      "term_bn": "মূল্যস্ফীতিজনিত",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "LDC graduation",
+      "term_bn": "এলডিসি উত্তরণ, স্বল্পোন্নত দেশ উত্তরণ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "national budget",
+      "term_bn": "জাতীয় বাজেট",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "budget 2026-27",
+      "term_bn": "বাজেট ২০২৬-২৭",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "budget 2026-2027",
+      "term_bn": "বাজেট ২০২৬-২০২৭",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "finance minister",
+      "term_bn": "অর্থমন্ত্রী, অর্থ উপদেষ্টা",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "DSEX",
+      "term_bn": "ডিএসইএক্স",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "classified loan",
+      "term_bn": "শ্রেণিকৃত ঋণ, খেলাপি ঋণ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "Dhaka Stock Exchange",
+      "term_bn": "ঢাকা স্টক এক্সচেঞ্জ, ডিএসই",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "bangladesh bank",
+      "term_bn": "বাংলাদেশ ব্যাংক",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "bb",
+      "term_bn": "",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "ministry of finance",
+      "term_bn": "অর্থ মন্ত্রণালয়",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "economic relations division",
+      "term_bn": "অর্থনৈতিক সম্পর্ক বিভাগ, ইআরডি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "Implementation Monitoring and Evaluation Division",
+      "term_bn": "বাস্তবায়ন পরিবীক্ষণ ও মূল্যায়ন বিভাগ, আইএমইডি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "ministry of planning",
+      "term_bn": "পরিকল্পনা মন্ত্রণালয়",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "debt servicing",
+      "term_bn": "ঋণ পরিশোধ, ঋণের সুদ পরিশোধ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "power tariff",
+      "term_bn": "বিদ্যুতের দাম, বিদ্যুৎ মূল্য",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "bilateral trade deal",
+      "term_bn": "দ্বিপাক্ষিক বাণিজ্য চুক্তি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "imf",
+      "term_bn": "আইএমএফ, আন্তর্জাতিক মুদ্রা তহবিল",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "adb",
+      "term_bn": "এডিবি, এশীয় উন্নয়ন ব্যাংক",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "world bank",
+      "term_bn": "বিশ্বব্যাংক",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "sanem",
+      "term_bn": "সানেম",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "nbr revenue",
+      "term_bn": "এনবিআর রাজস্ব",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "revenue collection",
+      "term_bn": "রাজস্ব আদায়, রাজস্ব সংগ্রহ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "policy rate",
+      "term_bn": "নীতি সুদহার, পলিসি রেট",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "lc opening",
+      "term_bn": "এলসি খোলা, ঋণপত্র খোলা",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "lc settlement",
+      "term_bn": "এলসি নিষ্পত্তি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "export",
+      "term_bn": "রপ্তানি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "import",
+      "term_bn": "আমদানি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "trade account",
+      "term_bn": "বাণিজ্য হিসাব",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "trade deficit",
+      "term_bn": "বাণিজ্য ঘাটতি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "Metropolitan Chamber of Commerce",
+      "term_bn": "মেট্রোপলিটন চেম্বার অব কমার্স, এমসিসিআই",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "fta",
+      "term_bn": "এফটিএ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "free trade agreement",
+      "term_bn": "মুক্ত বাণিজ্য চুক্তি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "New Mooring Container Terminal",
+      "term_bn": "নিউমুরিং কনটেইনার টার্মিনাল",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "Nct terminal",
+      "term_bn": "এনসিটি টার্মিনাল",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "btma",
+      "term_bn": "বিটিএমএ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "bgmea",
+      "term_bn": "বিজিএমইএ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "power purchase agreements",
+      "term_bn": "বিদ্যুৎ ক্রয় চুক্তি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "world trade organization",
+      "term_bn": "বিশ্ব বাণিজ্য সংস্থা, ডব্লিউটিও",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "epz",
+      "term_bn": "ইপিজেড, রপ্তানি প্রক্রিয়াকরণ অঞ্চল",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "GDP growth rate",
+      "term_bn": "জিডিপি প্রবৃদ্ধি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "GDP",
+      "term_bn": "জিডিপি, মোট দেশজ উৎপাদন",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "Per capita income",
+      "term_bn": "মাথাপিছু আয়",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "Defaulted loans",
+      "term_bn": "খেলাপি ঋণ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "adp implementation",
+      "term_bn": "এডিপি বাস্তবায়ন",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "foreign aid",
+      "term_bn": "বৈদেশিক সাহায্য, বিদেশি সহায়তা",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "Bank deposit",
+      "term_bn": "ব্যাংক আমানত",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "pmi",
+      "term_bn": "পিএমআই",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "elections",
+      "term_bn": "নির্বাচন",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "cabinet",
+      "term_bn": "মন্ত্রিসভা",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "ncp",
+      "term_bn": "এনসিপি, জাতীয় নাগরিক পার্টি",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "jamaat",
+      "term_bn": "জামায়াত",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "jamaat-e-islami",
+      "term_bn": "জামায়াতে ইসলামী",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "bnp",
+      "term_bn": "বিএনপি",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "awami league",
+      "term_bn": "আওয়ামী লীগ",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "reform council",
+      "term_bn": "সংস্কার পরিষদ",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "july uprising",
+      "term_bn": "জুলাই অভ্যুত্থান",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "july revolution",
+      "term_bn": "জুলাই বিপ্লব",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "jamaat ameer",
+      "term_bn": "জামায়াত আমির",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "Tarique Rahman",
+      "term_bn": "তারেক রহমান",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "prime minister",
+      "term_bn": "প্রধানমন্ত্রী",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "PMO",
+      "term_bn": "প্রধানমন্ত্রীর কার্যালয়",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "ordinance",
+      "term_bn": "অধ্যাদেশ",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "interim government",
+      "term_bn": "অন্তর্বর্তী সরকার",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "parliamentary bill",
+      "term_bn": "সংসদীয় বিল",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "parliament",
+      "term_bn": "সংসদ, জাতীয় সংসদ",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "reform",
+      "term_bn": "সংস্কার",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "supreme court",
+      "term_bn": "সুপ্রিম কোর্ট",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "high court",
+      "term_bn": "হাইকোর্ট",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "referendum",
+      "term_bn": "গণভোট",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "TIB",
+      "term_bn": "টিআইবি",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "Transparency International Bangladesh",
+      "term_bn": "ট্রান্সপারেন্সি ইন্টারন্যাশনাল বাংলাদেশ",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "DGFI",
+      "term_bn": "ডিজিএফআই",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "president",
+      "term_bn": "রাষ্ট্রপতি",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "yunus",
+      "term_bn": "ইউনূস, ড. ইউনূস",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "Dhaka Metropolitan Police",
+      "term_bn": "ঢাকা মেট্রোপলিটন পুলিশ, ডিএমপি",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "july charter",
+      "term_bn": "জুলাই সনদ",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "rationing",
+      "term_bn": "রেশনিং",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "Jatiya Sangsad",
+      "term_bn": "জাতীয় সংসদ",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "NBR",
+      "term_bn": "এনবিআর, জাতীয় রাজস্ব বোর্ড",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "BTRC",
+      "term_bn": "বিটিআরসি",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "telecom",
+      "term_bn": "টেলিকম, টেলিযোগাযোগ",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "telecom minister",
+      "term_bn": "টেলিযোগাযোগ মন্ত্রী",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "telecom ministry",
+      "term_bn": "টেলিযোগাযোগ মন্ত্রণালয়",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "telecom adviser",
+      "term_bn": "টেলিযোগাযোগ উপদেষ্টা",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "mopt",
+      "term_bn": "",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "corporate tax",
+      "term_bn": "কর্পোরেট কর",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "LTU",
+      "term_bn": "এলটিইউ",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "spectrum",
+      "term_bn": "স্পেকট্রাম, তরঙ্গ",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "700 Mz",
+      "term_bn": "৭০০ মেগাহার্টজ",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "3G",
+      "term_bn": "থ্রিজি",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "4G",
+      "term_bn": "ফোরজি",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "5G",
+      "term_bn": "ফাইভজি",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "Towerco",
+      "term_bn": "টাওয়ারকো",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "BTCL",
+      "term_bn": "বিটিসিএল",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "broadband",
+      "term_bn": "ব্রডব্যান্ড",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "BTS tower",
+      "term_bn": "বিটিএস টাওয়ার",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "robi axiata",
+      "term_bn": "রবি আজিয়াটা, রবি",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "banglalink",
+      "term_bn": "বাংলালিংক",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "teletalk",
+      "term_bn": "টেলিটক",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "Minister for Post & Telecommunications",
+      "term_bn": "ডাক ও টেলিযোগাযোগ মন্ত্রী",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "audit claim",
+      "term_bn": "নিরীক্ষা দাবি, অডিট দাবি",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "Fakir Mahbub Anam",
+      "term_bn": "ফকির মাহবুব আনাম",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "Grameenphone",
+      "term_bn": "গ্রামীণফোন",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "gp",
+      "term_bn": "",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "fiber",
+      "term_bn": "ফাইবার",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "fibre",
+      "term_bn": "ফাইবার",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "optical fiber",
+      "term_bn": "অপটিক্যাল ফাইবার",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "BMED",
+      "term_bn": "",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "data growth",
+      "term_bn": "ডেটা প্রবৃদ্ধি",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "internet penetration",
+      "term_bn": "ইন্টারনেট অনুপ্রবেশ, ইন্টারনেট ব্যবহার",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "wifi",
+      "term_bn": "ওয়াইফাই",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "starlink",
+      "term_bn": "স্টারলিংক",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "gpfi",
+      "term_bn": "",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "gp alo",
+      "term_bn": "জিপি আলো",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "subscriber",
+      "term_bn": "গ্রাহক",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "VEON",
+      "term_bn": "ভিওন",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "neir",
+      "term_bn": "এনইআইআর",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "nid",
+      "term_bn": "এনআইডি, জাতীয় পরিচয়পত্র",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "election commission",
+      "term_bn": "নির্বাচন কমিশন, ইসি",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "Bangladesh Mobile Phone Consumers Association",
+      "term_bn": "বাংলাদেশ মোবাইল ফোন ভোক্তা অ্যাসোসিয়েশন",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "Association of Mobile Telecom Operators of Bangladesh",
+      "term_bn": "অ্যাসোসিয়েশন অব মোবাইল টেলিকম অপারেটরস অব বাংলাদেশ",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "amtob",
+      "term_bn": "অ্যামটব",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "service quality",
+      "term_bn": "সেবার মান",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "rural coverage expansion",
+      "term_bn": "গ্রামীণ কভারেজ সম্প্রসারণ",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "data privacy",
+      "term_bn": "ডেটা গোপনীয়তা, তথ্য গোপনীয়তা",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "fiber expansion",
+      "term_bn": "ফাইবার সম্প্রসারণ",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "subscriber base",
+      "term_bn": "গ্রাহক সংখ্যা",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "IMO",
+      "term_bn": "আইএমও",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "sms",
+      "term_bn": "এসএমএস, খুদে বার্তা",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "Internet Service Providers Association of Bangladesh (ISPAB)",
+      "term_bn": "আইএসপিএবি, ইন্টারনেট সার্ভিস প্রোভাইডারস অ্যাসোসিয়েশন",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "submarine cable",
+      "term_bn": "সাবমেরিন কেবল, সাবমেরিন ক্যাবল",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "IGW",
+      "term_bn": "আইজিডব্লিউ",
+      "enabled": 1
+    },
+    {
+      "section": "Others",
+      "term_en": "AI",
+      "term_bn": "এআই, কৃত্রিম বুদ্ধিমত্তা",
+      "enabled": 1
+    },
+    {
+      "section": "Others",
+      "term_en": "power supply",
+      "term_bn": "বিদ্যুৎ সরবরাহ",
+      "enabled": 1
+    },
+    {
+      "section": "Others",
+      "term_en": "power generation",
+      "term_bn": "বিদ্যুৎ উৎপাদন",
+      "enabled": 1
+    },
+    {
+      "section": "Others",
+      "term_en": "carbon credit",
+      "term_bn": "কার্বন ক্রেডিট",
+      "enabled": 1
+    },
+    {
+      "section": "Others",
+      "term_en": "rooppur",
+      "term_bn": "রূপপুর",
+      "enabled": 1
+    },
+    {
+      "section": "Others",
+      "term_en": "Independent Power Producers",
+      "term_bn": "বেসরকারি বিদ্যুৎ উৎপাদনকারী, আইপিপি",
+      "enabled": 1
+    },
+    {
+      "section": "Others",
+      "term_en": "ctg port",
+      "term_bn": "চট্টগ্রাম বন্দর",
+      "enabled": 1
+    },
+    {
+      "section": "Others",
+      "term_en": "chittagong port",
+      "term_bn": "চট্টগ্রাম বন্দর",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Iran",
+      "term_bn": "ইরান",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Israel",
+      "term_bn": "ইসরায়েল",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Netanyahu",
+      "term_bn": "নেতানিয়াহু",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "oil price",
+      "term_bn": "তেলের দাম",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "oil prices",
+      "term_bn": "",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "peace deal",
+      "term_bn": "শান্তি চুক্তি",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "ceasefire",
+      "term_bn": "যুদ্ধবিরতি",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Iran-US",
+      "term_bn": "",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "dollar",
+      "term_bn": "ডলার",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "budget",
+      "term_bn": "বাজেট",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "deficit",
+      "term_bn": "ঘাটতি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "expenditure",
+      "term_bn": "ব্যয়",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "cashless",
+      "term_bn": "ক্যাশলেস",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "industrial licensing",
+      "term_bn": "শিল্প লাইসেন্স",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Gulf",
+      "term_bn": "উপসাগর",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Lebanon",
+      "term_bn": "লেবানন",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Hezbollah",
+      "term_bn": "হিজবুল্লাহ",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "sanctions",
+      "term_bn": "নিষেধাজ্ঞা",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "nuclear",
+      "term_bn": "পারমাণবিক",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "OPEC",
+      "term_bn": "ওপেক",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Russia",
+      "term_bn": "রাশিয়া",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Putin",
+      "term_bn": "পুতিন",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Zelensky",
+      "term_bn": "জেলেনস্কি",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "NATO",
+      "term_bn": "ন্যাটো",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Strait",
+      "term_bn": "প্রণালি",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Brent",
+      "term_bn": "ব্রেন্ট",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "tariff",
+      "term_bn": "শুল্ক",
+      "enabled": 1
+    },
+    {
+      "section": "Geopolitical",
+      "term_en": "Taiwan",
+      "term_bn": "তাইওয়ান",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "taka",
+      "term_bn": "টাকা",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "CPI",
+      "term_bn": "সিপিআই",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "reserves",
+      "term_bn": "রিজার্ভ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "interest rate",
+      "term_bn": "সুদের হার",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "GNI",
+      "term_bn": "জিএনআই",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "GDP growth",
+      "term_bn": "জিডিপি প্রবৃদ্ধি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "Fitch",
+      "term_bn": "ফিচ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "Moody",
+      "term_bn": "মুডিস",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "load-shedding",
+      "term_bn": "লোডশেডিং",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "load shedding",
+      "term_bn": "লোডশেডিং",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "power deficit",
+      "term_bn": "বিদ্যুৎ ঘাটতি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "gas shortage",
+      "term_bn": "গ্যাস সংকট",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "coal",
+      "term_bn": "কয়লা",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "PDB",
+      "term_bn": "পিডিবি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "current account",
+      "term_bn": "চলতি হিসাব",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "money supply",
+      "term_bn": "অর্থ সরবরাহ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "capital adequacy",
+      "term_bn": "মূলধন পর্যাপ্ততা",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "food inflation",
+      "term_bn": "খাদ্য মূল্যস্ফীতি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "JICA",
+      "term_bn": "জাইকা",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "grant",
+      "term_bn": "অনুদান",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "foreign investment",
+      "term_bn": "বিদেশি বিনিয়োগ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "economic zone",
+      "term_bn": "অর্থনৈতিক অঞ্চল",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "Matarbari",
+      "term_bn": "মাতারবাড়ী",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "deep-sea port",
+      "term_bn": "গভীর সমুদ্র বন্দর",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "renewables",
+      "term_bn": "নবায়নযোগ্য",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "RMG",
+      "term_bn": "তৈরি পোশাক",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "garments",
+      "term_bn": "পোশাক খাত",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "startup",
+      "term_bn": "স্টার্টআপ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "SME",
+      "term_bn": "এসএমই",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "VAT",
+      "term_bn": "ভ্যাট",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "duty",
+      "term_bn": "শুল্ক",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "withholding tax",
+      "term_bn": "উৎসে কর",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "source tax",
+      "term_bn": "উৎস কর",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "subsidy",
+      "term_bn": "ভর্তুকি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "incentive",
+      "term_bn": "প্রণোদনা",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "ADP",
+      "term_bn": "এডিপি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "allocation",
+      "term_bn": "বরাদ্দ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "fiscal",
+      "term_bn": "রাজস্ব নীতি",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "tobacco tax",
+      "term_bn": "তামাক কর",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "minister appointment",
+      "term_bn": "মন্ত্রী নিয়োগ",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "governance",
+      "term_bn": "সুশাসন",
+      "enabled": 1
+    },
+    {
+      "section": "Political",
+      "term_en": "standing committee",
+      "term_bn": "স্থায়ী কমিটি",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "SIM tax",
+      "term_bn": "সিম কর",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "telecom tax",
+      "term_bn": "টেলিকম কর",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "MFS",
+      "term_bn": "এমএফএস",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "mobile money",
+      "term_bn": "মোবাইল ব্যাংকিং",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "Nagad",
+      "term_bn": "নগদ",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "bKash",
+      "term_bn": "বিকাশ",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "digital bank",
+      "term_bn": "ডিজিটাল ব্যাংক",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "National Fibre Bank",
+      "term_bn": "ন্যাশনাল ফাইবার ব্যাংক",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "a2i",
+      "term_bn": "এটুআই",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "700 MHz",
+      "term_bn": "৭০০ মেগাহার্টজ",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "connectivity",
+      "term_bn": "সংযোগ",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "data center",
+      "term_bn": "ডেটা সেন্টার",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "ICT",
+      "term_bn": "আইসিটি",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "Fraud",
+      "term_bn": "প্রতারণা",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "Scam",
+      "term_bn": "স্ক্যাম",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "Sim Swap",
+      "term_bn": "সিম সোয়াপ",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "Hijack",
+      "term_bn": "হাইজ্যাক",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "VOIP",
+      "term_bn": "ভিওআইপি",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "VIP number",
+      "term_bn": "ভিআইপি নম্বর",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "Bioscope",
+      "term_bn": "বায়োস্কোপ",
+      "enabled": 1
+    },
+    {
+      "section": "Others",
+      "term_en": "Asiatic",
+      "term_bn": "এশিয়াটিক",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "Free Facebook",
+      "term_bn": "ফ্রি ফেসবুক",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "Free Data",
+      "term_bn": "ফ্রি ডেটা",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "Free Pack",
+      "term_bn": "ফ্রি প্যাক",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "Zero Charge Pack",
+      "term_bn": "জিরো চার্জ প্যাক",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "LocationGuru",
+      "term_bn": "লোকেশন গুরু",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "OTT",
+      "term_bn": "ওটিটি",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "DOB",
+      "term_bn": "জন্ম তারিখ",
+      "enabled": 1
+    },
+    {
+      "section": "Macroeconomy",
+      "term_en": "WPPF",
+      "term_bn": "ডব্লিউপিপিএফ",
+      "enabled": 1
+    },
+    {
+      "section": "Others",
+      "term_en": "Genex",
+      "term_bn": "জেনেক্স",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "EGSM",
+      "term_bn": "ইজিএসএম",
+      "enabled": 1
+    },
+    {
+      "section": "Telco/regulatory",
+      "term_en": "LTE",
+      "term_bn": "এলটিই",
+      "enabled": 1
+    }
+  ]
+}
