@@ -1,10 +1,14 @@
 name: CI
 
-# Runs on every push and PR. Must stay green with a near-empty test
-# suite (DoD #5) and must NEVER call a real LLM provider or the live
-# internet — every env var below is blank/fake on purpose, and
-# tests/conftest.py enforces the same for anything that imports pytest
-# directly (e.g. a local `pytest` run without this workflow's env block).
+# Runs on every push and PR. Must stay green with the current test suite
+# (DoD #5) and must NEVER call a real LLM provider or reach the live
+# internet for anything business-relevant — every provider key below is
+# blank/fake on purpose, and tests/conftest.py enforces the same for a
+# local `pytest` run that skips this workflow's env block entirely. The
+# Postgres `services:` container below is a disposable, CI-local
+# container (no data, no external exposure) — pulling its image is the
+# same category of "internet access" as `actions/checkout` or
+# `pip install` already require, not a live external system.
 on:
   push:
   pull_request:
@@ -15,10 +19,52 @@ jobs:
     strategy:
       matrix:
         python-version: ["3.10", "3.12"]
+
+    # Postgres 17 — pinned to match what app/db/**, migrations/**, and
+    # docs/storage-policy.md were actually built and measured against
+    # ("a real local PostgreSQL 17.4 server", storage-policy.md §"How
+    # these numbers were produced"; ADR §1/§9.4 targets Supabase, which
+    # is vanilla Postgres with no version-specific extensions used here
+    # — see storage-policy.md's "no Supabase-specific extensions"). The
+    # `:17` tag (not a pinned patch) tracks the latest 17.x point
+    # release, standard practice for CI service containers.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          # Disposable, CI-local credentials for a container with no
+          # data and no exposure beyond this job's own localhost network
+          # — not a secret, never used against Supabase or any real DB.
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: erm_ci_test
+        ports:
+          - 5432:5432
+        # GitHub Actions will not start dependent steps until this
+        # reports healthy — a first layer of "fail loudly if the
+        # database never comes up", underneath the explicit reachability
+        # guard step below (which checks something this can't: that
+        # THIS workflow's connection string actually reaches it).
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     env:
       APP_ENV: test
       LOG_LEVEL: WARNING
+      # Deliberately blank at job scope: app.config.Settings.database_url
+      # (read from this exact env var) is production/app-boot config,
+      # and tests/test_config.py asserts it defaults to "" for
+      # non-production environments. Only the "Apply database
+      # migrations" step below overrides it, scoped to that step alone.
       DATABASE_URL: ""
+      # This is the var app/db/testing.py's pg_available()/
+      # migrated_schema() actually check FIRST (see its _ENV_VARS
+      # tuple) — it's what every skipif-gated DB test in
+      # tests/test_db_*.py and tests/test_storage*.py resolves against.
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/erm_ci_test
       SECRET_KEY: ""
       GROQ_API_KEY: ""
       GEMINI_API_KEY: ""
@@ -38,6 +84,48 @@ jobs:
 
       - name: Type-check (mypy)
         run: mypy app
+
+      - name: Verify database is reachable (fail loudly, not a silent skip)
+        # The actual bug this closes: tests/test_db_*.py and
+        # tests/test_storage*.py are (correctly) written to SKIP rather
+        # than fail when no Postgres is reachable, so a local
+        # `pytest` run without one degrades gracefully. In CI that same
+        # behavior let 25 database-backed tests report "passed" (by not
+        # running at all) on every push. This step calls the identical
+        # app.db.testing.pg_available() those tests gate on, BEFORE
+        # pytest starts — if the service isn't actually reachable
+        # through this job's TEST_DATABASE_URL, the job fails right
+        # here with a clear message instead of silently proceeding into
+        # 25 quiet skips. Nothing about this step runs outside CI, so a
+        # developer's local `pytest` without Postgres is unaffected —
+        # tests/conftest.py and the tests' own skipif markers are
+        # untouched.
+        run: |
+          python3 - <<'PY'
+          import sys
+          from app.db.testing import pg_available
+
+          if not pg_available():
+              print(
+                  "FATAL: Postgres service is unreachable via TEST_DATABASE_URL. "
+                  "Refusing to let the database-backed test suite silently skip in CI. "
+                  "Check the postgres: services block in .github/workflows/ci.yml and "
+                  "this job's TEST_DATABASE_URL.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          print("Postgres reachable via TEST_DATABASE_URL -- proceeding.")
+          PY
+
+      - name: Apply database migrations
+        # DoD: migrations applied via the project's own runner
+        # (app/db/migrate.py), not hand-maintained SQL in this workflow
+        # — so this can never drift from migrations/*.sql. DATABASE_URL
+        # is overridden here, scoped to this step only (see the job-level
+        # env comment above for why it must NOT leak into later steps).
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/erm_ci_test
+        run: python -m app.db.migrate
 
       - name: Test
         run: pytest
