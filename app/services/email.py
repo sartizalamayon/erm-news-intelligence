@@ -11,28 +11,19 @@ Per the AUTH-OTP mission brief, this calls Resend's REST API directly
 over `requests` (already a dependency -- pyproject.toml) rather than
 adding the `resend` SDK for what is, mechanically, one HTTP POST.
 
-Configuration note -- why this reuses the `smtp_*` settings fields:
-`app.config.Settings` provisioned generic `smtp_host`/`smtp_port`/
-`smtp_username`/`smtp_password`/`smtp_from_email`/`smtp_use_tls` fields
-"so AUTH-OTP can wire whichever vendor gets approved without a config
-reshape" (that module's own docstring) -- written before Resend was
-ruled in over classic SMTP. Resend's REST transport needs only an API
-key and a verified From address, not a host/port/username. This package
-does not own `app/config.py` (ARCH-REPO does -- see
-migrations/0006_provider_configs.sql's header, which notes the same
-constraint for a different field: "ARCH-DB does not own app/config.py").
-Rather than leave email sending unconfigurable, this module reuses the
-two fields that already have the right shape and the right sensitivity
-annotation:
-  * `settings.smtp_password` (repr=False, i.e. already treated as a
-    secret in Settings' own type) holds the Resend API key.
-  * `settings.smtp_from_email` holds the verified Resend From address.
-`smtp_host` / `smtp_port` / `smtp_username` / `smtp_use_tls` are simply
-unused by this transport. Flagged in the AUTH-OTP task report as a
-follow-up: whoever owns app/config.py should rename these to
-vendor-neutral names (`email_api_key` / `email_from_address`) once this
-is the agreed shape, rather than this module inventing new Settings
-fields it isn't allowed to add.
+Configuration note: this transport's credentials live at
+`settings.resend_api_key` (repr=False, i.e. treated as a secret in
+Settings' own type) and `settings.resend_from_email`. These were
+originally the generic `smtp_password` / `smtp_from_email` fields,
+reused because this package does not own `app/config.py` (ARCH-REPO
+does -- see migrations/0006_provider_configs.sql's header, which notes
+the same constraint for a different field: "ARCH-DB does not own
+app/config.py") and could not add new Settings fields itself -- flagged
+in the AUTH-OTP task report as a follow-up. ARCH-REPO has since renamed
+them to these vendor-neutral names. `smtp_host` / `smtp_port` /
+`smtp_username` / `smtp_use_tls` remain provisioned on `Settings` but
+are simply unused by this transport (Resend's REST transport needs only
+an API key and a verified From address, not a host/port/username).
 """
 
 from __future__ import annotations
@@ -79,12 +70,12 @@ def send_otp_email(*, to_email: str, code: str, ttl_minutes: int) -> None:
     cover "email", so this masks explicitly rather than relying on it).
     """
     settings = get_settings()
-    api_key = settings.smtp_password
-    from_email = settings.smtp_from_email
+    api_key = settings.resend_api_key
+    from_email = settings.resend_from_email
     if not api_key or not from_email:
         raise ConfigurationError(
-            "Resend is not configured -- SMTP_PASSWORD (holding the Resend API "
-            "key) and SMTP_FROM_EMAIL (the verified From address) must both be set."
+            "Resend is not configured -- RESEND_API_KEY and RESEND_FROM_EMAIL "
+            "(the verified From address) must both be set."
         )
 
     subject, text = _subject_and_body(code, ttl_minutes)

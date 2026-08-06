@@ -16,12 +16,16 @@ Field groups map 1:1 to ADR decisions — nothing here is speculative:
     fallback only — ADR §9.1 also rules that admin-entered keys are
     stored encrypted in the database (ARCH-DB/ADMIN-API's territory);
     `secret_key` below is the encryption key for that, not for these.
-  * smtp_*                  — ADR §9.3 (OTP-only auth, custom SMTP
-    mandatory). Vendor is intentionally NOT assumed: Resend is proposed
-    in the ADR but explicitly "pending owner approval as a new
-    dependency" — these fields describe a generic SMTP relay so
-    AUTH-OTP can wire whichever vendor gets approved without a config
-    reshape.
+  * resend_*                — ADR §9.3 (OTP-only auth). Resend was
+    approved as the OTP email transport (see app/services/email.py);
+    it is called over its REST API via `requests`, there is no SMTP
+    server anywhere in this system. `smtp_host`/`smtp_port`/
+    `smtp_username`/`smtp_use_tls` remain provisioned below but are
+    UNUSED — kept in case a real SMTP relay is ever added, not
+    renamed/removed since nothing reuses them today.
+  * trusted_proxy_hops      — RT-5 remediation (docs/red-team-findings.md).
+    Security-critical, not a tuning knob: default 0 means
+    X-Forwarded-For is never trusted. See the field's own description.
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.errors import ConfigurationError
@@ -53,6 +57,22 @@ class Settings(BaseSettings):
     )
     log_level: str = Field(default="INFO", description="DEBUG | INFO | WARNING | ERROR")
     port: int = Field(default=8000, description="HTTP port for uvicorn. Render injects its own PORT.")
+    trusted_proxy_hops: int = Field(
+        default=0,
+        description="SECURITY-CRITICAL, NOT A TUNING KNOB. Number of "
+        "reverse-proxy hops between the real client and this process "
+        "that are trusted to have each appended their own observed peer "
+        "address onto X-Forwarded-For (RFC 7239 'rightmost trusted hop' "
+        "model). Default 0 = trust nothing: X-Forwarded-For is never "
+        "consulted and the direct socket peer is used — this is the "
+        "RT-5 remediation (docs/red-team-findings.md); setting this "
+        "higher than the real number of trusted hops in front of this "
+        "process reopens the per-IP OTP rate-limit bypass RT-5 found. "
+        "Render alone counts as 1 hop; an additional CDN/WAF in front "
+        "adds more. Any unparsable or negative value resolves to 0 "
+        "(fail safe), never an error or a trusted default. Read by "
+        "app.api.routers.auth._trusted_proxy_hops().",
+    )
     secret_key: str = Field(
         default="",
         repr=False,
@@ -85,13 +105,25 @@ class Settings(BaseSettings):
     llm_provider_primary: str = Field(default="groq", description="ADR §9.1.")
     llm_provider_secondary: str = Field(default="gemini", description="ADR §9.1.")
 
-    # ── SMTP / OTP email (ADR §9.3, ruled: OTP-only auth) ────────────
-    smtp_host: str = Field(default="", description="SMTP relay host. Vendor undecided — see module docstring.")
-    smtp_port: int = Field(default=587, description="SMTP port (587 = STARTTLS, the common default).")
-    smtp_username: str = Field(default="")
-    smtp_password: str = Field(default="", repr=False)
-    smtp_from_email: str = Field(default="", description="Envelope/From address OTP emails are sent from.")
-    smtp_use_tls: bool = Field(default=True)
+    # ── Resend (OTP email transport — ADR §9.3, ruled: OTP-only auth) ─
+    # Resend is called over its REST API via `requests`
+    # (app/services/email.py) — there is no SMTP server in this system.
+    resend_api_key: str = Field(
+        default="", repr=False, description="Resend API key, sent as a Bearer token. See app.services.email."
+    )
+    resend_from_email: str = Field(
+        default="", description="Verified Resend sender address OTP emails are sent from. See app.services.email."
+    )
+
+    # Provisioned but UNUSED today — no SMTP transport exists in this
+    # codebase (Resend's REST API is used instead, see resend_api_key /
+    # resend_from_email above). Kept rather than removed in case a real
+    # SMTP relay is ever added; do not wire a mail host to these
+    # expecting it to be consulted by anything.
+    smtp_host: str = Field(default="", description="Unused — see resend_api_key/resend_from_email above.")
+    smtp_port: int = Field(default=587, description="Unused — see resend_api_key/resend_from_email above.")
+    smtp_username: str = Field(default="", description="Unused — see resend_api_key/resend_from_email above.")
+    smtp_use_tls: bool = Field(default=True, description="Unused — see resend_api_key/resend_from_email above.")
 
     # ── Frontend / CORS ───────────────────────────────────────────────
     cors_allow_origins: str = Field(
@@ -104,6 +136,25 @@ class Settings(BaseSettings):
     def cors_allow_origins_list(self) -> list[str]:
         """Parsed view of cors_allow_origins for FastAPI's CORSMiddleware."""
         return [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
+
+    @field_validator("trusted_proxy_hops", mode="before")
+    @classmethod
+    def _fail_safe_trusted_proxy_hops(cls, value: object) -> int:
+        """Replicates, exactly, the fail-safe parsing
+        app.api.routers.auth._trusted_proxy_hops() used to implement
+        directly against `os.environ` before this became a typed
+        setting: any unparsable or negative value resolves to 0 (trust
+        nothing) rather than raising or trusting a garbage value. This
+        field is security-critical (RT-5) — malformed config must fail
+        safe, not fail loud and not fail open.
+        """
+        if isinstance(value, int):
+            return value if value > 0 else 0
+        try:
+            hops = int(str(value).strip())
+        except (TypeError, ValueError):
+            return 0
+        return hops if hops > 0 else 0
 
 
 def validate_production_settings(settings: Settings) -> None:

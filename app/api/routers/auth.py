@@ -23,8 +23,6 @@ parameters, rate limits, enumeration handling, Resend quota handling).
 
 from __future__ import annotations
 
-import os
-
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from app.api.deps import AuthenticatedUser, require_admin
@@ -35,6 +33,7 @@ from app.api.schemas.auth import (
     OtpVerifyBody,
     OtpVerifyResponse,
 )
+from app.config import Settings
 from app.db.connection import get_connection
 from app.logging import get_logger, mask
 from app.services import auth as auth_service
@@ -57,13 +56,18 @@ def _trusted_proxy_hops() -> int:
     hop" model: each hop appends exactly one entry as it forwards, so
     only entries a KNOWN hop actually added can be relied on).
 
-    Read directly from the environment (`TRUSTED_PROXY_HOPS`) rather
-    than `app.config.Settings`: this package does not own
-    `app/config.py` (see app/services/email.py's docstring for the
-    identical constraint on the Resend API key), and this value
-    genuinely needs to be operator-set per deployment topology --
-    Render alone is 1 hop; an additional CDN/WAF in front would be 2+
-    -- without a code change.
+    Read from `app.config.Settings.trusted_proxy_hops` (ARCH-REPO added
+    this as a proper typed setting once AUTH-OTP's original blocker --
+    not owning `app/config.py`, the identical constraint
+    app/services/email.py's docstring describes for the Resend API key
+    -- was resolved; this previously read `os.environ["TRUSTED_PROXY_HOPS"]`
+    directly). Deliberately constructs `Settings(_env_file=None)` fresh
+    on every call rather than the process-wide cached `get_settings()`:
+    this value genuinely needs to be operator-set per deployment
+    topology -- Render alone is 1 hop; an additional CDN/WAF in front
+    would be 2+ -- without a code change, so a fresh read (env vars
+    only, no `.env` file, matching the pre-existing `os.environ.get`
+    behavior exactly) is correct here, not a workaround.
 
     Defaults to 0: "trust nothing", per RT-5's remediation ("default to
     the safest interpretation... prefer the direct socket peer over a
@@ -74,12 +78,12 @@ def _trusted_proxy_hops() -> int:
     request, since the leftmost entry is always the position a client
     fully controls when a proxy appends rather than replaces.
     """
-    raw = os.environ.get("TRUSTED_PROXY_HOPS", "0").strip()
-    try:
-        hops = int(raw)
-    except ValueError:
-        return 0
-    return hops if hops > 0 else 0
+    # _env_file=None is a real, working pydantic-settings BaseSettings
+    # kwarg at runtime (disables the .env-file source for this one
+    # instance, env-vars-only) -- mypy just doesn't see it without the
+    # pydantic mypy plugin, which isn't enabled here (pyproject.toml:
+    # incompatible with the pinned mypy version in this environment).
+    return Settings(_env_file=None).trusted_proxy_hops  # type: ignore[call-arg]
 
 
 def _client_ip(request: Request) -> str:
