@@ -1,36 +1,28 @@
-"""Daily batch orchestration.
+"""Daily batch orchestration — the P1 fetch-layer entrypoint.
 
-Today this is a no-op that proves the entrypoint shape end to end
-(config loads, logging configures, exit code 0) so CI and
-`python -m app.batch` both succeed before any real logic lands. It is
-deliberately NOT a placeholder function that just `pass`es — it does
-real (if trivial) work so a smoke test can assert something meaningful
-about it.
+`main()` loads the full source registry (app/sources/registry.py),
+runs the two-tier bounded fan-out (app/services/collector.py), and
+writes results in one batched transaction when `DATABASE_URL` is
+configured. When it isn't (local dev / CI default — see
+tests/conftest.py's env defaults), this runs fetch-only: real discovery,
+no DB write, so the entrypoint stays exercisable without a live
+Postgres. `validate_production_settings` still fails fast if
+`app_env=production` and `DATABASE_URL` is genuinely missing.
 
-TODO(P1-FETCH): replace the no-op body with the real run:
-  1. `app.sources.registry.all_sources()` for the configured outlets.
-  2. Two-tier bounded fan-out across them (speed-techniques.md §4
-     points 2-3): sources concurrently, articles within a source
-     concurrently, both bounded, plus a process-wide semaphore.
-  3. Wrap each source's run in try/except on app.errors.SourceError
-     (never a bare `except Exception`) so one failing source cannot
-     abort the run — record it and continue.
-  4. Single-method feed discovery with fallback only on empty result
-     (speed-techniques.md §4 point 4); log whenever the fallback fires.
-
-TODO(ARCH-DB): own the write path once app/db exists — indexed
-upsert dedup (speed-techniques.md §4 point 5: unique constraint +
-`ON CONFLICT DO NOTHING`) and batched transactions, not per-row commits
-(§4 point 6 — SQLite/Postgres both prefer batching here; per-row
-transactions are explicitly rejected as a Postgres-MVCC-specific
-pattern that doesn't help this design).
+Per-source isolation is enforced one level down, inside
+`app.services.collector.fetch_all`/`_run_one_source` — a single
+source's `SourceError` (or, deliberately, any unexpected exception —
+see that module's docstring) never aborts this entrypoint; it is
+recorded as that source's own `failed` status and logged.
 """
 
 from __future__ import annotations
 
 from app.config import get_settings, validate_production_settings
+from app.db.connection import get_connection
 from app.logging import configure_logging, get_logger
-from app.sources.registry import all_sources
+from app.services.collector import run_collection
+from app.sources.registry import all_sources, load_all
 
 logger = get_logger(__name__)
 
@@ -40,19 +32,39 @@ def main() -> int:
     settings = get_settings()
     validate_production_settings(settings)
 
+    load_all()
     sources = all_sources()
     logger.info(
         "batch_run_start",
         extra={"app_env": settings.app_env, "registered_sources": len(sources)},
     )
 
-    # TODO(P1-FETCH): replace with the real per-source fan-out described
-    # above. Iterating an empty registry and exiting 0 is the correct
-    # behavior today, not a shortcut — there is nothing to run yet.
-    for source_key in sources:
-        logger.info("source_run_skipped_not_implemented", extra={"source": source_key})
+    if not sources:
+        logger.info("batch_run_complete", extra={"sources_run": 0})
+        return 0
 
-    logger.info("batch_run_complete", extra={"sources_run": 0})
+    if settings.database_url:
+        with get_connection() as conn:
+            result = run_collection(conn, source_classes=sources)
+    else:
+        logger.warning(
+            "batch_run_no_database_configured",
+            extra={"app_env": settings.app_env, "note": "running fetch-only, nothing will be written"},
+        )
+        result = run_collection(None, source_classes=sources)
+
+    logger.info(
+        "batch_run_complete",
+        extra={
+            "sources_run": len(result.sources),
+            "sources_ok": sum(1 for s in result.sources if s.status == "ok"),
+            "sources_empty": result.total_empty_sources,
+            "sources_failed": result.total_failed_sources,
+            "total_fetched": result.total_fetched,
+            "total_inserted": result.total_inserted,
+            "total_duplicate": result.total_duplicate,
+        },
+    )
     return 0
 
 
