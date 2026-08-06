@@ -196,6 +196,123 @@ def test_logout_clears_cookie(no_db_client: TestClient, monkeypatch: pytest.Monk
     assert "Max-Age=0" in set_cookie or "expires=" in set_cookie.lower()
 
 
+# ── RT-5 fix: _client_ip ignores X-Forwarded-For unless a trusted hop
+# count says otherwise (docs/red-team-findings.md) ───────────────────────
+
+
+class _FakeClient:
+    def __init__(self, host: str) -> None:
+        self.host = host
+
+
+class _FakeRequest:
+    """Minimal stand-in for fastapi.Request -- _client_ip only ever
+    touches `.headers.get(...)` and `.client.host`, so a real Request
+    (which needs a full ASGI scope) is unnecessary for these unit tests.
+    """
+
+    def __init__(self, headers: dict[str, str] | None = None, client_host: str | None = "192.0.2.1") -> None:
+        self.headers = headers or {}
+        self.client = _FakeClient(client_host) if client_host is not None else None
+
+
+@pytest.fixture(autouse=True)
+def _no_trusted_proxy_hops_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test in this file should see the real default (0 trusted
+    hops) unless it explicitly opts into a different value -- guards
+    against a stray TRUSTED_PROXY_HOPS in the ambient environment
+    leaking into a test that didn't ask for it.
+    """
+    monkeypatch.delenv("TRUSTED_PROXY_HOPS", raising=False)
+
+
+def test_client_ip_ignores_spoofed_header_by_default() -> None:
+    request = _FakeRequest(headers={"x-forwarded-for": "1.2.3.4"}, client_host="192.0.2.1")
+    assert auth_router_module._client_ip(request) == "192.0.2.1"
+
+
+def test_client_ip_ignores_spoofed_multi_hop_chain_by_default() -> None:
+    # A fully attacker-controlled chain, forged to LOOK like it went
+    # through several proxies -- with the default of 0 trusted hops,
+    # none of it is consulted; only the direct socket peer is used.
+    request = _FakeRequest(
+        headers={"x-forwarded-for": "9.9.9.9, 8.8.8.8, 7.7.7.7, 6.6.6.6"}, client_host="192.0.2.1"
+    )
+    assert auth_router_module._client_ip(request) == "192.0.2.1"
+
+
+def test_client_ip_trusts_rightmost_entry_with_one_trusted_hop(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
+    # "<attacker-supplied-prefix>, <real-client-as-seen-by-the-one-trusted-proxy>"
+    request = _FakeRequest(headers={"x-forwarded-for": "203.0.113.66, 198.51.100.1"}, client_host="10.0.0.5")
+    assert auth_router_module._client_ip(request) == "198.51.100.1"
+
+
+def test_client_ip_trusts_nth_from_right_with_multiple_trusted_hops(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "2")
+    # Chain: <attacker-prefix>, <real client, appended by trusted hop #1>,
+    # <trusted hop #1's own address, appended by trusted hop #2>.
+    request = _FakeRequest(
+        headers={"x-forwarded-for": "203.0.113.66, 198.51.100.1, 198.51.100.2"}, client_host="10.0.0.5"
+    )
+    assert auth_router_module._client_ip(request) == "198.51.100.1"
+
+
+def test_client_ip_falls_back_to_peer_when_hops_configured_but_header_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "1")
+    request = _FakeRequest(headers={}, client_host="10.0.0.5")
+    assert auth_router_module._client_ip(request) == "10.0.0.5"
+
+
+def test_client_ip_falls_back_to_peer_when_chain_shorter_than_configured_hops(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "3")
+    # Only 1 entry present but 3 hops configured -- can't possibly be the
+    # trusted hop's own append, so this must not be trusted blindly.
+    request = _FakeRequest(headers={"x-forwarded-for": "203.0.113.66"}, client_host="10.0.0.5")
+    assert auth_router_module._client_ip(request) == "10.0.0.5"
+
+
+def test_client_ip_invalid_trusted_proxy_hops_value_defaults_to_safe_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TRUSTED_PROXY_HOPS", "not-a-number")
+    request = _FakeRequest(headers={"x-forwarded-for": "1.2.3.4"}, client_host="192.0.2.1")
+    assert auth_router_module._client_ip(request) == "192.0.2.1"
+
+
+def test_spoofed_forwarded_header_no_longer_bypasses_per_ip_rate_limit_over_http(
+    no_db_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTP-level companion to the RT-5 xfail proof
+    (tests/test_redteam_otp_rate_limit_bypass.py) -- with the default 0
+    trusted hops, request_otp() is always called with the TestClient's
+    one real connecting IP, regardless of how many distinct forged
+    X-Forwarded-For chains are sent, so a real deployment's rate limiter
+    sees one consistent identity to count against rather than an
+    attacker-chosen new one per request.
+    """
+    seen_ips: list[str] = []
+
+    def _capture(conn, *, email, ip_address):  # noqa: ANN001 -- matches auth_service.request_otp's signature loosely for this fake
+        seen_ips.append(ip_address)
+
+    monkeypatch.setattr(auth_service, "request_otp", _capture)
+
+    forged_chains = [
+        "9.9.9.9",
+        "8.8.8.8, 7.7.7.7",
+        "6.6.6.6, 5.5.5.5, 4.4.4.4",
+    ]
+    for i, chain in enumerate(forged_chains):
+        resp = no_db_client.post(
+            "/auth/otp/request",
+            json={"email": f"person{i}@grameenphone.com"},
+            headers={"X-Forwarded-For": chain},
+        )
+        assert resp.status_code == 202
+
+    assert len(set(seen_ips)) == 1, f"expected every request to resolve to the same real peer IP, got {seen_ips}"
+    assert seen_ips[0] not in {"9.9.9.9", "8.8.8.8", "7.7.7.7", "6.6.6.6", "5.5.5.5", "4.4.4.4"}
+
+
 # ── Tier 2: real end-to-end flow against a migrated schema ───────────────
 
 pg_gated = pytest.mark.skipif(not pg_available(), reason="no reachable Postgres (set TEST_DATABASE_URL)")

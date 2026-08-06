@@ -1,0 +1,57 @@
+-- 0009_seed_admin.sql
+--
+-- Bootstrap admin seed -- owner-ruled (see AUTH-OTP task correspondence):
+-- nt.sartiz@grameenphone.com gets role='admin', seeded directly in the
+-- database rather than via an env var or a "first login wins" race.
+-- Everyone else continues to self-provision as 'analyst' on first
+-- successful OTP verify (app/services/auth.py::_get_or_create_user) --
+-- this migration changes nothing about that path for any other address.
+--
+-- Why a migration and not app code: 0005_auth.sql's `users` table has
+-- no concept of "invited" or "pre-approved" accounts -- role comes from
+-- the row, and the row does not exist until first successful login.
+-- That is a real chicken-and-egg problem for the very first admin (no
+-- admin-only "promote a user" endpoint can be used before an admin
+-- exists to call it). A migration is the correct place to break that
+-- cycle: it runs once, deterministically, as part of deploying this
+-- schema, before any request handler runs.
+--
+-- Idempotency / "must not clobber" -- the actual guarantee and its limit:
+-- app.db.migrate's runner (see that module's docstring) applies every
+-- migration file EXACTLY ONCE per environment, ever, and refuses to
+-- silently re-run or skip a file whose on-disk content has since
+-- changed -- so in the normal case "idempotent" is automatically true
+-- by construction, not something this file has to engineer for.
+-- `ON CONFLICT (email) DO NOTHING` below is the defensive layer on top
+-- of that guarantee, for the case this exact INSERT is ever re-run
+-- outside the migration runner (e.g. copied into a manual psql
+-- session): if a `users` row for this address already exists in ANY
+-- state -- still the self-provisioned 'analyst' default, already
+-- promoted to 'admin' by this same migration on an earlier run, or
+-- deliberately changed to something else afterward by whoever ends up
+-- administering the roles table -- this statement leaves it completely
+-- untouched. It will never overwrite a role, a display_name, or
+-- anything else on a row that already exists.
+--
+-- The one accepted trade-off from choosing DO NOTHING over an
+-- unconditional promote-to-admin: if nt.sartiz@grameenphone.com
+-- happens to complete an OTP login (self-provisioning as 'analyst')
+-- in the narrow window before this migration is deployed, this seed
+-- will not retroactively promote that row -- DO NOTHING means exactly
+-- that, on purpose, because the alternative (an UPDATE that forces
+-- role='admin' every time this file's logic runs) cannot tell "still
+-- the untouched default" apart from "an admin deliberately set this
+-- account back to analyst" and would silently override the latter,
+-- which is the specific clobbering behavior this migration was asked
+-- to avoid. That edge case is a one-line manual
+-- `UPDATE users SET role = 'admin' WHERE email = '...'` if it is ever
+-- actually hit, not a data-loss scenario.
+--
+-- `display_name` is intentionally left at its column default (''):
+-- app/api/routers/me.py's GET /me already falls back to the local part
+-- of the email when display_name is blank, so there is nothing to
+-- invent a value for here.
+
+INSERT INTO users (email, role)
+VALUES ('nt.sartiz@grameenphone.com', 'admin')
+ON CONFLICT (email) DO NOTHING;

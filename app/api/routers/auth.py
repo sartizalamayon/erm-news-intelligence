@@ -23,6 +23,8 @@ parameters, rate limits, enumeration handling, Resend quota handling).
 
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from app.api.deps import AuthenticatedUser, require_admin
@@ -48,16 +50,64 @@ logger = get_logger(__name__)
 _OTP_SENT_MESSAGE = "If that address is eligible, a verification code has been sent."
 
 
+def _trusted_proxy_hops() -> int:
+    """Number of reverse-proxy hops, between the real client and this
+    process, that are trusted to have each appended their own observed
+    peer address onto X-Forwarded-For (RFC 7239's "rightmost trusted
+    hop" model: each hop appends exactly one entry as it forwards, so
+    only entries a KNOWN hop actually added can be relied on).
+
+    Read directly from the environment (`TRUSTED_PROXY_HOPS`) rather
+    than `app.config.Settings`: this package does not own
+    `app/config.py` (see app/services/email.py's docstring for the
+    identical constraint on the Resend API key), and this value
+    genuinely needs to be operator-set per deployment topology --
+    Render alone is 1 hop; an additional CDN/WAF in front would be 2+
+    -- without a code change.
+
+    Defaults to 0: "trust nothing", per RT-5's remediation ("default to
+    the safest interpretation... prefer the direct socket peer over a
+    spoofable header"). At 0, X-Forwarded-For is never consulted at
+    all, regardless of what it contains -- the previous behavior
+    (trusting the LEFTMOST entry unconditionally) is exactly what let
+    RT-5 spoof a fresh per-IP-rate-limit-evading value on every
+    request, since the leftmost entry is always the position a client
+    fully controls when a proxy appends rather than replaces.
+    """
+    raw = os.environ.get("TRUSTED_PROXY_HOPS", "0").strip()
+    try:
+        hops = int(raw)
+    except ValueError:
+        return 0
+    return hops if hops > 0 else 0
+
+
 def _client_ip(request: Request) -> str:
-    # Render (ADR §1's API host) terminates TLS and sets X-Forwarded-For
-    # itself for traffic that reaches this process at all, so the first
-    # hop is trustworthy in that deployment; falls back to the direct
-    # peer address (e.g. the in-process TestClient used by this
-    # package's own tests, where request.client is set but there is no
-    # proxy in front of it at all).
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    """Resolves the address used for per-IP OTP rate limiting (DoD #4;
+    RT-5, docs/red-team-findings.md).
+
+    With `_trusted_proxy_hops()` hops configured (> 0), the trustworthy
+    value is the entry `hops` positions from the RIGHT of
+    X-Forwarded-For -- the one appended by the trusted hop closest to
+    the real client, never the leftmost entry (which is exactly the
+    position an attacker fully controls whenever a proxy appends its
+    own hop instead of replacing the header, which is standard
+    behavior for nginx/Render/most L7 proxies). With the default of 0
+    trusted hops, X-Forwarded-For is not consulted at all -- the direct
+    socket peer (`request.client.host`) is always used, which is
+    always correct for a single-hop deployment and fails safe for
+    anything more complex (under-attributing distinct clients behind
+    an unconfigured proxy to one IP is a usability cost, not a security
+    hole; over-trusting a spoofable header, RT-5's actual bug, is the
+    hole).
+    """
+    hops = _trusted_proxy_hops()
+    if hops > 0:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            entries = [entry.strip() for entry in forwarded.split(",") if entry.strip()]
+            if len(entries) >= hops:
+                return entries[-hops]
     return request.client.host if request.client else ""
 
 

@@ -172,6 +172,51 @@ def normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
+# SQL expression computing the same canonical form as _rate_limit_email_key()
+# below, applied to the `email` COLUMN so stored rows (which keep the raw,
+# as-submitted address -- see that function's docstring for why) can still be
+# compared against an already-canonicalized incoming value. A fixed literal,
+# never interpolated with request-supplied input, so building it via an
+# f-string elsewhere is not a SQL-injection concern.
+_EMAIL_RATE_LIMIT_CANONICAL_SQL = (
+    "regexp_replace(split_part(email, '@', 1), '\\+.*$', '') || '@' || split_part(email, '@', 2)"
+)
+
+
+def _rate_limit_email_key(email: str) -> str:
+    """Canonical form used ONLY for OTP rate-limit counting (RT-4,
+    docs/red-team-findings.md) and nowhere else -- never for what is
+    stored in `otp_codes.email` / `users.email` or the address Resend
+    is actually told to deliver to, both of which must stay exactly
+    what the caller submitted (the OTP has to be emailed to the real
+    address the user typed, tag and all).
+
+    Folds a `+tag` local-part suffix: `person@x.com`,
+    `person+1@x.com`, `person+anything@x.com` all become the same key.
+    This is Gmail-style plus-addressing, also standardized as RFC 5233
+    "Sieve" subaddressing and widely deployed on corporate mail via
+    Postfix's `recipient_delimiter` -- common enough that a rate
+    limiter must not assume it away, which is exactly how RT-4 defeated
+    OTP_RATE_LIMIT_PER_EMAIL (unlimited codes to one real mailbox by
+    incrementing the tag).
+
+    Deliberately does NOT fold dots in the local part. Gmail treats
+    `jane.doe@gmail.com` and `janedoe@gmail.com` as the same mailbox,
+    but that is a Gmail-specific quirk, not part of the SMTP standard
+    -- folding dots unconditionally for an arbitrary corporate domain
+    like grameenphone.com (which may or may not run on Google
+    Workspace) risks the opposite failure, wrongly conflating two
+    genuinely different mailboxes into one rate-limit bucket. Case and
+    surrounding whitespace are already folded by normalize_email().
+    """
+    email = normalize_email(email)
+    if "@" not in email:
+        return email
+    local, domain = email.split("@", 1)
+    local = local.split("+", 1)[0]
+    return f"{local}@{domain}"
+
+
 def _is_syntactically_valid(email: str) -> bool:
     return bool(_EMAIL_RE.match(email))
 
@@ -237,9 +282,18 @@ def _hash_session_token(token: str) -> str:
 
 
 def _enforce_rate_limits(conn: DictConnection, *, email: str, ip_address: str) -> None:
+    # RT-4 fix: count against the CANONICAL identity (plus-tag folded), on
+    # both sides of the comparison -- the incoming email (Python-side) and
+    # every stored row's `email` column (SQL-side, via the same fold
+    # expressed as SQL). `otp_codes.email` itself is left untouched --
+    # still the raw, as-submitted address -- so this only changes what
+    # counts as "the same address" for rate-limiting, never what gets
+    # stored or emailed.
+    canonical_email = _rate_limit_email_key(email)
     email_row = conn.execute(
-        "SELECT count(*) AS n FROM otp_codes WHERE email = %s AND created_at > now() - (%s || ' minutes')::interval",
-        (email, OTP_RATE_LIMIT_EMAIL_WINDOW_MINUTES),
+        f"SELECT count(*) AS n FROM otp_codes WHERE {_EMAIL_RATE_LIMIT_CANONICAL_SQL} = %s "
+        "AND created_at > now() - (%s || ' minutes')::interval",
+        (canonical_email, OTP_RATE_LIMIT_EMAIL_WINDOW_MINUTES),
     ).fetchone()
     if email_row is not None and email_row["n"] >= OTP_RATE_LIMIT_PER_EMAIL:
         raise OtpRateLimited("Too many codes requested for this address. Try again later.")

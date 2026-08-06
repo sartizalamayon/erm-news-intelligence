@@ -167,14 +167,24 @@ def test_domain_allowlist_is_read_from_settings_table_not_hardcoded(monkeypatch:
 
 def test_request_otp_never_queries_the_users_table(monkeypatch: pytest.MonkeyPatch) -> None:
     with migrated_schema() as conn:
+        # Compare before/after rather than asserting the table starts
+        # empty: migrations/0009_seed_admin.sql seeds one bootstrap-admin
+        # row on every freshly migrated schema, so "empty" is no longer a
+        # safe assumption here -- what must hold is that request_otp()
+        # itself never adds (or otherwise touches) a row.
+        before = conn.execute("SELECT count(*) AS n FROM users").fetchone()["n"]
+
         _fake_send_ok(monkeypatch)
         auth_service.request_otp(conn, email=ALLOWED_EMAIL, ip_address=TEST_IP)
 
-        # If request_otp() had looked up (or created) a users row, this
-        # would be nonzero. It must stay empty: an OTP request must not
-        # touch account-existence state at all.
-        count = conn.execute("SELECT count(*) AS n FROM users").fetchone()["n"]
-        assert count == 0
+        after = conn.execute("SELECT count(*) AS n FROM users").fetchone()["n"]
+        assert after == before
+
+        # And specifically: no row was created for the address being
+        # requested (the actual account-existence-touching behavior this
+        # test guards against).
+        row = conn.execute("SELECT 1 FROM users WHERE email = %s", (ALLOWED_EMAIL,)).fetchone()
+        assert row is None
 
 
 def test_request_otp_behaves_identically_for_existing_and_nonexisting_accounts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -242,6 +252,76 @@ def test_request_otp_rate_limit_window_expired_rows_do_not_count(monkeypatch: py
         fake = _fake_send_ok(monkeypatch)
         auth_service.request_otp(conn, email=ALLOWED_EMAIL, ip_address="203.0.113.88")
         fake.assert_called_once()
+
+
+# ── RT-4 fix: per-email rate limit folds plus-addressing, case, and
+# whitespace variants of the same mailbox (docs/red-team-findings.md) ────
+
+
+def test_rate_limit_folds_plus_addressing() -> None:
+    assert auth_service._rate_limit_email_key("person@grameenphone.com") == "person@grameenphone.com"
+    assert auth_service._rate_limit_email_key("person+1@grameenphone.com") == "person@grameenphone.com"
+    assert auth_service._rate_limit_email_key("person+anything-at-all@grameenphone.com") == "person@grameenphone.com"
+
+
+def test_rate_limit_folds_case_and_whitespace_variants() -> None:
+    assert auth_service._rate_limit_email_key("Person+1@GrameenPhone.com") == "person@grameenphone.com"
+    assert auth_service._rate_limit_email_key("  person+2@grameenphone.com  ") == "person@grameenphone.com"
+
+
+def test_rate_limit_does_not_fold_dots() -> None:
+    """Deliberate: dot-folding is a Gmail-specific quirk, not an SMTP
+    standard, and grameenphone.com's actual mail backend is unknown --
+    folding dots here would risk merging two genuinely different
+    mailboxes into one rate-limit bucket. See _rate_limit_email_key()'s
+    docstring.
+    """
+    assert auth_service._rate_limit_email_key("jane.doe@grameenphone.com") != auth_service._rate_limit_email_key(
+        "janedoe@grameenphone.com"
+    )
+
+
+def test_plus_addressed_variants_share_the_per_email_rate_limit_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fixed behavior corresponding to
+    tests/test_redteam_otp_rate_limit_bypass.py::test_plus_addressing_bypasses_per_email_rate_limit
+    (RT-4), expressed as a normal (non-xfail) assertion: exactly
+    OTP_RATE_LIMIT_PER_EMAIL requests succeed across ANY mix of
+    plus-tag/case/whitespace variants of one mailbox, and the very next
+    one -- regardless of which variant it uses -- is blocked.
+    """
+    with migrated_schema() as conn:
+        fake = _fake_send_ok(monkeypatch)
+        variants = [
+            "target@grameenphone.com",
+            "Target+work@GrameenPhone.com",
+            " target+2@grameenphone.com ",
+        ]
+        assert len(variants) == auth_service.OTP_RATE_LIMIT_PER_EMAIL
+        for variant in variants:
+            auth_service.request_otp(conn, email=variant, ip_address="203.0.113.111")
+        assert fake.call_count == auth_service.OTP_RATE_LIMIT_PER_EMAIL
+
+        with pytest.raises(auth_service.OtpRateLimited):
+            auth_service.request_otp(conn, email="target+one-more@grameenphone.com", ip_address="203.0.113.111")
+
+
+def test_rate_limit_canonicalization_does_not_corrupt_what_is_stored_or_sent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of RT-4's remediation instruction: canonicalize
+    for *counting* only. What lands in otp_codes.email, and the address
+    send_otp_email() is actually told to deliver to, must remain
+    exactly what was submitted -- a tagged address must still receive
+    its own OTP at its own real inbox, not a silently rewritten one.
+    """
+    with migrated_schema() as conn:
+        fake = _fake_send_ok(monkeypatch)
+        submitted = "person+work@grameenphone.com"
+        auth_service.request_otp(conn, email=submitted, ip_address="203.0.113.112")
+
+        assert fake.call_args.kwargs["to_email"] == submitted
+
+        row = conn.execute("SELECT email FROM otp_codes WHERE requested_ip = %s", ("203.0.113.112",)).fetchone()
+        assert row is not None
+        assert row["email"] == submitted  # NOT canonicalized in storage
 
 
 # ── Resend quota exhaustion (DoD #5) ──────────────────────────────────────
