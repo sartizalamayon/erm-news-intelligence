@@ -202,3 +202,52 @@ class TestDailyStarNodes:
         session = FakeSession().add("https://star.example", FakeResponse(status_code=200, text="<html>empty</html>"))
         with pytest.raises(SourceFetchError):
             _daily_star.fetch_daily_star_nodes(session, "https://star.example", source="daily_star")
+
+
+class TestBengaliDateParsing:
+    """Somoy Journal / Daily ICT News — no JSON-LD, date is Bengali-digit
+    text with a Bengali month name, no time component (always noon
+    Dhaka).
+    """
+
+    def test_parses_bengali_digits_and_month_name(self):
+        html = '<div class="mb-3">প্রকাশ: ১৮ জুন ২০২৬</div>'
+        dt = _id_enum._parse_bengali_date(html)
+        assert dt is not None
+        assert (dt.year, dt.month, dt.day) == (2026, 6, 18)
+        assert (dt.hour, dt.minute) == (12, 0)
+
+    def test_returns_none_when_no_bengali_date_present(self):
+        assert _id_enum._parse_bengali_date("<div>no date here</div>") is None
+
+    def test_end_to_end_via_fetch_id_enum(self):
+        from datetime import datetime
+
+        from app.sources._util import DHAKA
+
+        cfg = _id_enum.IdEnumConfig(
+            site_url="https://somoy.example",
+            article_pattern="/news-post/{id}/-",
+            id_regex=r"/news-post/(\d+)",
+            date_source="bengali_date",
+            not_article_check="none",
+            workers=2,
+            batch_size=5,
+        )
+        session = FakeSession()
+        session.add(cfg.site_url, FakeResponse(status_code=200, text='<a href="/news-post/500/-">x</a>'))
+        today = datetime.now(DHAKA)
+        bn_digits = "০১২৩৪৫৬৭৮৯"
+        bn_day = "".join(bn_digits[int(c)] for c in str(today.day).zfill(2))
+        bn_year = "".join(bn_digits[int(c)] for c in str(today.year))
+        bn_months = [
+            "জানুয়ারি", "ফেব্রুয়ারি", "মার্চ", "এপ্রিল", "মে", "জুন",
+            "জুলাই", "আগস্ট", "সেপ্টেম্বর", "অক্টোবর", "নভেম্বর", "ডিসেম্বর",
+        ]
+        bn_month = bn_months[today.month - 1]
+        article_url = f"{cfg.site_url}/news-post/500/actual-slug"
+        html = f'<h1>Headline</h1><div class="mb-3">{bn_day} {bn_month} {bn_year}</div>'
+        session.add(f"{cfg.site_url}/news-post/500/-", FakeResponse(status_code=200, text=html, url=article_url))
+        items = _id_enum.fetch_id_enum(session, cfg, source="somoy_journal")
+        assert len(items) == 1
+        assert items[0].url == article_url

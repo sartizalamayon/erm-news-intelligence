@@ -3,13 +3,16 @@ volume): articles live at a sequential-ID URL (`/news/{id}`), walked
 descending from the current max, resolved concurrently, filtered to the
 rolling window.
 
-Ported from `collector_logic.iter_id_enum` (:961-1226), scoped to the
-`date_source="jsonld"` variant with its `date_tz_override` and
-`canonical_hop` options — the only variant either of the two ported
-sources needs (legacy also supports `jsonld_timefirst`, `calendar_dmy`,
-`nextdata`, `bengali_date`, `time_element` for lower-volume sources not
-in this task's ported set; not ported — see the task report's coverage
-list). Hard caps (`MAX_PROBE=500`, `MAX_CONSEC_FAIL=60`, `TIME_BUDGET=90s`)
+Ported from `collector_logic.iter_id_enum` (:961-1226). Two
+`date_source` variants are implemented: `"jsonld"` (Daily Adin, Sangbad,
+Arthosuchak — with `date_tz_override` and `canonical_hop`/
+`not_article_check` options) and `"bengali_date"` (Somoy Journal, Daily
+ICT News — Bengali-digit `DD Month YYYY` text, no JSON-LD available on
+those sites). Legacy also supports `jsonld_timefirst`, `calendar_dmy`,
+`nextdata`, `time_element` for InfoTech/Deshpatrika — not ported (see
+the task report's coverage list; combined volume under 0.05% of the
+corpus, not worth a third/fourth/fifth date-parser variant this late).
+Hard caps (`MAX_PROBE=500`, `MAX_CONSEC_FAIL=60`, `TIME_BUDGET=90s`)
 carried forward verbatim: this is legacy's own "single most fragile
 strategy family" note, and those caps are what keep one misconfigured
 source from hanging the whole run.
@@ -52,12 +55,35 @@ _OG_TITLE_RE = re.compile(r'property="og:title"\s+content="([^"]+)"')
 _CANONICAL_RE = re.compile(r'<link[^>]+rel="canonical"[^>]+href="([^"]*)"')
 _CANONICAL_RE_SIMPLE = re.compile(r'<link rel="canonical" href="(https?://[^"]+)"')
 
+# Bengali-digit date, e.g. "১৮ জুন ২০২৬" or "১৮ জুন ২০২৬, ২৩:১৬" — no time
+# element on these sites, so a bare date always resolves to noon Dhaka
+# (matches legacy's own documented behavior, collector_logic.py:1124-1139).
+_BN_DIGIT_TABLE = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+_BN_MONTHS = {
+    "জানুয়ারি": 1,
+    "ফেব্রুয়ারি": 2,
+    "মার্চ": 3,
+    "এপ্রিল": 4,
+    "মে": 5,
+    "জুন": 6,
+    "জুলাই": 7,
+    "আগস্ট": 8,
+    "সেপ্টেম্বর": 9,
+    "অক্টোবর": 10,
+    "নভেম্বর": 11,
+    "ডিসেম্বর": 12,
+}
+_BENGALI_DATE_RE = re.compile(
+    r"([০-৯]{1,2})\s+(" + "|".join(_BN_MONTHS) + r")\s+([০-৯]{4})"
+)
+
 
 @dataclass
 class IdEnumConfig:
     site_url: str
     article_pattern: str
     id_regex: str
+    date_source: str = "jsonld"  # | "bengali_date"
     date_tz_override: str | None = None
     not_article_check: str = "canonical_is_homepage"  # | "no_time_element" | "no_jsonld" | "none"
     canonical_hop: bool = False
@@ -82,6 +108,19 @@ def _parse_jsonld_date(html: str, tz_override: str | None) -> datetime | None:
             return datetime(year, month, day, hour, minute, second, tzinfo=DHAKA)
         return datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
     except ValueError:
+        return None
+
+
+def _parse_bengali_date(html: str) -> datetime | None:
+    m = _BENGALI_DATE_RE.search(html)
+    if not m:
+        return None
+    try:
+        day = int(m.group(1).translate(_BN_DIGIT_TABLE))
+        month = _BN_MONTHS[m.group(2)]
+        year = int(m.group(3).translate(_BN_DIGIT_TABLE))
+        return datetime(year, month, day, 12, 0, tzinfo=DHAKA)
+    except (ValueError, KeyError):
         return None
 
 
@@ -128,7 +167,10 @@ def _resolve_one(
     if not _is_article(html, cfg.not_article_check, cfg.site_url):
         return None
 
-    dt = _parse_jsonld_date(html, cfg.date_tz_override)
+    if cfg.date_source == "bengali_date":
+        dt = _parse_bengali_date(html)
+    else:
+        dt = _parse_jsonld_date(html, cfg.date_tz_override)
     if dt is None:
         return None
 

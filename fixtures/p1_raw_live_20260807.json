@@ -1,0 +1,912 @@
+{
+  "_meta": {
+    "tier": "p1_raw",
+    "generated_by": "P1-INGEST live-collection script (app.services.collector.run_collection)",
+    "source": "real internet collection via a small fast/reliable source subset (prothom_alo, bbc_news, daily_inqilab, cnn, dhaka_post, dhaka_mail, naya_diganta, kalbela, new_age, bd_pratidin), written to a throwaway Postgres schema, never data/news.db",
+    "row_count": 100,
+    "sample_method": "ORDER BY random() LIMIT 100 over this run's real inserted rows",
+    "note": "Real output of this task's own rebuilt fetch layer (app.services.collector.run_collection), distinct from fixtures/p1_raw_20260806.json (ARCH-TEST's legacy-DB-derived bootstrap sample, produced ahead of this task and left untouched) — see the P1-FETCH task report."
+  },
+  "rows": [
+    {
+      "id": 1344,
+      "url": "https://dhakamail.com/law-courts/321012",
+      "url_norm": "https://dhakamail.com/law-courts/321012",
+      "source": "Dhaka Mail",
+      "title": "মহেশখালীর সংরক্ষিত বনে সড়ক নির্মাণে রুলসহ হাইকোর্টের নিষেধাজ্ঞা",
+      "published": "2026-08-06T21:58:46.237341+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 995,
+      "url": "https://www.dhakapost.com/national/472928",
+      "url_norm": "https://dhakapost.com/national/472928",
+      "source": "Dhaka Post",
+      "title": "ফুটপাত নষ্ট করায় ‘নিউ রান্না ঘর’ রেস্টুরেন্টকে আড়াই লাখ টাকা জরিমানা",
+      "published": "2026-08-06T21:27:07+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 168,
+      "url": "https://www.prothomalo.com/bangladesh/8wyc1i5zte",
+      "url_norm": "https://prothomalo.com/bangladesh/8wyc1i5zte",
+      "source": "Prothom Alo",
+      "title": "এক নাগরিক, এক কার্ডের লক্ষ্যেই এগোচ্ছে সরকার: প্রধানমন্ত্রীর অর্থ উপদেষ্টা",
+      "published": "2026-08-06T13:55:59+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 263,
+      "url": "https://www.prothomalo.com/photo/bangladesh/zg9tap08r2",
+      "url_norm": "https://prothomalo.com/photo/bangladesh/zg9tap08r2",
+      "source": "Prothom Alo",
+      "title": "অ্যালুমিনিয়ামের তৈজসপত্র তৈরি হয় যেভাবে",
+      "published": "2026-08-06T06:00:00+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 469,
+      "url": "https://www.haal.fashion/celeb/style/aoat6fpxh3",
+      "url_norm": "https://haal.fashion/celeb/style/aoat6fpxh3",
+      "source": "Prothom Alo",
+      "title": "রোমশ আবেদনে ঋতাভরীর 'ওয়াইল্ড' লুক",
+      "published": "2026-08-05T10:07:24+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 811,
+      "url": "https://www.bbc.com/news/articles/ce85qjyep0po",
+      "url_norm": "https://bbc.com/news/articles/ce85qjyep0po",
+      "source": "BBC News",
+      "title": "Note on bottle a 'remarkable snapshot' of 1950s life in Derby",
+      "published": "2026-08-06T11:10:56+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1156,
+      "url": "https://www.dhakapost.com/national/472768",
+      "url_norm": "https://dhakapost.com/national/472768",
+      "source": "Dhaka Post",
+      "title": "সারাদেশে ঝরবে বৃষ্টি, কোথাও কোথাও অতি ভারী বৃষ্টির আভাস",
+      "published": "2026-08-06T11:43:59+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1159,
+      "url": "https://www.dhakapost.com/probash/472764",
+      "url_norm": "https://dhakapost.com/probash/472764",
+      "source": "Dhaka Post",
+      "title": "ইতালিতে যথাযোগ্য মর্যাদায় ‘জুলাই গণ–অভ্যুত্থান দিবস’ পালন",
+      "published": "2026-08-06T11:38:46+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1500,
+      "url": "https://dhakamail.com/country/320834",
+      "url_norm": "https://dhakamail.com/country/320834",
+      "source": "Dhaka Mail",
+      "title": "কলেজছাত্রীকে চাকু দেখিয়ে ধর্ষণ, সেই ইমাম কারাগারে",
+      "published": "2026-08-06T07:09:27.670672+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1328,
+      "url": "https://dhakamail.com/country/321028",
+      "url_norm": "https://dhakamail.com/country/321028",
+      "source": "Dhaka Mail",
+      "title": "যশোরে নারী মাদক কারবারির ১০ বছরের কারাদণ্ড",
+      "published": "2026-08-06T23:01:18.034788+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1080,
+      "url": "https://www.dhakapost.com/economy/472848",
+      "url_norm": "https://dhakapost.com/economy/472848",
+      "source": "Dhaka Post",
+      "title": "১ কোটি ৩০ লাখ টিআইএনধারীর ৬২ শতাংশই রিটার্ন দেয়নি",
+      "published": "2026-08-06T16:08:54+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 2012,
+      "url": "https://news.google.com/rss/articles/CBMiaEFVX3lxTE4zSEtTbG9lZndYTHpxTkREbXJXNzN0RElwanY1SDRhWDhmc3Y1N0FRMjRTQUhTbUVxa0N3YVZQb0ZTRkF4dDFqbG5rdXAzeGNYdF9WenE5b2p3M1JNQnFSNEdqRG50MWxa?oc=5",
+      "url_norm": "https://news.google.com/rss/articles/CBMiaEFVX3lxTE4zSEtTbG9lZndYTHpxTkREbXJXNzN0RElwanY1SDRhWDhmc3Y1N0FRMjRTQUhTbUVxa0N3YVZQb0ZTRkF4dDFqbG5rdXAzeGNYdF9WenE5b2p3M1JNQnFSNEdqRG50MWxa?oc=5",
+      "source": "BD Pratidin",
+      "title": "Argentine ambassador asked to leave Brazil: Buenos Aires - en.bd-pratidin.com",
+      "published": "2026-08-05T15:19:52+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 2565,
+      "url": "https://dailyinqilab.com/bangladesh/news/924984",
+      "url_norm": "https://dailyinqilab.com/bangladesh/news/924984",
+      "source": "Daily Inqilab",
+      "title": "ছাগলনাইয়ায় বৈদ্যুতিক শর্ট-সার্কিটে ইলেকট্রিক মিস্ত্রি আরাফাতের মৃত্যু",
+      "published": "2026-08-06T00:04:38+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 905,
+      "url": "https://www.bbc.com/news/articles/c8en9d2ke06o",
+      "url_norm": "https://bbc.com/news/articles/c8en9d2ke06o",
+      "source": "BBC News",
+      "title": "Bristol University professor wants job back after appeal win",
+      "published": "2026-08-05T21:26:51+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 639,
+      "url": "https://www.bbc.com/news/articles/cpw91wkv2rpo",
+      "url_norm": "https://bbc.com/news/articles/cpw91wkv2rpo",
+      "source": "BBC News",
+      "title": "In pictures: Belfast hosts Fleadh Cheoil na hÉireann for the first time",
+      "published": "2026-08-06T22:00:19+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 349,
+      "url": "https://www.prothomalo.com/bangladesh/district/aqf0pr50k3",
+      "url_norm": "https://prothomalo.com/bangladesh/district/aqf0pr50k3",
+      "source": "Prothom Alo",
+      "title": "মানুষ আমাকে এমপি বানিয়েছে, বিএনপিকে এ কঠিন সত্য মানতে হবে: রুমিন ফারহানা",
+      "published": "2026-08-05T18:34:32+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1870,
+      "url": "https://dailynayadiganta.com/printed-edition/1GRnD3pwxcsU/",
+      "url_norm": "https://dailynayadiganta.com/printed-edition/1GRnD3pwxcsU",
+      "source": "Naya Diganta",
+      "title": "",
+      "published": "2026-08-06T00:12:35+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 900,
+      "url": "https://www.bbc.com/news/articles/c39ep1y0gz3o",
+      "url_norm": "https://bbc.com/news/articles/c39ep1y0gz3o",
+      "source": "BBC News",
+      "title": "Passenger frustration with ongoing 'glitches' in new ScotRail app",
+      "published": "2026-08-05T21:36:14+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1554,
+      "url": "https://dailynayadiganta.com/printed-edition/1eGuI0C7VNMT/",
+      "url_norm": "https://dailynayadiganta.com/printed-edition/1eGuI0C7VNMT",
+      "source": "Naya Diganta",
+      "title": "",
+      "published": "2026-08-07T00:04:56+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 982,
+      "url": "https://www.dhakapost.com/national/472942",
+      "url_norm": "https://dhakapost.com/national/472942",
+      "source": "Dhaka Post",
+      "title": "রিয়ার অ্যাডমিরাল মাহবুব আলী খানের ৪২তম শাহাদৎবার্ষিকী অনুষ্ঠিত",
+      "published": "2026-08-06T22:00:05+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 89,
+      "url": "https://www.prothomalo.com/photo/bangladesh/mbro7b7dwx",
+      "url_norm": "https://prothomalo.com/photo/bangladesh/mbro7b7dwx",
+      "source": "Prothom Alo",
+      "title": "বাজারে বর্ষার বাহারি ফলের সমাহার",
+      "published": "2026-08-06T18:52:38+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1353,
+      "url": "https://dhakamail.com/country/321004",
+      "url_norm": "https://dhakamail.com/country/321004",
+      "source": "Dhaka Mail",
+      "title": "ফেনীতে তীব্র গ্যাস সংকট, সিএনজি চালকদের ভোগান্তি চরমে",
+      "published": "2026-08-06T21:22:34.727690+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 2038,
+      "url": "https://news.google.com/rss/articles/CBMiYkFVX3lxTE5EUkNCUlJieWhReHQ2ZXJiOHlSMU4tNWVqcl9GNEtTdE1UN05Xbll1M1Zsa0NDWDJOemJyTTMzUWpsaXFIRGRPaWRURXVvSUZmV0xBaEVFOUllc2ZpMkNfN0xR?oc=5",
+      "url_norm": "https://news.google.com/rss/articles/CBMiYkFVX3lxTE5EUkNCUlJieWhReHQ2ZXJiOHlSMU4tNWVqcl9GNEtTdE1UN05Xbll1M1Zsa0NDWDJOemJyTTMzUWpsaXFIRGRPaWRURXVvSUZmV0xBaEVFOUllc2ZpMkNfN0xR?oc=5",
+      "source": "BD Pratidin",
+      "title": "Justice for anti-fascist movement killings to be transparent, impartial: PM - en.bd-pratidin.com",
+      "published": "2026-08-05T16:09:52+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 398,
+      "url": "https://www.prothomalo.com/bangladesh/wtv3tt1yqu",
+      "url_norm": "https://prothomalo.com/bangladesh/wtv3tt1yqu",
+      "source": "Prothom Alo",
+      "title": "জগন্নাথ বিশ্ববিদ্যালয় ক্যাম্পাসে কড়া নিরাপত্তা, হামলার প্রতিবাদে বিকেলে ছাত্রশক্তির বিক্ষোভ",
+      "published": "2026-08-05T15:22:46+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1648,
+      "url": "https://dailynayadiganta.com/bangladesh/diplomacy/crsz6PAwAZdU/",
+      "url_norm": "https://dailynayadiganta.com/bangladesh/diplomacy/crsz6PAwAZdU",
+      "source": "Naya Diganta",
+      "title": "",
+      "published": "2026-08-06T18:19:29+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1992,
+      "url": "https://news.google.com/rss/articles/CBMiaEFVX3lxTFBRUzJCaTJORG9oekpzNG5KOWxmbGpMVGNnZ3h6dVNxQWdkaFVzX1ZWLV9kMVNXdXlCRnlEVml1VG1wTE9FWU9vemUxY3JMckI5eklFd0Rfc1ViRTZBZkZCdTNXUWQ4bTIx?oc=5",
+      "url_norm": "https://news.google.com/rss/articles/CBMiaEFVX3lxTFBRUzJCaTJORG9oekpzNG5KOWxmbGpMVGNnZ3h6dVNxQWdkaFVzX1ZWLV9kMVNXdXlCRnlEVml1VG1wTE9FWU9vemUxY3JMckI5eklFd0Rfc1ViRTZBZkZCdTNXUWQ4bTIx?oc=5",
+      "source": "BD Pratidin",
+      "title": "Brazil seeks Argentine ambassador's recall amid diplomatic dispute - en.bd-pratidin.com",
+      "published": "2026-08-05T11:09:48+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1081,
+      "url": "https://www.dhakapost.com/country/472846",
+      "url_norm": "https://dhakapost.com/country/472846",
+      "source": "Dhaka Post",
+      "title": "রংপুরে চলন্ত ট্রেনে উঠতে গিয়ে ওয়েম্যানের মৃত্যু",
+      "published": "2026-08-06T16:07:32+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 341,
+      "url": "https://www.prothomalo.com/bangladesh/district/tsd4y7ifsd",
+      "url_norm": "https://prothomalo.com/bangladesh/district/tsd4y7ifsd",
+      "source": "Prothom Alo",
+      "title": "তেহারিতে ইটের টুকরা, চুয়েটে হলের ক্যানটিনে শিক্ষার্থীদের তালা",
+      "published": "2026-08-05T19:00:56+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1682,
+      "url": "https://dailynayadiganta.com/bangladesh/emigration/0vRU7ehNErKk/",
+      "url_norm": "https://dailynayadiganta.com/bangladesh/emigration/0vRU7ehNErKk",
+      "source": "Naya Diganta",
+      "title": "",
+      "published": "2026-08-06T21:32:20+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1927,
+      "url": "https://dailynayadiganta.com/printed-edition/o3rfYAU23fQz/",
+      "url_norm": "https://dailynayadiganta.com/printed-edition/o3rfYAU23fQz",
+      "source": "Naya Diganta",
+      "title": "",
+      "published": "2026-08-06T01:01:05+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 711,
+      "url": "https://www.bbc.com/news/articles/cy0j72rwwxwo",
+      "url_norm": "https://bbc.com/news/articles/cy0j72rwwxwo",
+      "source": "BBC News",
+      "title": "Murder-accused in court after traveller site shooting near Cricklade",
+      "published": "2026-08-06T17:54:52+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 240,
+      "url": "https://www.prothomalo.com/opinion/editorial/tra4ae6xvw",
+      "url_norm": "https://prothomalo.com/opinion/editorial/tra4ae6xvw",
+      "source": "Prothom Alo",
+      "title": "আট বছরেও কেন ভবনের কাজ শেষ হয় না",
+      "published": "2026-08-06T08:58:00+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1247,
+      "url": "https://www.cnn.com/2026/08/06/weather/spokane-wildfires-washington-northwest-forecast-climate",
+      "url_norm": "https://cnn.com/2026/08/06/weather/spokane-wildfires-washington-northwest-forecast-climate",
+      "source": "CNN",
+      "title": "Challenging fire weather will return to Pacific Northwest as crews battle destructive Spokane blazes",
+      "published": "2026-08-06T14:30:29.447000+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 2099,
+      "url": "https://news.google.com/rss/articles/CBMiZEFVX3lxTE9QN1Y2bW0tRHhyZUZjU1Q3dGNSY2J2clFUR0g3YTBRMFpWNXZvQ1lKNDlPbWtRenpPY3FGTjNLMzRSbnVXQVgyQTZ5cEpNOFR2cFFJMWpzNkp6TUozUkRtc1h6bXE?oc=5",
+      "url_norm": "https://news.google.com/rss/articles/CBMiZEFVX3lxTE9QN1Y2bW0tRHhyZUZjU1Q3dGNSY2J2clFUR0g3YTBRMFpWNXZvQ1lKNDlPbWtRenpPY3FGTjNLMzRSbnVXQVgyQTZ5cEpNOFR2cFFJMWpzNkp6TUozUkRtc1h6bXE?oc=5",
+      "source": "New Age",
+      "title": "Most Popular Outspoken English Daily in Bangladesh - New Age BD",
+      "published": "2026-08-06T16:17:47+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 976,
+      "url": "https://www.dhakapost.com/sports/472947",
+      "url_norm": "https://dhakapost.com/sports/472947",
+      "source": "Dhaka Post",
+      "title": "২৫ বছর বয়সেই অবসরের ঘোষণা ইংলিশ ক্রিকেটারের",
+      "published": "2026-08-06T22:22:45+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 2274,
+      "url": "https://dailyinqilab.com/politics/news/925284",
+      "url_norm": "https://dailyinqilab.com/politics/news/925284",
+      "source": "Daily Inqilab",
+      "title": "ওলামায়ে কেরামদের নেতৃত্বে আমরা কাজ করতে প্রস্তুত: খেলাফত আন্দোলনের সভায় নাসিরুদ্দিন পাটওয়ারী",
+      "published": "2026-08-07T00:04:45+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 2392,
+      "url": "https://dailyinqilab.com/bangladesh/news/925165",
+      "url_norm": "https://dailyinqilab.com/bangladesh/news/925165",
+      "source": "Daily Inqilab",
+      "title": "লালপুরে ছিনতাই হওয়া টাকাসহ ২ ছিনতাইকারী গ্রেফতার",
+      "published": "2026-08-06T18:00:50+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 149,
+      "url": "https://www.prothomalo.com/sports/cricket/78up9wiepy",
+      "url_norm": "https://prothomalo.com/sports/cricket/78up9wiepy",
+      "source": "Prothom Alo",
+      "title": "অস্ট্রেলিয়ায় সেঞ্চুরি করে যা বললেন মিরাজ",
+      "published": "2026-08-06T15:29:07+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1359,
+      "url": "https://dhakamail.com/country/320998",
+      "url_norm": "https://dhakamail.com/country/320998",
+      "source": "Dhaka Mail",
+      "title": "শ্রীমঙ্গলে মুমূর্ষু অজগর উদ্ধার, হাসপাতালে নেওয়ার আগেই মৃত্যু",
+      "published": "2026-08-06T20:43:19.315417+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 2590,
+      "url": "https://dailyinqilab.com/bangladesh/article/924959",
+      "url_norm": "https://dailyinqilab.com/bangladesh/article/924959",
+      "source": "Daily Inqilab",
+      "title": "গণঅভ্যুত্থান দিবসে চট্টগ্রামে এনসিপির গণভোজ",
+      "published": "2026-08-06T00:04:47+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 2548,
+      "url": "https://dailyinqilab.com/national/article/925001",
+      "url_norm": "https://dailyinqilab.com/national/article/925001",
+      "source": "Daily Inqilab",
+      "title": "জুলাই জাদুঘর থেকেই আমরা আগামীর পথ খুঁজে নেবো : ড. ইউনূস",
+      "published": "2026-08-06T00:04:30+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1240,
+      "url": "https://www.cnn.com/2026/08/06/weather/video/arson-suspect-in-one-of-the-spokane-area-wildfires-to-face-a-judge-as-weather-threatens-to-worsen-fire-conditions-cnc",
+      "url_norm": "https://cnn.com/2026/08/06/weather/video/arson-suspect-in-one-of-the-spokane-area-wildfires-to-face-a-judge-as-weather-threatens-to-worsen-fire-conditions-cnc",
+      "source": "CNN",
+      "title": "Hot, dry weather ahead raises Washington wildfire risk",
+      "published": "2026-08-06T18:53:22.576000+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 2004,
+      "url": "https://news.google.com/rss/articles/CBMiVEFVX3lxTFB1dTc0b1FWTEdoYXhwcHh1UjFpWGkzN3lzS19IWnVvWjRrZTFFd1NrajR5cVMzcTZHdlRJdGVlZU85SmkycWVqNEpHX1MtbFhia01sXw?oc=5",
+      "url_norm": "https://news.google.com/rss/articles/CBMiVEFVX3lxTFB1dTc0b1FWTEdoYXhwcHh1UjFpWGkzN3lzS19IWnVvWjRrZTFFd1NrajR5cVMzcTZHdlRJdGVlZU85SmkycWVqNEpHX1MtbFhia01sXw?oc=5",
+      "source": "BD Pratidin",
+      "title": "Messi's double helps Inter Miami beat San Luis 4-2|67564|News24 TV - en.bd-pratidin.com",
+      "published": "2026-08-06T11:41:53+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 2180,
+      "url": "https://dailyinqilab.com/bangladesh/article/925378",
+      "url_norm": "https://dailyinqilab.com/bangladesh/article/925378",
+      "source": "Daily Inqilab",
+      "title": "ময়লার স্তূপে নারীর খণ্ডিত মাথা ও হাত",
+      "published": "2026-08-07T00:03:59+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 71,
+      "url": "https://www.prothomalo.com/bangladesh/district/s60m25fkrg",
+      "url_norm": "https://prothomalo.com/bangladesh/district/s60m25fkrg",
+      "source": "Prothom Alo",
+      "title": "‘আপনারা কি তখন দেখেন নাই, এই পুলিশকে আমরা পিটিয়ে পিটিয়ে রক্তাক্ত করেছিলাম’",
+      "published": "2026-08-06T19:50:20+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 282,
+      "url": "https://www.prothomalo.com/politics/yt08gnhhwe",
+      "url_norm": "https://prothomalo.com/politics/yt08gnhhwe",
+      "source": "Prothom Alo",
+      "title": "গুমের শিকার ৭০০–এর বেশি মানুষের স্বজনেরা আজও তাঁদের ফেরার প্রতীক্ষায়: আইনমন্ত্রী",
+      "published": "2026-08-05T23:35:25+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 943,
+      "url": "https://www.bbc.com/news/articles/cvg716erwwgo",
+      "url_norm": "https://bbc.com/news/articles/cvg716erwwgo",
+      "source": "BBC News",
+      "title": "Suzy Perry 'nervous but excited' for Wolves new season",
+      "published": "2026-08-05T19:00:34+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1772,
+      "url": "https://dailynayadiganta.com/bangladesh/country-news/1IvUC9DMBvH1/",
+      "url_norm": "https://dailynayadiganta.com/bangladesh/country-news/1IvUC9DMBvH1",
+      "source": "Naya Diganta",
+      "title": "",
+      "published": "2026-08-06T23:39:30+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 353,
+      "url": "https://www.prothomalo.com/business/economics/uce8xl472i",
+      "url_norm": "https://prothomalo.com/business/economics/uce8xl472i",
+      "source": "Prothom Alo",
+      "title": "চাষাবাদের চেয়ে হাঁস–মুরগিসহ গবাদিপশু পালনেই বেশি আয় করেন ক্ষুদ্র কৃষকেরা",
+      "published": "2026-08-05T18:11:52+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 284,
+      "url": "https://www.prothomalo.com/bangladesh/m85ngpu5mf",
+      "url_norm": "https://prothomalo.com/bangladesh/m85ngpu5mf",
+      "source": "Prothom Alo",
+      "title": "দিল্লিতে অনুষ্ঠানে শেখ হাসিনাকে বক্তব্যের অনুমতি দেওয়ায় ক্ষুব্ধ বাংলাদেশ",
+      "published": "2026-08-05T23:31:29+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1196,
+      "url": "https://www.dhakapost.com/campus/472724",
+      "url_norm": "https://dhakapost.com/campus/472724",
+      "source": "Dhaka Post",
+      "title": "রাষ্ট্রবিরোধী কর্মকাণ্ডে জড়িত থাকার অভিযোগ ইবির ৪৪ শিক্ষকের বিরুদ্ধে",
+      "published": "2026-08-06T03:11:16+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1445,
+      "url": "https://dhakamail.com/politics/320906",
+      "url_norm": "https://dhakamail.com/politics/320906",
+      "source": "Dhaka Mail",
+      "title": "কাউকে অসম্মান নয়, জনদাবি সরকারের হাতে তুলে দিতে চাই: জামায়াত আমির",
+      "published": "2026-08-06T14:30:21.241389+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1056,
+      "url": "https://www.dhakapost.com/sports/472870",
+      "url_norm": "https://dhakapost.com/sports/472870",
+      "source": "Dhaka Post",
+      "title": "অবশেষে রিয়াল মাদ্রিদের হচ্ছেন দিওমান্দে",
+      "published": "2026-08-06T17:50:11+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 34,
+      "url": "https://www.prothomalo.com/entertainment/song/htdze1i20s",
+      "url_norm": "https://prothomalo.com/entertainment/song/htdze1i20s",
+      "source": "Prothom Alo",
+      "title": "কনসার্টে অপ্রীতিকর ঘটনার মুখোমুখি আর্ক ব্যান্ডের হাসান",
+      "published": "2026-08-06T21:49:39+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 728,
+      "url": "https://www.bbc.com/news/articles/cm2g1rlkv9ko",
+      "url_norm": "https://bbc.com/news/articles/cm2g1rlkv9ko",
+      "source": "BBC News",
+      "title": "Legal warning after increase in seahorse disturbance",
+      "published": "2026-08-06T17:14:27+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1172,
+      "url": "https://www.dhakapost.com/jobs-career/472751",
+      "url_norm": "https://dhakapost.com/jobs-career/472751",
+      "source": "Dhaka Post",
+      "title": "নিয়োগ দেবে আকিজ ফ্লাওয়ার মিলস, আবেদন শুরু",
+      "published": "2026-08-06T10:22:15+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 68,
+      "url": "https://www.prothomalo.com/lifestyle/recipe/dxs0ym58ea",
+      "url_norm": "https://prothomalo.com/lifestyle/recipe/dxs0ym58ea",
+      "source": "Prothom Alo",
+      "title": "গ্যাস না থাকলেও রাঁধা যায় জাফরানি বাটার চিকেন রাইস বোল, দেখুন রেসিপি",
+      "published": "2026-08-06T20:04:01+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 200,
+      "url": "https://www.prothomalo.com/business/bank/8mmafusj63",
+      "url_norm": "https://prothomalo.com/business/bank/8mmafusj63",
+      "source": "Prothom Alo",
+      "title": "আজকের বিনিময় হার",
+      "published": "2026-08-06T12:09:38+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1656,
+      "url": "https://dailynayadiganta.com/bangladesh/education-campus/AT7czrdWJz4l/",
+      "url_norm": "https://dailynayadiganta.com/bangladesh/education-campus/AT7czrdWJz4l",
+      "source": "Naya Diganta",
+      "title": "",
+      "published": "2026-08-06T11:26:36+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1341,
+      "url": "https://dhakamail.com/national/321013",
+      "url_norm": "https://dhakamail.com/national/321013",
+      "source": "Dhaka Mail",
+      "title": "জুলাই জাদুঘরে প্রথম দিনেই টিকিট জালিয়াতি!",
+      "published": "2026-08-06T22:04:40.156030+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1963,
+      "url": "https://news.google.com/rss/articles/CBMiXEFVX3lxTFBIdnF6TU51ZDdFeVJ4ZFdsdUxhVHFMQ1hJbkpxbmtWRkVOQ0V3a3FfMUZSNnNILXhFNnVUcnRSYURBUlBBYlNXQXN3b2tuNVRUN0VhQkR0c0MwN3k1?oc=5",
+      "url_norm": "https://news.google.com/rss/articles/CBMiXEFVX3lxTFBIdnF6TU51ZDdFeVJ4ZFdsdUxhVHFMQ1hJbkpxbmtWRkVOQ0V3a3FfMUZSNnNILXhFNnVUcnRSYURBUlBBYlNXQXN3b2tuNVRUN0VhQkR0c0MwN3k1?oc=5",
+      "source": "BD Pratidin",
+      "title": "US Pacific Fleet Commander Koehler visits Lalbagh Fort - en.bd-pratidin.com",
+      "published": "2026-08-06T14:33:09+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1069,
+      "url": "https://www.dhakapost.com/country/472857",
+      "url_norm": "https://dhakapost.com/country/472857",
+      "source": "Dhaka Post",
+      "title": "আদালতে হঠাৎ অসুস্থ, হাসপাতালে প্রবীণ আইনজীবী রুহুল আমিনের মৃত্যু",
+      "published": "2026-08-06T16:54:05+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 582,
+      "url": "https://www.prothomalo.com/bangladesh/district/1x4qij1apl",
+      "url_norm": "https://prothomalo.com/bangladesh/district/1x4qij1apl",
+      "source": "Prothom Alo",
+      "title": "এসপির উদ্দেশে ফেসবুকে সন্ত্রাসী রায়হান, ‘দোজখ আর জাহান্নামে তফাত কী মাসুদ স্যার?’",
+      "published": "2026-08-04T20:23:54+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1015,
+      "url": "https://www.dhakapost.com/country/472904",
+      "url_norm": "https://dhakapost.com/country/472904",
+      "source": "Dhaka Post",
+      "title": "সীমিত পরিসরে রবীন্দ্রনাথের প্রয়াণ দিবস আয়োজন, সংস্কৃতিসেবীদের ক্ষোভ",
+      "published": "2026-08-06T19:48:06+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1269,
+      "url": "https://www.cnn.com/style/why-architects-are-designing-more-than-buildings-spc",
+      "url_norm": "https://cnn.com/style/why-architects-are-designing-more-than-buildings-spc",
+      "source": "CNN",
+      "title": "Why architects are designing more than buildings",
+      "published": "2026-08-06T11:59:29.510000+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 82,
+      "url": "https://www.prothomalo.com/bangladesh/2u3v2j13ev",
+      "url_norm": "https://prothomalo.com/bangladesh/2u3v2j13ev",
+      "source": "Prothom Alo",
+      "title": "প্রথম শ্রেণিতে ভর্তি লটারিতেই, প্রাথমিক ও মাধ্যমিকে অন্য শ্রেণিতে পরীক্ষায় ভর্তি",
+      "published": "2026-08-06T19:00:38+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1871,
+      "url": "https://dailynayadiganta.com/printed-edition/wYpIo9Jmgbnc/",
+      "url_norm": "https://dailynayadiganta.com/printed-edition/wYpIo9Jmgbnc",
+      "source": "Naya Diganta",
+      "title": "",
+      "published": "2026-08-06T00:12:57+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1026,
+      "url": "https://www.dhakapost.com/education/472897",
+      "url_norm": "https://dhakapost.com/education/472897",
+      "source": "Dhaka Post",
+      "title": "জাতীয় বিশ্ববিদ্যালয়ের মাস্টার্স শেষপর্বের ফল প্রকাশ, পাসের হার ৬০.৯৭%",
+      "published": "2026-08-06T19:16:37+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 2259,
+      "url": "https://dailyinqilab.com/sports/cricket/925299",
+      "url_norm": "https://dailyinqilab.com/sports/cricket/925299",
+      "source": "Daily Inqilab",
+      "title": "ম্যাকাই টেস্টেই ‘খেলবেন’ শরিফুল",
+      "published": "2026-08-07T00:04:45+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 2321,
+      "url": "https://dailyinqilab.com/international/article/925237",
+      "url_norm": "https://dailyinqilab.com/international/article/925237",
+      "source": "Daily Inqilab",
+      "title": "আব্দুল এল-সায়েদকে অভিনন্দন ও প্রশংসা মামদানির",
+      "published": "2026-08-07T00:05:34+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 795,
+      "url": "https://www.bbc.com/news/articles/c0ejdq14x9wo",
+      "url_norm": "https://bbc.com/news/articles/c0ejdq14x9wo",
+      "source": "BBC News",
+      "title": "Hereford Military History Festival doubles number of events",
+      "published": "2026-08-06T11:16:03+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1579,
+      "url": "https://dailynayadiganta.com/printed-edition/vGBS5ocAdF0L/",
+      "url_norm": "https://dailynayadiganta.com/printed-edition/vGBS5ocAdF0L",
+      "source": "Naya Diganta",
+      "title": "",
+      "published": "2026-08-07T00:05:01+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1364,
+      "url": "https://dhakamail.com/sports/320993",
+      "url_norm": "https://dhakamail.com/sports/320993",
+      "source": "Dhaka Mail",
+      "title": "রেকর্ড গড়ে তুরস্কে পাড়ি জমালেন মিসরের সালাহ",
+      "published": "2026-08-06T20:24:43.771725+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 354,
+      "url": "https://www.prothomalo.com/opinion/column/wa4924b3ud",
+      "url_norm": "https://prothomalo.com/opinion/column/wa4924b3ud",
+      "source": "Prothom Alo",
+      "title": "উত্তপ্ত স্পেন সীমান্ত: ইসরায়েল ও ইউরোপের ডানপন্থীদের নতুন সাংস্কৃতিক যুদ্ধ",
+      "published": "2026-08-05T18:08:12+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 2543,
+      "url": "https://dailyinqilab.com/national/article/925006",
+      "url_norm": "https://dailyinqilab.com/national/article/925006",
+      "source": "Daily Inqilab",
+      "title": "জুলাই চেতনায় দেশ গঠনের দৃঢ় শপথ",
+      "published": "2026-08-06T00:04:30+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1256,
+      "url": "https://www.cnn.com/2026/08/06/us/taylor-farms-cyclospora-ecoli-outbreaks-invs",
+      "url_norm": "https://cnn.com/2026/08/06/us/taylor-farms-cyclospora-ecoli-outbreaks-invs",
+      "source": "CNN",
+      "title": "Cyclospora outbreak follows years-long pattern of Taylor Farms deflecting blame",
+      "published": "2026-08-06T16:00:29.806000+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1236,
+      "url": "https://www.cnn.com/cnn-underscored/beauty/best-clarifying-shampoos",
+      "url_norm": "https://cnn.com/cnn-underscored/beauty/best-clarifying-shampoos",
+      "source": "CNN",
+      "title": "The best clarifying shampoos, according to dermatologists",
+      "published": "2026-08-06T20:00:30.421000+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1780,
+      "url": "https://dailynayadiganta.com/economy/corporate/SCUU8Z755Oyb/",
+      "url_norm": "https://dailynayadiganta.com/economy/corporate/SCUU8Z755Oyb",
+      "source": "Naya Diganta",
+      "title": "",
+      "published": "2026-08-06T18:33:17+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1472,
+      "url": "https://dhakamail.com/country/320881",
+      "url_norm": "https://dhakamail.com/country/320881",
+      "source": "Dhaka Mail",
+      "title": "ট্রেনের ধাক্কায় পাওয়ার টিলারচালক নিহত",
+      "published": "2026-08-06T12:32:24.033672+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1074,
+      "url": "https://www.dhakapost.com/country/472852",
+      "url_norm": "https://dhakapost.com/country/472852",
+      "source": "Dhaka Post",
+      "title": "গাইবান্ধায় সব নদীর পানি বাড়ছে, বন্যার শঙ্কা, ৪৫ পয়েন্টে ভাঙন",
+      "published": "2026-08-06T16:30:37+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 808,
+      "url": "https://www.bbc.com/news/articles/c934wqk1w1vo",
+      "url_norm": "https://bbc.com/news/articles/c934wqk1w1vo",
+      "source": "BBC News",
+      "title": "Michelin-star restaurant Ynyshir gets five-star hygiene rating back",
+      "published": "2026-08-06T11:11:29+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1223,
+      "url": "https://www.cnn.com/2026/08/05/middleeast/hormuz-iran-oman-agreement-analysis-intl",
+      "url_norm": "https://cnn.com/2026/08/05/middleeast/hormuz-iran-oman-agreement-analysis-intl",
+      "source": "CNN",
+      "title": "An agreement on the Strait of Hormuz is taking shape – but not one Trump wants",
+      "published": "2026-08-05T19:29:26.327000+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1423,
+      "url": "https://dhakamail.com/entertainment/320933",
+      "url_norm": "https://dhakamail.com/entertainment/320933",
+      "source": "Dhaka Mail",
+      "title": "নিলামে উঠল রাজপাল যাদবের বাড়ি",
+      "published": "2026-08-06T16:25:58.923423+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 2122,
+      "url": "https://news.google.com/rss/articles/CBMiYEFVX3lxTE5jY3JGb0JvQ3VEUjJ2SUk2MW4zam9nY21lNlYxNFNNTnZSZW1yZ3pWaU1RbFp6dDQzWHVvQ1RvVXZUN3lRNjVmZjNGaE9xUWdYdDRJaDZfN0kzTVpOWldPVQ?oc=5",
+      "url_norm": "https://news.google.com/rss/articles/CBMiYEFVX3lxTE5jY3JGb0JvQ3VEUjJ2SUk2MW4zam9nY21lNlYxNFNNTnZSZW1yZ3pWaU1RbFp6dDQzWHVvQ1RvVXZUN3lRNjVmZjNGaE9xUWdYdDRJaDZfN0kzTVpOWldPVQ?oc=5",
+      "source": "New Age",
+      "title": "Campus Bites - New Age BD",
+      "published": "2026-08-01T20:44:54+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 2196,
+      "url": "https://dailyinqilab.com/international/article/925362",
+      "url_norm": "https://dailyinqilab.com/international/article/925362",
+      "source": "Daily Inqilab",
+      "title": "ভারতীয়রা বিশাল ক্ষতির মুখে",
+      "published": "2026-08-07T00:04:09+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 767,
+      "url": "https://www.bbc.com/news/articles/cpd76e737ljo",
+      "url_norm": "https://bbc.com/news/articles/cpd76e737ljo",
+      "source": "BBC News",
+      "title": "New walk-in mental health centres to open in banks and libraries across England",
+      "published": "2026-08-06T13:28:08+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 2352,
+      "url": "https://dailyinqilab.com/bangladesh/news/925206",
+      "url_norm": "https://dailyinqilab.com/bangladesh/news/925206",
+      "source": "Daily Inqilab",
+      "title": "গ্যাস সংকট, লোডশেডিং ও দ্রব্যমূল্যের ঊর্ধ্বগতি রোধে প্রধানমন্ত্রীর হস্তক্ষেপ চাইল কক্সবাজারে ১১ দলীয় ঐক্য",
+      "published": "2026-08-06T20:14:13+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 761,
+      "url": "https://www.bbc.com/news/articles/cn5nlgxv6vdo",
+      "url_norm": "https://bbc.com/news/articles/cn5nlgxv6vdo",
+      "source": "BBC News",
+      "title": "Iranian footballers who defied Tehran become Australian citizens",
+      "published": "2026-08-06T15:04:17+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 365,
+      "url": "https://www.prothomalo.com/bangladesh/wqjjcjzcu7",
+      "url_norm": "https://prothomalo.com/bangladesh/wqjjcjzcu7",
+      "source": "Prothom Alo",
+      "title": "বৃষ্টির মধ্যেই মানিক মিয়া অ্যাভিনিউয়ে ‘বর্ষা বিপ্লবের গান’ কনসার্ট শুরু",
+      "published": "2026-08-05T17:22:36+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 668,
+      "url": "https://www.bbc.com/news/articles/cx2md67y3nlo",
+      "url_norm": "https://bbc.com/news/articles/cx2md67y3nlo",
+      "source": "BBC News",
+      "title": "Rights groups say Israeli attack that killed Lebanese journalist an apparent war crime",
+      "published": "2026-08-06T20:20:15+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 127,
+      "url": "https://www.haal.fashion/beauty/care/yw95gdt5h9",
+      "url_norm": "https://haal.fashion/beauty/care/yw95gdt5h9",
+      "source": "Prothom Alo",
+      "title": "বর্ষার স্যাঁতসেঁতে দিনেও ত্বক থাকবে সতেজ, মানতে হবে এই ৫ টি চমকপ্রদ টিপস",
+      "published": "2026-08-06T16:51:31+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 515,
+      "url": "https://www.kishoralo.com/feature/ovczld7pey",
+      "url_norm": "https://kishoralo.com/feature/ovczld7pey",
+      "source": "Prothom Alo",
+      "title": "শিং মাছের কাঁটায় ব্যথা লাগে কেন",
+      "published": "2026-08-05T07:00:00+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 2300,
+      "url": "https://dailyinqilab.com/bangladesh/article/925258",
+      "url_norm": "https://dailyinqilab.com/bangladesh/article/925258",
+      "source": "Daily Inqilab",
+      "title": "ডিএসসিসির ফুটপাত ক্ষতিগ্রস্ত করায় জরিমানা",
+      "published": "2026-08-07T00:05:20+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 180,
+      "url": "https://www.prothomalo.com/world/usa/64j0trkz7q",
+      "url_norm": "https://prothomalo.com/world/usa/64j0trkz7q",
+      "source": "Prothom Alo",
+      "title": "মিশিগানে আবদুল আল-সাইয়েদের জয়ের পরও ইসরায়েলপন্থী আইপ্যাক আলোচনায়, কিন্তু কেন",
+      "published": "2026-08-06T13:30:00+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1274,
+      "url": "https://www.cnn.com/2026/08/05/health/moderna-mrna-flu-vaccine",
+      "url_norm": "https://cnn.com/2026/08/05/health/moderna-mrna-flu-vaccine",
+      "source": "CNN",
+      "title": "FDA approves first mRNA-based flu vaccine",
+      "published": "2026-08-06T08:33:07.755000+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 112,
+      "url": "https://www.prothomalo.com/bangladesh/district/c48z19rbm6",
+      "url_norm": "https://prothomalo.com/bangladesh/district/c48z19rbm6",
+      "source": "Prothom Alo",
+      "title": "পর্যটকের বেশে কক্সবাজার থেকে ইয়াবা পাচারে ‘বাইকার গ্যাং’, গ্রেপ্তার ৬",
+      "published": "2026-08-06T17:40:11+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 1535,
+      "url": "https://dailynayadiganta.com/printed-edition/PxcpHLc7VdjD/",
+      "url_norm": "https://dailynayadiganta.com/printed-edition/PxcpHLc7VdjD",
+      "source": "Naya Diganta",
+      "title": "",
+      "published": "2026-08-07T00:05:25+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 724,
+      "url": "https://www.bbc.com/news/articles/cm2g1mnk4vjo",
+      "url_norm": "https://bbc.com/news/articles/cm2g1mnk4vjo",
+      "source": "BBC News",
+      "title": "Further arrest after reports of gunshots in Braunstone",
+      "published": "2026-08-06T17:24:56+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 921,
+      "url": "https://www.bbc.com/news/articles/cwyjlpjygdjo",
+      "url_norm": "https://bbc.com/news/articles/cwyjlpjygdjo",
+      "source": "BBC News",
+      "title": "FM says rapist taxi driver row 'terrible' for Highland Council",
+      "published": "2026-08-05T20:30:10+06:00",
+      "day": "2026-08-07"
+    },
+    {
+      "id": 115,
+      "url": "https://www.prothomalo.com/business/economics/phyaamili-kaardder-aanusstthaanik-udbodhn-16-aagstt",
+      "url_norm": "https://prothomalo.com/business/economics/phyaamili-kaardder-aanusstthaanik-udbodhn-16-aagstt",
+      "source": "Prothom Alo",
+      "title": "ফ্যামিলি কার্ডের আনুষ্ঠানিক উদ্বোধন ১৬ আগস্ট",
+      "published": "2026-08-06T17:22:35+06:00",
+      "day": "2026-08-07"
+    }
+  ]
+}

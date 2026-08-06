@@ -1,4 +1,4 @@
-"""app.sources.registry — the single wiring point. Verifies all 21
+"""app.sources.registry — the single wiring point. Verifies all 45
 ported sources register cleanly, satisfy the `NewsSource` ABC contract,
 and have the metadata `app/services/collector.py` depends on
 (`key`, `display_name`). Importing every module here is itself a
@@ -12,6 +12,7 @@ from app.sources.base import NewsSource
 from app.sources.registry import _SOURCE_MODULES, all_sources, load_all
 
 EXPECTED_KEYS = {
+    # Original 21
     "daily_inqilab",
     "naya_diganta",
     "prothom_alo",
@@ -33,6 +34,31 @@ EXPECTED_KEYS = {
     "financial_express",
     "cnn",
     "al_jazeera",
+    # Tail follow-up pass (+24)
+    "dhaka_tribune",
+    "bd_news_24",
+    "daily_sangram",
+    "independent_tv",
+    "somoy_journal",
+    "channel_i_online",
+    "arthosuchak",
+    "bangladesh_post",
+    "prothom_alo_english",
+    "ekattor_tv",
+    "ajker_patrika",
+    "channels",
+    "deshersangbad",
+    "news24_bd",
+    "shomoyer_alo",
+    "times_of_bangladesh",
+    "bonik_barta",
+    "desh_protikhon",
+    "economy_post",
+    "techworld",
+    "daily_ict_news",
+    "digibangla",
+    "tech_shohor",
+    "bangla_tech_24",
 }
 
 
@@ -40,11 +66,11 @@ def test_load_all_registers_every_expected_source():
     load_all()
     sources = all_sources()
     assert set(sources) == EXPECTED_KEYS
-    assert len(sources) == 21
+    assert len(sources) == 45
 
 
 def test_source_module_count_matches_registry():
-    assert len(_SOURCE_MODULES) == 21
+    assert len(_SOURCE_MODULES) == 45
 
 
 def test_every_registered_source_is_a_news_source_subclass():

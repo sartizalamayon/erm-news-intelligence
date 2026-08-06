@@ -39,6 +39,7 @@ message.
 
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date
@@ -65,6 +66,12 @@ class SourceResult:
     inserted: int = 0
     duplicate: int = 0
     error: str | None = None
+    # Wall-clock time this source's own iter_feed_items() call took
+    # (discovery only, not the write path) — populated by
+    # _run_one_source. Exists so a live-measurement run can report
+    # per-source timings / identify the slowest sources (GATE 2) without
+    # a separate ad-hoc timing harness.
+    duration_seconds: float = 0.0
 
 
 @dataclass
@@ -73,6 +80,10 @@ class CollectionRunResult:
     total_fetched: int = 0
     total_inserted: int = 0
     total_duplicate: int = 0
+    # Wall-clock for the whole run (fetch_all's fan-out + any DB write),
+    # set by run_collection. 0.0 if the caller never populated it (e.g.
+    # a test that only exercises fetch_all directly).
+    wall_seconds: float = 0.0
 
     @property
     def total_failed_sources(self) -> int:
@@ -81,6 +92,9 @@ class CollectionRunResult:
     @property
     def total_empty_sources(self) -> int:
         return sum(1 for s in self.sources if s.status == "empty")
+
+    def slowest(self, n: int = 5) -> list[SourceResult]:
+        return sorted(self.sources, key=lambda s: s.duration_seconds, reverse=True)[:n]
 
 
 def _display_name(source_cls: type[NewsSource]) -> str:
@@ -95,26 +109,47 @@ def _run_one_source(key: str, source_cls: type[NewsSource]) -> tuple[SourceResul
     special-case which future blew up.
     """
     name = _display_name(source_cls)
+    start = time.monotonic()
     try:
         source = source_cls()
         items = source.iter_feed_items()
     except SourceError as exc:
+        elapsed = time.monotonic() - start
         logger.warning(
             "source_fetch_failed",
-            extra={"source": key, "error_type": type(exc).__name__, "error": str(exc)},
+            extra={"source": key, "error_type": type(exc).__name__, "error": str(exc), "duration_seconds": elapsed},
         )
-        return SourceResult(source_key=key, display_name=name, status="failed", error=str(exc)), []
+        return (
+            SourceResult(
+                source_key=key, display_name=name, status="failed", error=str(exc), duration_seconds=elapsed
+            ),
+            [],
+        )
     except Exception as exc:  # deliberately broad — see module docstring
+        elapsed = time.monotonic() - start
         logger.error(
             "source_run_unexpected_exception",
-            extra={"source": key, "error_type": type(exc).__name__, "error": str(exc)},
+            extra={"source": key, "error_type": type(exc).__name__, "error": str(exc), "duration_seconds": elapsed},
         )
-        return SourceResult(source_key=key, display_name=name, status="failed", error=f"unexpected: {exc}"), []
+        return (
+            SourceResult(
+                source_key=key,
+                display_name=name,
+                status="failed",
+                error=f"unexpected: {exc}",
+                duration_seconds=elapsed,
+            ),
+            [],
+        )
 
+    elapsed = time.monotonic() - start
     if not items:
-        logger.warning("source_returned_zero_items", extra={"source": key})
-        return SourceResult(source_key=key, display_name=name, status="empty"), []
-    return SourceResult(source_key=key, display_name=name, status="ok", fetched=len(items)), items
+        logger.warning("source_returned_zero_items", extra={"source": key, "duration_seconds": elapsed})
+        return SourceResult(source_key=key, display_name=name, status="empty", duration_seconds=elapsed), []
+    return (
+        SourceResult(source_key=key, display_name=name, status="ok", fetched=len(items), duration_seconds=elapsed),
+        items,
+    )
 
 
 def fetch_all(
@@ -199,6 +234,7 @@ def run_collection(
     Postgres-MVCC-specific pattern this SQLite/Postgres-agnostic design
     doesn't need).
     """
+    start = time.monotonic()
     fetched = fetch_all(source_classes, max_workers=max_workers)
     day = today_dhaka()
 
@@ -210,4 +246,5 @@ def run_collection(
         run_result.total_fetched += source_result.fetched
         run_result.total_inserted += source_result.inserted
         run_result.total_duplicate += source_result.duplicate
+    run_result.wall_seconds = time.monotonic() - start
     return run_result

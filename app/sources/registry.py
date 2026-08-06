@@ -9,13 +9,19 @@ exactly two things — the new `app/sources/<site>.py` file, and one line
 here. Nothing else changes; the collector, the batch entrypoint, and
 every other source stay untouched.
 
-Ported (21 of 51 legacy sources, ranked by article volume — see the
-P1-FETCH task report for the full coverage table and why the other 30
-were left for a follow-up rather than ported shallowly):
+Ported (45 of 51 legacy sources, 98.06% of historical article volume,
+ranked by article volume — see the P1-FETCH task report for the full
+coverage table and why the remaining 6 were skipped rather than ported
+shallowly):
 Daily Inqilab, Naya Diganta, Prothom Alo, Kalbela, BBC News, BD Pratidin,
 Dhaka Post, Desh Rupantor, Daily Star, The Business Standard, Dhaka Mail,
 New Age, Daily Sun, Rupali BD, Nagorik, NDTV, Daily Adin, Sangbad,
-The Financial Express, CNN, Al Jazeera.
+The Financial Express, CNN, Al Jazeera, Dhaka Tribune, BD News 24,
+Daily Sangram, Independent TV, Somoy Journal, Channel i Online,
+Arthosuchak, Bangladesh Post, Prothom Alo English, Ekattor TV,
+Ajker Patrika, Channels, Deshersangbad, News24 BD, Shomoyer Alo,
+Times of Bangladesh, Bonik Barta, Desh Protikhon, Economy Post,
+TechWorld, Daily ICT News, DigiBangla, Tech Shohor, Bangla Tech 24.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ from app.sources.base import NewsSource
 _REGISTRY: dict[str, type[NewsSource]] = {}
 
 _SOURCE_MODULES: tuple[str, ...] = (
+    # ── Original 21 (top by volume, 82.0%) ──────────────────────────
     "app.sources.daily_inqilab",
     "app.sources.naya_diganta",
     "app.sources.prothom_alo",
@@ -48,6 +55,31 @@ _SOURCE_MODULES: tuple[str, ...] = (
     "app.sources.financial_express",
     "app.sources.cnn",
     "app.sources.al_jazeera",
+    # ── Tail sources added in the follow-up pass (+16.06pp, -> 98.06%) ──
+    "app.sources.dhaka_tribune",
+    "app.sources.bd_news_24",
+    "app.sources.daily_sangram",
+    "app.sources.independent_tv",
+    "app.sources.somoy_journal",
+    "app.sources.channel_i_online",
+    "app.sources.arthosuchak",
+    "app.sources.bangladesh_post",
+    "app.sources.prothom_alo_english",
+    "app.sources.ekattor_tv",
+    "app.sources.ajker_patrika",
+    "app.sources.channels",
+    "app.sources.deshersangbad",
+    "app.sources.news24_bd",
+    "app.sources.shomoyer_alo",
+    "app.sources.times_of_bangladesh",
+    "app.sources.bonik_barta",
+    "app.sources.desh_protikhon",
+    "app.sources.economy_post",
+    "app.sources.techworld",
+    "app.sources.daily_ict_news",
+    "app.sources.digibangla",
+    "app.sources.tech_shohor",
+    "app.sources.bangla_tech_24",
 )
 
 
