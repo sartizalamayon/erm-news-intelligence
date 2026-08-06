@@ -143,16 +143,36 @@ def is_recent(dt: datetime | None, *, now: datetime | None = None) -> bool | Non
     return (reference - dt.astimezone(DHAKA)) <= WINDOW
 
 
-_TRACKING_PARAM_PREFIXES = ("utm_", "fbclid", "gclid", "mc_cid", "mc_eid", "ref", "ref_src", "igshid", "spm", "cmpid")
+# Fix for docs/red-team-findings.md RT-3: only "utm_" is a genuine
+# PREFIX (utm_source, utm_campaign, ...) — every other entry is a
+# specific, exact query-param NAME. The original implementation applied
+# `.startswith()` uniformly to all of them, which silently stripped any
+# param merely starting with one of those strings (`referral_code`,
+# `refresh_token`, `gclidextra`, `fbclid2`, `spmid`, `cmpidx`, ...) —
+# none of which are tracking params — collapsing distinct article URLs
+# to the same `url_norm` and causing `ON CONFLICT DO NOTHING` to silently
+# drop a genuinely different article as a false-positive duplicate.
+_TRACKING_PARAM_PREFIXES = ("utm_",)
+_TRACKING_PARAM_EXACT = frozenset({"fbclid", "gclid", "mc_cid", "mc_eid", "ref", "ref_src", "igshid", "spm", "cmpid"})
+
+
+def _is_tracking_param(name: str) -> bool:
+    lowered = name.lower()
+    return lowered.startswith(_TRACKING_PARAM_PREFIXES) or lowered in _TRACKING_PARAM_EXACT
 
 
 def normalize_url(url: str) -> str:
     """Clean a URL so the same article fetched via different methods (or
-    re-fetched on a later day) dedupes to the same key. Ported verbatim
-    from `collector_logic.normalize_url()`: unwraps Google News redirect
+    re-fetched on a later day) dedupes to the same key. Ported from
+    `collector_logic.normalize_url()`: unwraps Google News redirect
     links, forces https, drops `www.`, strips tracking query params,
     drops the trailing slash and any `#fragment`. Used ONLY for the
     `url_norm` dedup column — the original display URL is kept as-is.
+
+    Tracking-param matching: only `utm_*` is a genuine prefix; every
+    other name in `_TRACKING_PARAM_EXACT` must match exactly (RT-3 fix
+    — see `_is_tracking_param` and the comment above
+    `_TRACKING_PARAM_PREFIXES`).
     """
     if not url:
         return url
@@ -164,11 +184,7 @@ def normalize_url(url: str) -> str:
         parsed = urlparse(url)
         netloc = parsed.netloc.replace("www.", "").lower()
         path = parsed.path.rstrip("/")
-        kept = [
-            (k, v)
-            for k, v in parse_qsl(parsed.query)
-            if not any(k.lower().startswith(bad) or k.lower() == bad for bad in _TRACKING_PARAM_PREFIXES)
-        ]
+        kept = [(k, v) for k, v in parse_qsl(parsed.query) if not _is_tracking_param(k)]
         return urlunparse(("https", netloc, path, "", urlencode(kept), ""))
     except Exception:
         return url

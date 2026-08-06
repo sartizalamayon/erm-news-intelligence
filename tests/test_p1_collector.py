@@ -90,6 +90,7 @@ class FakeQueries:
         self.seen_urls: set[str] = set()
         self.rows: list[dict] = []
         self._next_id = 1
+        self.heartbeat_calls: list[int] = []
 
     def url_norm_seen(self, conn, url_norm: str) -> bool:
         return url_norm in self.seen_urls
@@ -108,12 +109,66 @@ class FakeQueries:
     def remember_seen_url(self, conn, url_norm: str, first_seen_day) -> None:
         self.seen_urls.add(url_norm)
 
+    def touch_run_heartbeat(self, conn, run_id: int, at=None) -> None:
+        # Real signature per app/db/queries.py — collector._touch_heartbeat
+        # calls this the same way whether `queries` is real or faked.
+        self.heartbeat_calls.append(run_id)
+
 
 @pytest.fixture
 def fake_queries(monkeypatch):
     fq = FakeQueries()
     monkeypatch.setattr(collector, "queries", fq)
     return fq
+
+
+class _FakeCursor:
+    def __init__(self, row: dict | None) -> None:
+        self._row = row
+
+    def fetchone(self) -> dict | None:
+        return self._row
+
+
+class FakeConn:
+    """Minimal stand-in for `DictConnection`, sufficient for
+    `run_collection()`'s own direct run-lifecycle SQL (`INSERT INTO
+    runs ... RETURNING id`, `UPDATE runs ...` — RT-1's fix,
+    docs/red-team-findings.md). The article-write path never touches
+    this directly (it goes through the monkeypatched `queries` module
+    above); only `_start_run`/`_finalize_run` issue raw `conn.execute()`
+    calls, since `app/db/queries.py` (ARCH-DB's file) doesn't have
+    `runs`-table helpers to fake against yet.
+    """
+
+    def __init__(self) -> None:
+        self._next_run_id = 1
+        self.commit_count = 0
+        self.executed: list[tuple[str, object]] = []
+        self.runs: dict[int, dict] = {}
+
+    def execute(self, sql: str, params: object = None) -> _FakeCursor:
+        self.executed.append((sql, params))
+        normalized = " ".join(sql.split())
+        if normalized.startswith("INSERT INTO runs"):
+            run_id = self._next_run_id
+            self._next_run_id += 1
+            trigger = params[0] if params else "manual"
+            self.runs[run_id] = {"id": run_id, "status": "running", "trigger": trigger}
+            return _FakeCursor({"id": run_id})
+        if normalized.startswith("UPDATE runs"):
+            # params order matches collector._finalize_run's UPDATE:
+            # (status, total_new, total_matched, details, run_id)
+            status, total_new, total_matched, details, run_id = params  # type: ignore[misc]
+            self.runs.setdefault(run_id, {})
+            self.runs[run_id].update(
+                status=status, total_new=total_new, total_matched=total_matched, details=details
+            )
+            return _FakeCursor(None)
+        return _FakeCursor(None)
+
+    def commit(self) -> None:
+        self.commit_count += 1
 
 
 # ── fetch_all: fan-out + isolation ──────────────────────────────────────
@@ -235,7 +290,8 @@ def test_run_collection_with_conn_none_does_not_touch_queries(fake_queries):
 
 def test_run_collection_with_conn_writes_and_tallies(fake_queries):
     sources = {"ok_source": OkSource, "empty_source": EmptySource, "failing_source": FailingSource}
-    result = collector.run_collection(_conn(), source_classes=sources)
+    conn = _conn()
+    result = collector.run_collection(conn, source_classes=sources)
     assert result.total_fetched == 2
     assert result.total_inserted == 2
     assert result.total_failed_sources == 1
@@ -243,9 +299,66 @@ def test_run_collection_with_conn_writes_and_tallies(fake_queries):
     assert len(result.sources) == 3
 
 
-def _conn():
-    """A placeholder conn object — FakeQueries never actually dereferences
-    it (it only appears as the first positional arg to mirror the real
-    app.db.queries function signatures), so any sentinel works.
+# ── run_collection: runs-table lifecycle (RT-1, docs/red-team-findings.md) ──
+
+
+def test_run_collection_creates_and_finalizes_a_runs_row(fake_queries):
+    sources = {"ok_source": OkSource}
+    conn = _conn()
+    result = collector.run_collection(conn, source_classes=sources)
+
+    assert len(conn.runs) == 1
+    run = next(iter(conn.runs.values()))
+    assert run["status"] == "done"
+    assert run["total_new"] == result.total_inserted == 2
+    assert run["total_matched"] == 0  # P2's job, not P1's — see module docstring
+    details = run["details"].obj  # psycopg.types.json.Jsonb wrapper — .obj is the real dict
+    assert isinstance(details, dict)
+    assert "OK Source" in details
+
+
+def test_run_collection_touches_heartbeat_per_completed_source(fake_queries):
+    sources = {"ok_source": OkSource, "empty_source": EmptySource, "failing_source": FailingSource}
+    conn = _conn()
+    collector.run_collection(conn, source_classes=sources)
+    assert len(fake_queries.heartbeat_calls) == 3  # once per source, regardless of status
+
+
+def test_run_collection_finalizes_as_error_when_it_crashes(fake_queries, monkeypatch):
+    """A bug inside run_collection's OWN body (not a per-source failure,
+    which is already isolated) must still leave a `status='error'` row
+    behind, not an eternally-'running' one, and must still propagate the
+    exception (this is a real bug surfacing loudly, not something to
+    swallow).
     """
-    return object()
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated bug inside run_collection")
+
+    monkeypatch.setattr(collector, "fetch_all", _boom)
+    conn = _conn()
+    with pytest.raises(RuntimeError, match="simulated bug"):
+        collector.run_collection(conn, source_classes={"ok_source": OkSource})
+
+    assert len(conn.runs) == 1
+    run = next(iter(conn.runs.values()))
+    assert run["status"] == "error"
+
+
+def test_run_collection_with_conn_none_never_touches_runs_table(fake_queries):
+    """Fetch-only mode (no DATABASE_URL) has no DB to track a run in —
+    must not attempt any runs-table SQL at all.
+    """
+    result = collector.run_collection(None, source_classes={"ok_source": OkSource})
+    assert result.total_fetched == 2
+    assert fake_queries.heartbeat_calls == []
+
+
+def _conn() -> FakeConn:
+    """A conn double sufficient for both the monkeypatched `queries`
+    module (article writes — FakeQueries never actually dereferences the
+    conn it's passed, it only appears as the first positional arg to
+    mirror the real app.db.queries function signatures) AND
+    run_collection()'s own direct `runs`-table SQL (FakeConn, RT-1).
+    """
+    return FakeConn()

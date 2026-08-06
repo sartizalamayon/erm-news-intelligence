@@ -35,6 +35,24 @@ silently losing its own results is a strictly better failure mode than
 losing every OTHER source's already-fetched data too. It is never
 swallowed silently — every case is logged with the exception type and
 message.
+
+Run lifecycle (`runs` table, migrations/0002_reference_tables.sql —
+fixes docs/red-team-findings.md RT-1: "every collection run is
+invisible; nothing ever writes to `runs`"): `run_collection()` inserts a
+`runs` row before doing any fetch work, commits it IMMEDIATELY
+(independent of the article-write transaction — a crash one line later
+must still leave a durable `status='running'` row for a watchdog to
+find, which an uncommitted INSERT cannot provide), touches
+`heartbeat_at` (via `app.db.queries.touch_run_heartbeat`, committed
+each time for the same reason) once per completed source, and finalizes
+the row — `status='done'` or `status='error'`, with `total_new` and a
+per-source `details` JSONB blob — on BOTH the success path and any
+exception that survives per-source isolation. `app/db/queries.py` does
+not yet have `INSERT INTO runs`/`UPDATE runs` helpers (only
+`touch_run_heartbeat`, which this module already uses); the two other
+statements are small enough, and specific enough to this module's own
+lifecycle, to live here rather than block on an ARCH-DB-owned file this
+task cannot edit.
 """
 
 from __future__ import annotations
@@ -43,6 +61,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date
+from typing import Any
+
+from psycopg.types.json import Jsonb
 
 from app.db import queries
 from app.db.connection import DictConnection
@@ -218,33 +239,132 @@ def write_items(conn: DictConnection, source_result: SourceResult, items: list[F
     return source_result
 
 
+def _start_run(conn: DictConnection, *, trigger: str) -> int:
+    """Insert the `runs` row for this collection run and commit
+    IMMEDIATELY — RT-1's whole point is that a crash one line later must
+    still leave a durable `status='running'` row (the schema default)
+    for a watchdog to find via `idx_runs_status_running` +
+    `heartbeat_at`, which an uncommitted INSERT sitting inside a larger
+    transaction cannot provide.
+    """
+    row = conn.execute("INSERT INTO runs (trigger) VALUES (%s) RETURNING id", (trigger,)).fetchone()
+    if row is None:
+        raise RuntimeError("INSERT INTO runs ... RETURNING id returned no row")
+    run_id = int(row["id"])
+    conn.commit()
+    return run_id
+
+
+def _touch_heartbeat(conn: DictConnection, run_id: int) -> None:
+    """Committed immediately, same reasoning as `_start_run` — a
+    heartbeat sitting in an uncommitted transaction is invisible to any
+    external watchdog process trying to read it.
+    """
+    queries.touch_run_heartbeat(conn, run_id)
+    conn.commit()
+
+
+def _finalize_run(
+    conn: DictConnection,
+    run_id: int,
+    *,
+    status: str,
+    total_new: int,
+    total_matched: int,
+    details: dict[str, Any],
+) -> None:
+    """Mark the run `'done'` or `'error'` with final counts and a
+    per-source `details` blob (mirrors legacy-behavior.md §2.6's
+    `runs.details` shape — one JSON object keyed by source name) — the
+    data the Source-health screen (frontend-contract.md §3.10) and any
+    run-history view need. Committed immediately, same reasoning as
+    `_start_run`/`_touch_heartbeat`.
+    """
+    conn.execute(
+        """
+        UPDATE runs
+        SET status = %s, finished_at = now(), heartbeat_at = now(),
+            total_new = %s, total_matched = %s, details = %s
+        WHERE id = %s
+        """,
+        (status, total_new, total_matched, Jsonb(details), run_id),
+    )
+    conn.commit()
+
+
 def run_collection(
     conn: DictConnection | None,
     *,
     source_classes: dict[str, type[NewsSource]] | None = None,
     max_workers: int = SOURCE_PARALLELISM,
+    trigger: str = "scheduled",
 ) -> CollectionRunResult:
     """The P1 entrypoint. `conn=None` runs fetch-only (discovery, no DB
-    write) — used when `DATABASE_URL` isn't configured (local dev / CI)
-    and by the live-measurement script, which times discovery
-    specifically. All writes for the whole run share ONE transaction
-    (the caller's `conn`, committed once by `app.db.connection.get_connection`'s
-    `with` block) — batched, not per-row commits (speed-techniques.md §4
-    point 6; §3#13 explicitly rejects per-row transactions as a
-    Postgres-MVCC-specific pattern this SQLite/Postgres-agnostic design
-    doesn't need).
+    write, no run-tracking — there's no DB to track a run in) — used
+    when `DATABASE_URL` isn't configured (local dev / CI) and by the
+    live-measurement script, which times discovery specifically.
+
+    When `conn` is given, this creates a `runs` row up front, touches
+    its heartbeat once per completed source, and finalizes it
+    (`status='done'`) on a clean finish or (`status='error'`) if
+    anything survives per-source isolation and escapes this function —
+    RT-1 (docs/red-team-findings.md): before this, no run left any
+    trace of having happened, succeeded, or crashed.
+
+    Article writes for the whole run still share ONE transaction
+    (committed once, at the very end, by `app.db.connection.get_connection`'s
+    `with` block in the caller) — batched, not per-row commits
+    (speed-techniques.md §4 point 6). Only the run-lifecycle rows above
+    are deliberately committed early and separately, because their
+    entire purpose is to survive a crash that rolls the rest back.
     """
     start = time.monotonic()
-    fetched = fetch_all(source_classes, max_workers=max_workers)
-    day = today_dhaka()
+    run_id: int | None = None
+    if conn is not None:
+        run_id = _start_run(conn, trigger=trigger)
 
     run_result = CollectionRunResult()
-    for source_result, items in fetched.values():
-        if conn is not None and items:
-            source_result = write_items(conn, source_result, items, day=day)
-        run_result.sources.append(source_result)
-        run_result.total_fetched += source_result.fetched
-        run_result.total_inserted += source_result.inserted
-        run_result.total_duplicate += source_result.duplicate
-    run_result.wall_seconds = time.monotonic() - start
+    details: dict[str, Any] = {}
+    try:
+        fetched = fetch_all(source_classes, max_workers=max_workers)
+        day = today_dhaka()
+
+        for source_result, items in fetched.values():
+            if conn is not None and items:
+                source_result = write_items(conn, source_result, items, day=day)
+            run_result.sources.append(source_result)
+            run_result.total_fetched += source_result.fetched
+            run_result.total_inserted += source_result.inserted
+            run_result.total_duplicate += source_result.duplicate
+            details[source_result.display_name] = {
+                "status": source_result.status,
+                "fetched": source_result.fetched,
+                "inserted": source_result.inserted,
+                "duplicate": source_result.duplicate,
+                "duration_seconds": round(source_result.duration_seconds, 2),
+                "error": source_result.error,
+            }
+            if conn is not None and run_id is not None:
+                _touch_heartbeat(conn, run_id)
+    except Exception:
+        if conn is not None and run_id is not None:
+            try:
+                _finalize_run(
+                    conn,
+                    run_id,
+                    status="error",
+                    total_new=run_result.total_inserted,
+                    total_matched=0,
+                    details=details,
+                )
+            except Exception:
+                logger.error("run_finalize_after_crash_failed", extra={"run_id": run_id})
+        raise
+    finally:
+        run_result.wall_seconds = time.monotonic() - start
+
+    if conn is not None and run_id is not None:
+        _finalize_run(
+            conn, run_id, status="done", total_new=run_result.total_inserted, total_matched=0, details=details
+        )
     return run_result

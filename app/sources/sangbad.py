@@ -5,10 +5,18 @@ is Dhaka wall clock written with a bogus `+00:00` offset (hence
 `backend/collector_logic.py` SOURCES list (:182-191). Legacy's
 `fallback_rss` is wired here as a genuine empty-result fallback
 (speed-techniques.md §4 point 4) rather than dropped outright.
+
+The RSS fallback fires on BOTH an empty id_enum result AND a raised
+`SourceFetchError` (homepage unreachable, or no IDs found at all) —
+the same class of gap flagged for Bangladesh Post's wp_rest fallback
+(see that file's docstring): checking only `if items:` after a call
+that can also raise means a hard failure never reaches the fallback at
+all.
 """
 
 from __future__ import annotations
 
+from app.errors import SourceFetchError
 from app.logging import get_logger
 from app.sources._body import fetch_generic_article_body
 from app.sources._id_enum import IdEnumConfig, fetch_id_enum
@@ -38,9 +46,23 @@ class SangbadSource(NewsSource):
         self.session = make_session(pool_size=CONFIG.workers)
 
     def iter_feed_items(self) -> list[FeedItem]:
-        items = fetch_id_enum(self.session, CONFIG, source=self.key)
+        try:
+            items = fetch_id_enum(self.session, CONFIG, source=self.key)
+        except SourceFetchError as exc:
+            logger.warning(
+                "source_fallback_triggered",
+                extra={
+                    "source": self.key,
+                    "primary_method": "id_enum",
+                    "fallback_method": "rss",
+                    "primary_error": str(exc),
+                },
+            )
+            return fetch_rss(self.session, FALLBACK_RSS_URL, source=self.key, required=False)
+
         if items:
             return items
+
         logger.warning(
             "source_fallback_triggered",
             extra={"source": self.key, "primary_method": "id_enum", "fallback_method": "rss"},

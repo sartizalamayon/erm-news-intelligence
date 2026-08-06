@@ -196,17 +196,28 @@ def fetch_news_sitemap(
 
 
 def require_news_sitemap(session: requests.Session, url: str, *, source: str, cap: int = 600) -> list[FeedItem]:
-    """Like `fetch_news_sitemap`, but raises `SourceFetchError` if even
-    the primary URL is completely unreachable (no response at all) —
-    for sources whose ABC method should treat total unreachability as a
-    per-source failure rather than a silent empty result. Candidate
-    fallback still applies before giving up.
+    """Like `fetch_news_sitemap`, but raises `SourceFetchError` if the
+    primary URL is unreachable — for sources whose ABC method should
+    treat total unreachability as a per-source failure rather than a
+    silent empty result (docs/red-team-findings.md RT-2: a dead host
+    reporting `status="empty"` is byte-for-byte indistinguishable from
+    "genuinely no news today"). Candidate fallback still applies before
+    giving up.
+
+    "Unreachable" is deliberately broader than "no response at all"
+    (a bare network failure): a definitive non-200 (404, 500, ...) on
+    the reachability probe counts too. A host that answers every one of
+    the primary URL, robots.txt, and every `NEWS_SITEMAP_PATHS`
+    candidate with 404 has no working sitemap at any known location —
+    that is a real failure worth a human's attention, not a quiet
+    "empty" that looks identical to a slow news day.
     """
     items = fetch_news_sitemap(session, url, source=source, cap=cap)
     if not items:
-        # Confirm the primary URL is actually reachable at all before
-        # treating this as "empty feed" rather than "source is down".
+        # Confirm the primary URL is actually reachable (and actually
+        # answers 200) before treating this as "empty feed" rather than
+        # "source is down".
         response = get(session, url, source=source, timeout=10, max_retries=1)
-        if response is None:
+        if response is None or response.status_code != 200:
             raise SourceFetchError(f"sitemap unreachable: {url}", source=source)
     return items

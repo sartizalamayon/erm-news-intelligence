@@ -14,6 +14,15 @@ Per-source isolation is enforced one level down, inside
 source's `SourceError` (or, deliberately, any unexpected exception —
 see that module's docstring) never aborts this entrypoint; it is
 recorded as that source's own `failed` status and logged.
+
+`run_collection(conn, ..., trigger="scheduled")` — this is the only
+real entrypoint, wired to the daily GitHub Actions cron (ADR §1), so
+every run through here is `'scheduled'`, not `'manual'` (the schema's
+own default, meant for a future admin-triggered "run now" button this
+module doesn't implement). Run-lifecycle bookkeeping itself
+(`runs` row created/heartbeated/finalized) lives in
+`app.services.collector.run_collection` — see that module's docstring
+for why (RT-1, docs/red-team-findings.md).
 """
 
 from __future__ import annotations
