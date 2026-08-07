@@ -27,6 +27,7 @@ ALL_ROUTERS = [
     review.router,
     export.router,
     brief.router,
+    brief.config_router,  # PUT /config/fuel-line — not under /brief's prefix, see brief.py's docstring.
     search.router,
     sources.router,
     keywords.router,

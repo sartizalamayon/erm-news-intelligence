@@ -143,6 +143,35 @@ class Settings(BaseSettings):
         """Parsed view of cors_allow_origins for FastAPI's CORSMiddleware."""
         return [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
 
+    # ── Hardening (HARDEN mission, docs/security.md) ─────────────────
+    # Additive only — see this module's docstring. Read by
+    # app.middleware.* and app.main.create_app(); nothing above this
+    # section is touched.
+    rate_limit_requests_per_window: int = Field(
+        default=120,
+        description="General, whole-API rate limit: max requests per "
+        "client IP per rate_limit_window_seconds. In-process only (no "
+        "Redis, GATE 0) — holds per Render instance, not globally across "
+        "instances. Separate from, and in addition to, "
+        "app.services.auth's OTP-specific per-email/per-IP limiter.",
+    )
+    rate_limit_window_seconds: int = Field(
+        default=60, description="Sliding window size, in seconds, for rate_limit_requests_per_window."
+    )
+    max_request_body_bytes: int = Field(
+        default=1_000_000,
+        description="Hard cap on any request body this API will read, "
+        "in bytes. Requests over this are rejected with 413 before the "
+        "body is parsed. 1MB is generous for every current admin-form "
+        "payload (keywords, prompts, source config) with headroom.",
+    )
+    max_query_param_length: int = Field(
+        default=2000,
+        description="Max character length for any single query-string "
+        "parameter value (e.g. GET /search's future 'q='). Protects the "
+        "GIN-indexed search query from an unbounded free-text input.",
+    )
+
     @field_validator("trusted_proxy_hops", mode="before")
     @classmethod
     def _fail_safe_trusted_proxy_hops(cls, value: object) -> int:

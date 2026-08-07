@@ -26,11 +26,12 @@ Every route is gated by `require_admin` (app.api.deps).
 from __future__ import annotations
 
 import dataclasses
-from datetime import date
+from collections import defaultdict
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
 
-from app.api.deps import AuthenticatedUser, require_admin
+from app.api.deps import AuthenticatedUser, get_current_user, require_admin
 from app.api.schemas.admin import (
     ExportRequestBody,
     ExportResultOut,
@@ -40,7 +41,23 @@ from app.api.schemas.admin import (
     PurgeResultOut,
     StorageUsageOut,
 )
-from app.db.connection import get_connection
+from app.api.schemas.core import (
+    DashboardTodayOut,
+    DashboardTrendsOut,
+    DayVolumeOut,
+    FunnelStageOut,
+    HeatRowOut,
+    KpiOut,
+    MonthVolumeOut,
+    RelMixOut,
+    RISK_SECTIONS,
+    SectionCountOut,
+    SourceCountOut,
+    StandingThemeOut,
+    TrendCardOut,
+)
+from app.db import queries
+from app.db.connection import DictConnection, get_connection
 from app.services import admin as admin_service
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard", "admin", "storage"])
@@ -94,3 +111,256 @@ def import_(body: ImportRequestBody, admin: AuthenticatedUser = Depends(require_
     with get_connection() as conn:
         report = admin_service.run_import(conn, path=body.path)
     return ImportResultOut(**dataclasses.asdict(report))
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# General app Dashboard — Short term / Long term (frontend-contract.md
+# §3.1/§3.2, frontend/js/screens/dashboard.js's header comment). Picked
+# up here per this file's own header note above ("whoever builds
+# /dashboard/today or /dashboard/trends next"). Requires only an
+# authenticated session (`get_current_user`) — these are user-facing
+# analytics, NOT gated by `require_admin` like every route above.
+#
+# Short-term reads `articles` directly (bounded by raw_retention_days,
+# always well over the 14-day window this tab needs — storage-policy.md
+# §2). Long-term reads ONLY the rollup_monthly_* / macro_indicator_values
+# tables (migrations/0007_rollups.sql), never raw `articles` — exactly
+# what makes the 12-month tab affordable and what storage-policy.md §2/§3
+# documents as the whole point of those tables. This router does not
+# populate the rollups (that write path belongs to whichever job folds a
+# day's collected articles into the current month's row, per 0007's own
+# header comment); it only reads what is there.
+# ─────────────────────────────────────────────────────────────────────────
+
+DHAKA = timezone(timedelta(hours=6))
+
+
+def _today_dhaka() -> date:
+    return datetime.now(DHAKA).date()
+
+
+def _count(conn: DictConnection, where_sql: str, params: tuple) -> int:
+    row = conn.execute(f"SELECT count(*) AS n FROM articles WHERE {where_sql}", params).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def _pct_delta(current: int, previous: int) -> str:
+    if not previous:
+        return ""
+    pct = (current - previous) / previous * 100
+    sign = "+" if pct >= 0 else ""
+    return f"{sign}{pct:.1f}%"
+
+
+def _pct_of(part: int, whole: int) -> str:
+    if not whole:
+        return "0%"
+    pct = part / whole * 100
+    return f"{pct:.0f}%" if pct >= 10 else f"{pct:.1f}%"
+
+
+@router.get("/today", response_model=DashboardTodayOut)
+def dashboard_today(user: AuthenticatedUser = Depends(get_current_user)) -> DashboardTodayOut:
+    today = _today_dhaka()
+    yesterday = today - timedelta(days=1)
+
+    with get_connection() as conn:
+        fetched_today = _count(conn, "day = %s", (today,))
+        fetched_yesterday = _count(conn, "day = %s", (yesterday,))
+        matched_today = _count(conn, "day = %s AND review_status != 'filtered_out'", (today,))
+        matched_yesterday = _count(conn, "day = %s AND review_status != 'filtered_out'", (yesterday,))
+        pending_count = _count(conn, "review_status = 'pending'", ())
+        approved_today = _count(conn, "review_status = 'approved' AND reviewed_at::date = %s", (today,))
+        scored_today = _count(conn, "day = %s AND llm_score IS NOT NULL", (today,))
+
+        sources_total_row = conn.execute("SELECT count(*) AS n FROM sources WHERE enabled").fetchone()
+        sources_total = int(sources_total_row["n"]) if sources_total_row else 0
+        sources_responded_row = conn.execute(
+            "SELECT count(DISTINCT source) AS n FROM articles WHERE day = %s", (today,)
+        ).fetchone()
+        sources_responded = int(sources_responded_row["n"]) if sources_responded_row else 0
+
+        kpis = [
+            KpiOut(
+                value=f"{fetched_today:,}",
+                label="Fetched today",
+                delta=_pct_delta(fetched_today, fetched_yesterday),
+                note=f"{sources_responded} of {sources_total} sources responded",
+            ),
+            KpiOut(
+                value=f"{matched_today:,}",
+                label="Keyword matched",
+                delta=_pct_delta(matched_today, matched_yesterday),
+                note="of everything fetched",
+            ),
+            KpiOut(value=f"{pending_count:,}", label="Awaiting review", note="across all matched articles"),
+            KpiOut(value=f"{approved_today:,}", label="Approved today", note="ready for export"),
+        ]
+
+        funnel = [
+            FunnelStageOut(
+                phase="Phase 1",
+                label="Fetched",
+                value=f"{fetched_today:,}",
+                pct="100%",
+                note=f"Everything published today across {sources_total} sources.",
+            ),
+            FunnelStageOut(
+                phase="Phase 2",
+                label="Keyword matched",
+                value=f"{matched_today:,}",
+                pct=_pct_of(matched_today, fetched_today),
+                note="Matched at least one tracked keyword.",
+            ),
+            FunnelStageOut(
+                phase="Phase 3",
+                label="Scored & grouped",
+                value=f"{scored_today:,}",
+                pct=_pct_of(scored_today, fetched_today),
+                note="Scored for relevance by the AI stage.",
+            ),
+            FunnelStageOut(
+                phase="Phase 4",
+                label="Approved for export",
+                value=f"{approved_today:,}",
+                pct=_pct_of(approved_today, fetched_today),
+                note="Signed off by an analyst today.",
+            ),
+        ]
+
+        days14 = []
+        for offset in range(13, -1, -1):
+            d = today - timedelta(days=offset)
+            days14.append(DayVolumeOut(date=d.isoformat(), count=_count(conn, "day = %s AND review_status != 'filtered_out'", (d,))))
+
+        rel_row = conn.execute(
+            """
+            SELECT
+              count(*) FILTER (WHERE llm_score >= 8) AS red,
+              count(*) FILTER (WHERE llm_score >= 6 AND llm_score < 8) AS yellow,
+              count(*) FILTER (WHERE llm_score >= 5 AND llm_score < 6) AS green,
+              count(*) FILTER (WHERE llm_score < 5) AS magenta
+            FROM articles WHERE day = %s AND llm_score IS NOT NULL
+            """,
+            (today,),
+        ).fetchone()
+        rel_mix = [
+            RelMixOut(key="red", count=int((rel_row or {}).get("red") or 0)),
+            RelMixOut(key="yellow", count=int((rel_row or {}).get("yellow") or 0)),
+            RelMixOut(key="green", count=int((rel_row or {}).get("green") or 0)),
+            RelMixOut(key="magenta", count=int((rel_row or {}).get("magenta") or 0)),
+        ]
+
+        section_rows = conn.execute(
+            """
+            SELECT sec AS label, count(*) AS n
+            FROM articles a, unnest(string_to_array(a.sections, ', ')) AS sec
+            WHERE a.day = %s AND a.sections <> ''
+            GROUP BY sec
+            """,
+            (today,),
+        ).fetchall()
+        section_counts = {r["label"]: int(r["n"]) for r in section_rows}
+        by_section = [SectionCountOut(label=s, count=section_counts.get(s, 0)) for s in RISK_SECTIONS]
+
+        top_source_rows = conn.execute(
+            "SELECT source AS label, count(*) AS n FROM articles WHERE day = %s GROUP BY source ORDER BY n DESC LIMIT 6",
+            (today,),
+        ).fetchall()
+        top_sources = [SourceCountOut(label=r["label"], count=int(r["n"])) for r in top_source_rows]
+
+    return DashboardTodayOut(
+        pendingCount=pending_count,
+        approvedCount=approved_today,
+        todayLabel=f"{today.day} {today.strftime('%b %Y')}",
+        kpis=kpis,
+        funnel=funnel,
+        days14=days14,
+        relMix=rel_mix,
+        bySection=by_section,
+        topSources=top_sources,
+    )
+
+
+_MACRO_META = {
+    "taka_usd": {"label": "Taka / USD", "unit": "BDT", "decimals": 1, "bad": True},
+    "inflation": {"label": "Inflation", "unit": "%", "decimals": 1, "bad": True},
+    "brent_crude": {"label": "Brent crude", "unit": "USD/bbl", "decimals": 0, "bad": True},
+    "remittance": {"label": "Remittance", "unit": "USD mn", "decimals": 1, "bad": False},
+}
+
+
+def _month_start(d: date) -> date:
+    return d.replace(day=1)
+
+
+def _add_months(d: date, delta: int) -> date:
+    total = d.year * 12 + (d.month - 1) + delta
+    return date(total // 12, total % 12 + 1, 1)
+
+
+@router.get("/trends", response_model=DashboardTrendsOut)
+def dashboard_trends(range: str = "12mo", user: AuthenticatedUser = Depends(get_current_user)) -> DashboardTrendsOut:
+    today = _today_dhaka()
+    since_month = _add_months(_month_start(today), -11)
+    month_list = [_add_months(since_month, i) for i in range(12)]
+
+    with get_connection() as conn:
+        trend_cards = []
+        for indicator, meta in _MACRO_META.items():
+            rows = conn.execute(
+                "SELECT month, value FROM macro_indicator_values WHERE indicator = %s AND month >= %s ORDER BY month",
+                (indicator, since_month),
+            ).fetchall()
+            by_month = {r["month"]: float(r["value"]) for r in rows}
+            vals = [by_month.get(m, 0.0) for m in month_list]
+            trend_cards.append(
+                TrendCardOut(label=meta["label"], unit=meta["unit"], vals=vals, bad=meta["bad"], decimals=meta["decimals"])
+            )
+
+        section_rows = conn.execute(
+            "SELECT month, section, matched_count FROM rollup_monthly_section WHERE month >= %s ORDER BY month",
+            (since_month,),
+        ).fetchall()
+        section_by_month: dict[date, dict[str, int]] = defaultdict(dict)
+        for r in section_rows:
+            section_by_month[r["month"]][r["section"]] = int(r["matched_count"])
+        months12 = [MonthVolumeOut(label=m.strftime("%b"), segments=section_by_month.get(m, {})) for m in month_list]
+
+        theme_rows = conn.execute(
+            "SELECT theme, month, article_count, intensity FROM rollup_monthly_theme WHERE month >= %s ORDER BY theme, month",
+            (since_month,),
+        ).fetchall()
+        theme_totals: dict[str, int] = defaultdict(int)
+        theme_series: dict[str, dict[date, float]] = defaultdict(dict)
+        for r in theme_rows:
+            theme_totals[r["theme"]] += int(r["article_count"])
+            theme_series[r["theme"]][r["month"]] = float(r["intensity"])
+        top_themes = sorted(theme_totals, key=lambda t: -theme_totals[t])[:6]
+        heat_rows = [
+            HeatRowOut(label=theme, values=[theme_series[theme].get(m, 0.0) for m in month_list]) for theme in top_themes
+        ]
+
+        standing_raw = queries.standing_themes(conn, since_month, min_consecutive_months=9)
+        standing = []
+        for row in standing_raw[:6]:
+            theme = row["theme"]
+            series_vals = [theme_series.get(theme, {}).get(m, 0.0) for m in month_list]
+            direction = "flat"
+            if series_vals:
+                delta = series_vals[-1] - series_vals[0]
+                if delta > 0.05:
+                    direction = "up"
+                elif delta < -0.05:
+                    direction = "down"
+            standing.append(
+                StandingThemeOut(
+                    name=theme,
+                    note=f"Present in {int(row['months_active'])} of the last 12 months.",
+                    count=int(row["total_count"]),
+                    months=int(row["months_active"]),
+                    dir=direction,
+                )
+            )
+
+    return DashboardTrendsOut(trendCards=trend_cards, months12=months12, heatRows=heat_rows, standing=standing)

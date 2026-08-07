@@ -45,6 +45,17 @@ SENSITIVE_KEY_SUBSTRINGS = (
     "secret",
     "otp",
     "authorization",
+    # HARDEN mission secret-hygiene sweep (docs/security.md): nothing in
+    # the codebase logs these today (verified by grepping every
+    # `extra={...}` call site), but app.config.Settings.database_url is
+    # a full connection string with an embedded password
+    # (postgresql://user:PASSWORD@host/db) and none of the substrings
+    # above would have caught a field literally named "database_url" or
+    # "dsn" if a future call ever did `extra={"database_url": ...}`.
+    # Covering it here is cheap, additive, and closes that gap before it
+    # can ever be hit rather than after.
+    "database_url",
+    "dsn",
 )
 _SENSITIVE_PATTERN = re.compile("|".join(re.escape(s) for s in SENSITIVE_KEY_SUBSTRINGS), re.IGNORECASE)
 

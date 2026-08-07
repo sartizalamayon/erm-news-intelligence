@@ -10,11 +10,31 @@ deliberate status code here, and the final catch-all handler means a
 genuinely unanticipated bug still returns a clean 500 with a logged
 stack trace instead of an unhandled-exception stack trace leaking to
 the client.
+
+HARDEN mission additions (docs/security.md, news-intel-rebuild repo):
+`RequestValidationError` (malformed JSON / a request that fails
+pydantic's own schema check, e.g. a wrong type or a missing required
+field — framework-level, distinct from app.errors.ValidationError which
+is application code choosing to reject something) and a final
+`Exception` catch-all, so that:
+
+  * every error response this API ever returns — app-modeled or not —
+    uses the same JSON envelope ({"error": ..., "detail": ...}), and
+  * no response body, in any environment, ever contains a stack trace,
+    a raw exception message from a lower layer (SQL, a driver error, a
+    file path), or pydantic's internal per-field error structure. Full
+    detail is always logged server-side (exc_info=...) — visible in
+    Render/GitHub Actions logs, an operator's problem to read — never
+    shipped back to the caller. This holds identically regardless of
+    APP_ENV: FastAPI's own `debug` flag (explicitly `False` in
+    app.main.create_app(), never toggled per-environment) is what would
+    otherwise leak a traceback into a 500 body, and it never does here.
 """
 
 from __future__ import annotations
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.errors import (
@@ -29,6 +49,21 @@ logger = get_logger(__name__)
 
 
 def register_exception_handlers(app: FastAPI) -> None:
+    @app.exception_handler(RequestValidationError)
+    async def _request_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # exc.errors() includes the raw submitted value per failing
+        # field (pydantic's `input` key) -- a malformed OTP-code or
+        # email submission could put something worth not casually
+        # logging in there, so only (field location, error type) is
+        # logged, never the submitted value, and neither ever reaches
+        # the response body.
+        fields = [{"loc": e.get("loc"), "type": e.get("type")} for e in exc.errors()]
+        logger.warning("request_validation_error", extra={"path": request.url.path, "fields": fields})
+        return JSONResponse(
+            status_code=422,
+            content={"error": "validation_error", "detail": "The request body failed validation."},
+        )
+
     @app.exception_handler(ValidationError)
     async def _validation_error(request: Request, exc: ValidationError) -> JSONResponse:
         return JSONResponse(status_code=422, content={"error": "validation_error", "detail": str(exc)})
@@ -65,4 +100,19 @@ def register_exception_handlers(app: FastAPI) -> None:
         # shouldn't happen — batch isolates those — but this keeps the
         # response clean if it ever does).
         logger.error("unhandled_app_error", exc_info=exc, extra={"error_type": type(exc).__name__})
+        return JSONResponse(status_code=500, content={"error": "internal_error"})
+
+    @app.exception_handler(Exception)
+    async def _unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
+        # Last resort: anything not modeled in app.errors at all (a raw
+        # psycopg error, a KeyError from a real bug, ...). Without this,
+        # Starlette's own ServerErrorMiddleware still returns a safe
+        # generic response when FastAPI's debug=False (set explicitly in
+        # app.main.create_app()) — no traceback leaks either way — but
+        # its response is plain text, not this app's JSON envelope, and
+        # this handler is what makes that "no traceback in production"
+        # guarantee something a test can assert directly rather than
+        # inherit implicitly from a framework default. Full exception
+        # (type, message, traceback) goes to the logger only.
+        logger.error("unhandled_exception", exc_info=exc, extra={"error_type": type(exc).__name__})
         return JSONResponse(status_code=500, content={"error": "internal_error"})
