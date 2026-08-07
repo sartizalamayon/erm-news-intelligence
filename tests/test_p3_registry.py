@@ -197,6 +197,22 @@ def test_mistral_resolves_entirely_through_provider_registry(monkeypatch: pytest
         assert transport.api_key == "mistral-real-key-123"
 
 
+def test_nvidia_resolves_entirely_through_provider_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_secret_key(monkeypatch)
+    with migrated_schema() as conn:
+        save_provider_credential(conn, "nvidia", "primary", "nvidia-real-key-123")
+        config = RoutingConfig(routes={TRANSLATION: FeatureRoute(primary=ProviderChoice(provider="nvidia"))})
+        save_routing_config(conn, config)
+        conn.commit()
+
+        client = build_client_for_feature(conn, TRANSLATION)
+        identity, transport = client.transport.candidates[0]
+        assert identity == "nvidia"
+        assert transport.__class__ is OpenAICompatibleTransport
+        assert transport.base_url == "https://integrate.api.nvidia.com/v1"
+        assert transport.model == "meta/llama-3.1-8b-instruct"
+
+
 def test_mistral_per_feature_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_secret_key(monkeypatch)
     with migrated_schema() as conn:

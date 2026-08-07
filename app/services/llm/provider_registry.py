@@ -128,6 +128,22 @@ DEFAULT_PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
         default_model="mistral-small-latest",
         enabled=True,
     ),
+    # nvidia — verified live 2026-08-07: `meta/llama-3.1-8b-instruct` via
+    # `https://integrate.api.nvidia.com/v1`, OpenAI-compatible, no
+    # thinking-token overhead (real judge_batch prompt: 4,351 prompt +
+    # 215 completion = 4,566 total, clean JSON even without
+    # response_format forced). NO rate-limit headers returned on a
+    # successful response — ceilings must be LEARNED from live 429s at
+    # runtime (`app.services.llm.quota`'s ProviderLimits stay
+    # tpd=None/rpd=None until an admin sets real numbers), never assumed.
+    "nvidia": ProviderDefinition(
+        provider="nvidia",
+        adapter=ADAPTER_OPENAI_COMPATIBLE,
+        base_url="https://integrate.api.nvidia.com/v1",
+        default_model="meta/llama-3.1-8b-instruct",
+        enabled=True,
+        note="No rate-limit headers observed — ceilings unknown, learn from 429s, never hardcode.",
+    ),
     "cerebras": ProviderDefinition(
         provider="cerebras",
         adapter=ADAPTER_OPENAI_COMPATIBLE,

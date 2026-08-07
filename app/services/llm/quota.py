@@ -147,6 +147,14 @@ class QuotaStatus:
 DEFAULT_LIMITS: dict[str, ProviderLimits] = {
     "groq": ProviderLimits(tpd=200_000, rpd=1_000),
     "gemini": ProviderLimits(tpd=None, rpd=None),
+    # mistral: verified live 2026-08-07 via response headers —
+    # x-ratelimit-limit-tokens-minute=50000, x-ratelimit-limit-req-minute=50.
+    # No daily ceiling exposed; tpd/rpd stay unknown until observed.
+    "mistral": ProviderLimits(tpd=None, rpd=None),
+    # nvidia: verified live 2026-08-07 — zero rate-limit headers on a
+    # successful response (unlike Mistral/Groq). Ceilings must be
+    # learned from live 429s, never assumed/hardcoded.
+    "nvidia": ProviderLimits(tpd=None, rpd=None),
 }
 
 
