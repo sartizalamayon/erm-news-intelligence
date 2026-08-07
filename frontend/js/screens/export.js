@@ -1,11 +1,20 @@
 // Export builder (frontend-contract.md §3.4).
 //
-// Expected API (proposal — app/api/routers/export.py is a stub):
+// Real API — app/api/routers/export.py (CORE-API, live):
 //   GET  /export/preview?filter=&topN=&scope=&from=&to=&sections=&sort=&format=
 //        -> { rows, summary, filename, counts: { topn, approved, matched, starred } }
-//   GET  /export/presets -> [{ id, name, note, filter, topN, scope, sections, sort, format }]
+//   GET  /export/presets -> [{ id, name, note, filter, topN, scope, sections: [], sort, format }]
 //   POST /export/presets  { name, note, filter, topN, scope, sections, sort, format }
-//   POST /export          (same params) -> binary file (xlsx/csv), downloaded client-side.
+//   POST /export?<same query params>  -> binary file, downloaded client-side.
+//     format=csv works (stdlib csv). format=xlsx returns 501 — openpyxl
+//     isn't an installed dependency (ARCH-REPO's file to add it, not
+//     done yet) — surfaced verbatim below, csv is the default here.
+//
+// Known backend gap: `do_export`/`export_preview` take no `columns`
+// param — the server always writes its own fixed CSV column set. The
+// "4 · Columns" picker below is therefore preview-only (drives
+// `exColPreview`) and does not yet change what the download contains;
+// flagged in this task's report, not silently hidden.
 //
 // The prototype's two custom-date-range inputs are inert (no handler at
 // all) per §3.4/§5.2 #6-7 — wired for real here since a real export
@@ -47,8 +56,8 @@ const SORTS = [
   { k: "date", l: "Date" },
 ];
 const FORMATS = [
-  { k: "xlsx", l: "Excel .xlsx" },
   { k: "csv", l: "CSV" },
+  { k: "xlsx", l: "Excel .xlsx (not available yet)" },
 ];
 
 export function mountExport(root) {
@@ -62,7 +71,7 @@ export function mountExport(root) {
     sections: [...RISK_SECTIONS],
     cols: { headline: 1, source: 1, section: 1, keywords: 1, published: 1, score: 1, reason: 0, alsoIn: 1, link: 1, body: 0 },
     sort: "relevance",
-    format: "xlsx",
+    format: "csv", // xlsx is 501 on the backend today (openpyxl not installed) — default to what works
     preview: null,
     previewLoading: true,
     previewError: null,
@@ -135,7 +144,16 @@ export function mountExport(root) {
       const qs = new URLSearchParams();
       for (const [k, v] of Object.entries(params())) if (v !== undefined && v !== "") qs.set(k, v);
       const res = await fetch(API_BASE + "/export?" + qs.toString(), { method: "POST", credentials: "include" });
-      if (!res.ok) throw new ApiError("Export failed (" + res.status + ")", { status: res.status });
+      if (!res.ok) {
+        let detail = "Export failed (" + res.status + ")";
+        try {
+          const body = await res.json();
+          if (body && body.detail) detail = body.detail;
+        } catch (parseErr) {
+          /* non-JSON error body — keep the generic message */
+        }
+        throw new ApiError(detail, { status: res.status });
+      }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
