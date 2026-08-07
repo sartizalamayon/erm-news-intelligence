@@ -11,18 +11,21 @@ variables) supply real values at runtime.
 
 Field groups map 1:1 to ADR decisions — nothing here is speculative:
   * database_url            — ADR §1, changed Neon -> Supabase Postgres in §9.4.
-  * groq_* / gemini_* / llm_provider_* — ADR §9.1 (Groq primary, Google AI
-    Studio secondary, ruled). These env vars are the bootstrap/CI/local
-    fallback only — ADR §9.1 also rules that admin-entered keys are
-    stored encrypted in the database (ARCH-DB/ADMIN-API's territory);
-    `secret_key` below is the encryption key for that, not for these.
+  * groq_* / gemini_* / mistral_* / llm_provider_* — ADR §9.1 (Groq
+    primary, Google AI Studio secondary, ruled; Mistral added as a
+    third, no-thinking-tax provider once live-verified working — see
+    provider-limits-VERIFIED.md's "Round 2"). These env vars are the
+    bootstrap/CI/local fallback only — ADR §9.1 also rules that
+    admin-entered keys are stored encrypted in the database
+    (ARCH-DB/ADMIN-API's territory); `secret_key` below is the
+    encryption key for that, not for these.
   * resend_*                — ADR §9.3 (OTP-only auth). Resend was
     approved as the OTP email transport (see app/services/email.py);
-    it is called over its REST API via `requests`, there is no SMTP
-    server anywhere in this system. `smtp_host`/`smtp_port`/
-    `smtp_username`/`smtp_use_tls` remain provisioned below but are
-    UNUSED — kept in case a real SMTP relay is ever added, not
-    renamed/removed since nothing reuses them today.
+    it is called over its REST API via `requests`. There is no SMTP
+    server anywhere in this system — no smtp_* fields exist here on
+    purpose (a prior revision provisioned four unused ones "in case a
+    relay is ever added"; removed as dead weight that recreated the
+    exact naming confusion the resend_* rename fixed).
   * trusted_proxy_hops      — RT-5 remediation (docs/red-team-findings.md).
     Security-critical, not a tuning knob: default 0 means
     X-Forwarded-For is never trusted. See the field's own description.
@@ -102,28 +105,31 @@ class Settings(BaseSettings):
         default="gemini-2.0-flash",
         description="Placeholder pending P3-LLM confirming the exact model id against provider-limits.md.",
     )
+    mistral_api_key: str = Field(
+        default="",
+        repr=False,
+        description="Mistral API key (bootstrap/CI fallback). Live-verified working, "
+        "50,000 TPM / 50 RPM, no reasoning-token overhead — see "
+        "provider-limits-VERIFIED.md's 'Round 2'. No daily (TPD/RPD) ceiling was "
+        "exposed by the API; treat it as unknown, never assume unlimited.",
+    )
+    mistral_model: str = Field(
+        default="mistral-small-latest", description="Live-verified working model per provider-limits-VERIFIED.md."
+    )
     llm_provider_primary: str = Field(default="groq", description="ADR §9.1.")
     llm_provider_secondary: str = Field(default="gemini", description="ADR §9.1.")
 
     # ── Resend (OTP email transport — ADR §9.3, ruled: OTP-only auth) ─
     # Resend is called over its REST API via `requests`
-    # (app/services/email.py) — there is no SMTP server in this system.
+    # (app/services/email.py) — there is no SMTP server in this system,
+    # and no smtp_* fields are provisioned here on purpose (see this
+    # module's docstring).
     resend_api_key: str = Field(
         default="", repr=False, description="Resend API key, sent as a Bearer token. See app.services.email."
     )
     resend_from_email: str = Field(
         default="", description="Verified Resend sender address OTP emails are sent from. See app.services.email."
     )
-
-    # Provisioned but UNUSED today — no SMTP transport exists in this
-    # codebase (Resend's REST API is used instead, see resend_api_key /
-    # resend_from_email above). Kept rather than removed in case a real
-    # SMTP relay is ever added; do not wire a mail host to these
-    # expecting it to be consulted by anything.
-    smtp_host: str = Field(default="", description="Unused — see resend_api_key/resend_from_email above.")
-    smtp_port: int = Field(default=587, description="Unused — see resend_api_key/resend_from_email above.")
-    smtp_username: str = Field(default="", description="Unused — see resend_api_key/resend_from_email above.")
-    smtp_use_tls: bool = Field(default=True, description="Unused — see resend_api_key/resend_from_email above.")
 
     # ── Frontend / CORS ───────────────────────────────────────────────
     cors_allow_origins: str = Field(

@@ -7,30 +7,36 @@ query params (legacy-behavior.md §2.6 point 3, ported verbatim):
 `utm_*`, `fbclid`, `gclid`, `mc_cid`, `mc_eid`, `ref`, `ref_src`,
 `igshid`, `spm`, `cmpid`.
 
-Finding (see docs/red-team-findings.md, RT-3): the filter is implemented
-as
+FIXED by P1-INGEST (commit 000576b): `_TRACKING_PARAM_PREFIXES` is now
+`("utm_",)` only, with every other name matched exactly via a separate
+`_TRACKING_PARAM_EXACT` frozenset. Re-verified directly against
+`normalize_url()` (both by manual reproduction and by every case below,
+run with `--runxfail` to see the real assertion outcome, not just the
+strict-xfail summary label) for all 7 originally-flagged cases,
+INCLUDING `spmid`/`cmpidx` specifically -- a 2026-08-07 coordinator
+message flagged those two as "still failing", which traced back to
+pytest's own strict-xfail-turned-XPASS report using the word "FAILED"
+in its summary line for what is actually a pass (the fix working), NOT
+a real assertion failure, compounded by this file's OWN cosmetic `ids=`
+lambda mislabeling numeric-looking values (`spmid=9` was rendered as
+`spmid-value`, `fbclid2=1` as `fbclid2-value`) in the displayed test ID.
+Confirmed via a direct, unambiguous reproduction
+(`normalize_url(...spmid=9) != normalize_url(...)` and same for
+`cmpidx=q`) that both survive correctly -- RT-3 is fully closed, not
+partially. The `ids=` bug (own file, fixed below) never affected which
+inputs were tested, only how they were labeled in `-v` output.
 
-    if not any(k.lower().startswith(bad) or k.lower() == bad for bad in _TRACKING_PARAM_PREFIXES)
-
-applying `.startswith(bad)` to EVERY entry in the list, not just the one
-(`utm_`) that is genuinely meant to be a prefix. `ref`, `fbclid`,
-`gclid`, `spm`, `cmpid`, `mc_cid`, `mc_eid`, `ref_src`, and `igshid` are
-all meant to be exact query-param NAMES, but `.startswith()` turns each
-of them into a prefix match too. Any query parameter whose name merely
-*starts with* one of those strings -- `referral_code`, `refresh_token`,
-`gclidextra`, `spmid`, `fbclid2`, none of which are tracking params --
-gets silently stripped right along with the real ones.
-
-Consequence: two articles at the same path with DIFFERENT, meaningful,
-non-tracking query parameters that happen to share one of these
-prefixes collapse to the identical `url_norm`. Since
-app.services.collector.write_items()'s dedup-on-insert treats an
-existing `url_norm` as "already have this article" and skips the insert
-entirely (app/db/queries.py's `ON CONFLICT (url_norm) ... DO NOTHING`,
-plus the `seen_urls` pre-check), this is not cosmetic: a second,
-genuinely distinct article is silently dropped as a false-positive
-duplicate, with no error, no log distinguishable from a real duplicate,
-and no way for a human reviewer to notice the row never arrived.
+Originally (see docs/red-team-findings.md, RT-3's write-up): the filter
+applied `.startswith(bad)` to EVERY entry in a list, not just `utm_`,
+so `referral_code`, `refresh_token`, `refcode`, `gclidextra`, `fbclid2`,
+`spmid`, `cmpidx` (none of which are tracking params) were silently
+stripped right along with the real ones -- collapsing two articles with
+different, meaningful, non-tracking query parameters to the same
+`url_norm`. Since app.services.collector.write_items()'s dedup-on-insert
+treats an existing `url_norm` as "already have this article" (ON
+CONFLICT DO NOTHING plus the seen_urls pre-check), this was not
+cosmetic: a second, genuinely distinct article would be silently dropped
+as a false-positive duplicate.
 """
 
 from __future__ import annotations
@@ -51,17 +57,26 @@ from app.sources._util import normalize_url
         ("spmid", "9"),
         ("cmpidx", "q"),
     ],
-    ids=lambda v: v if isinstance(v, str) and not v.isdigit() else "value",
-)
-@pytest.mark.xfail(
-    strict=True,
-    reason="RT-3 (docs/red-team-findings.md): normalize_url()'s tracking-param filter uses "
-    "str.startswith() against every entry in _TRACKING_PARAM_PREFIXES, not just the genuine "
-    "prefix ('utm_'). Non-tracking params merely starting with 'ref', 'gclid', 'fbclid', 'spm', "
-    "or 'cmpid' get stripped too, collapsing distinct URLs to the same url_norm and causing a "
-    "real, distinct article to be silently dropped as a false-positive duplicate. Owner: P1-INGEST.",
+    # Explicit string ids -- the previous ids=lambda (v.isdigit() check)
+    # mislabeled numeric-looking values as the literal "value" in -v
+    # output, which is what made a real XPASS look ambiguous from the
+    # outside (see module docstring). No cleverness needed here.
+    ids=[
+        "referral_code",
+        "refresh_token",
+        "refcode",
+        "gclidextra",
+        "fbclid2",
+        "spmid",
+        "cmpidx",
+    ],
 )
 def test_non_tracking_param_survives_normalization(distinguishing_param: str, example_value: str) -> None:
+    """RT-3, CONFIRMED FIXED (P1-INGEST, 000576b) -- was xfail(strict=True),
+    now a normal regression test. Every one of these 7 params (including
+    spmid/cmpidx, re-verified per the module docstring) must survive
+    normalize_url() untouched.
+    """
     with_param = f"https://example.com/news/story?title=x&{distinguishing_param}={example_value}"
     without_param = "https://example.com/news/story?title=x"
 
@@ -96,3 +111,26 @@ def test_documented_exact_tracking_params_are_still_correctly_stripped() -> None
     expected = normalize_url(base)
     for variant in tracked_variants:
         assert normalize_url(variant) == expected, f"{variant!r} should normalize to {expected!r}"
+
+
+def test_normalize_url_is_idempotent_after_the_rt3_fix() -> None:
+    """Extra coverage from the coordinator's second-pass attack angle
+    ("does normalization stay idempotent and stable"): applying
+    normalize_url() twice must be a no-op the second time, for both
+    over-strip survivors and genuine tracking params, mixed case, a
+    duplicated key, and a Google News redirect unwrap. Passed on first
+    write -- not a fix verification, just closing a gap in RT-3's
+    original coverage.
+    """
+    candidates = [
+        "https://example.com/a?utm_source=x&utm_content_id=1",
+        "https://example.com/a?REF=x&Title=y",
+        "https://example.com/a?ref=1&ref=2",
+        "https://example.com/a?utm_source=x&utm_source=y",
+        "https://news.google.com/rss/articles/xyz?url=https://example.com/real-article%3Fref=abc",
+        "https://example.com/a?spmid=9&cmpidx=q&referral_code=abc123",
+    ]
+    for url in candidates:
+        once = normalize_url(url)
+        twice = normalize_url(once)
+        assert once == twice, f"normalize_url is not idempotent for {url!r}: {once!r} -> {twice!r}"

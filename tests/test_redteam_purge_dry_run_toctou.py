@@ -24,6 +24,28 @@ approved. This reproduces it with an ordinary sequential insert between
 the two calls (no real concurrency needed to prove the count can
 diverge) against `purge_stale_unmatched_articles`, the purge most
 likely to race against the daily batch job in practice.
+
+FIXED by ARCH-DB (commit fc2f47c): `confirm=False` now snapshots the
+EXACT qualifying row ids (not just a count) into the `settings` table
+under a `purge_preview::<operation>::<params>` key; `confirm=True`
+requires that snapshot and deletes `WHERE id = ANY(<snapshot ids>)`,
+intersected with the live predicate again as defense-in-depth. A row
+that only starts qualifying after the preview was taken is therefore
+NEVER in the snapshot and can never be deleted by that confirm call --
+independently re-verified below (`test_confirmed_purge_count_matches_...`,
+flipped from xfail to a normal regression test).
+
+ARCH-DB's own commit message self-reports a narrower residual gap: two
+DIFFERENT `confirm=False` preview calls for the IDENTICAL operation and
+parameters share one settings key, so the second preview's `set_setting`
+overwrites the first's snapshot -- a `confirm=True` might then act on a
+different (but still real, still previously-shown-to-SOME-operator)
+snapshot than the one a specific operator personally looked at.
+Independently verified below
+(`test_two_concurrent_previews_the_second_overwrites_the_first_but_never_invents_rows`)
+that this residual behaves exactly as characterized: never worse than
+disclosed, never a reopening of RT-6's original failure mode (a row
+that no preview ever showed being deleted).
 """
 
 from __future__ import annotations
@@ -34,6 +56,7 @@ import pytest
 
 from app.db.queries import insert_article
 from app.db.testing import migrated_schema, pg_available
+from app.errors import ValidationError
 from app.services.storage import purge_stale_unmatched_articles
 
 pytestmark = pytest.mark.skipif(not pg_available(), reason="no reachable Postgres (set TEST_DATABASE_URL)")
@@ -50,15 +73,8 @@ def _stale_unmatched_article(url: str, *, days_old: int) -> dict[str, object]:
     }
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="RT-6 (docs/red-team-findings.md): app.services.storage's purge_* functions compute "
-    "the dry-run preview count and the confirmed delete count via two SEPARATE, unlocked calls. "
-    "A row that becomes eligible between the two calls (e.g. the daily batch job inserting more "
-    "stale rows) is silently deleted without ever having been shown to the approving operator. "
-    "Owner: ARCH-DB.",
-)
 def test_confirmed_purge_count_matches_the_previously_shown_dry_run_count() -> None:
+    """RT-6, CONFIRMED FIXED (ARCH-DB, fc2f47c) -- was xfail(strict=True)."""
     with migrated_schema() as conn:
         insert_article(conn, **_stale_unmatched_article("https://example.com/old-1", days_old=400))
         conn.commit()
@@ -82,3 +98,63 @@ def test_confirmed_purge_count_matches_the_previously_shown_dry_run_count() -> N
             f"confirming the purge actually deleted {confirmed.rows_affected} rows -- the operator "
             "approved a number that the real delete silently exceeded"
         )
+        # The new row inserted after the preview must survive untouched --
+        # it was never in the snapshot the preview took.
+        survivor = conn.execute(
+            "SELECT id FROM articles WHERE url = 'https://example.com/old-2'"
+        ).fetchone()
+        assert survivor is not None, "a row inserted AFTER the preview was deleted anyway -- RT-6 reopened"
+
+
+def test_confirm_without_a_prior_preview_is_refused_not_silently_recomputed() -> None:
+    """Attacks the fix's core mechanism directly: `confirm=True` with no
+    matching preview snapshot on record must raise, never fall back to
+    a fresh live query (which would be exactly the old, race-prone
+    behavior in disguise).
+    """
+    with migrated_schema() as conn:
+        insert_article(conn, **_stale_unmatched_article("https://example.com/no-preview", days_old=400))
+        conn.commit()
+        with pytest.raises(ValidationError):
+            purge_stale_unmatched_articles(conn, older_than_days=30, confirm=True)
+
+
+def test_two_concurrent_previews_the_second_overwrites_the_first_but_never_invents_rows() -> None:
+    """Verifies ARCH-DB's own self-reported residual gap behaves exactly
+    as characterized in their commit message, no worse: two `confirm=False`
+    previews for the IDENTICAL operation+parameters share one settings
+    key, so the second overwrites the first. A subsequent `confirm=True`
+    therefore acts on the SECOND preview's snapshot -- which may omit a
+    row the first preview showed, or include one the first didn't -- but
+    every id it can possibly delete was shown in SOME real preview.
+    Never a row invented at confirm time; never a row NO preview ever
+    computed. This is a real, disclosed narrowing, not a hidden one --
+    not filed as a separate RT-N finding.
+    """
+    with migrated_schema() as conn:
+        insert_article(conn, **_stale_unmatched_article("https://example.com/race-1", days_old=400))
+        conn.commit()
+
+        first_preview = purge_stale_unmatched_articles(conn, older_than_days=30, confirm=False)
+        assert first_preview.row_ids  # sanity: the first preview really did see race-1
+
+        # A second, independent preview of the SAME operation+params
+        # races in before anyone confirms -- e.g. two admin tabs open,
+        # or an automated daily "preview then confirm" batch job
+        # overlapping a human's own preview.
+        insert_article(conn, **_stale_unmatched_article("https://example.com/race-2", days_old=400))
+        conn.commit()
+        second_preview = purge_stale_unmatched_articles(conn, older_than_days=30, confirm=False)
+        assert set(second_preview.row_ids) == {
+            r["id"] for r in conn.execute("SELECT id FROM articles WHERE url LIKE 'https://example.com/race-%'")
+        }
+
+        confirmed = purge_stale_unmatched_articles(conn, older_than_days=30, confirm=True)
+
+        # The confirm acted on the SECOND (most recent) snapshot -- both
+        # race rows, since the second preview saw both.
+        assert set(confirmed.row_ids) == set(second_preview.row_ids)
+        # Never a superset of what ANY real preview computed -- the
+        # specific property that keeps this a narrowing, not a reopening,
+        # of RT-6.
+        assert set(confirmed.row_ids) <= (set(first_preview.row_ids) | set(second_preview.row_ids))

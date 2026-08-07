@@ -1,0 +1,244 @@
+name: Daily batch
+
+# The scheduled production run (ADR §1: GitHub Actions cron is the batch
+# compute host — 360-min job cap vs. the measured ~2.5-min collection
+# phase, 2,000 free minutes/month on a private repo). Invokes
+# `python -m app.batch` (app/batch/__main__.py -> app.batch.run_daily.main()),
+# the same entrypoint documented in README-rebuild.md's "Layout" section.
+#
+# This workflow NEVER runs pytest and therefore cannot run the test
+# suite's `parity` marker (that marker only exists inside
+# tests/test_parity_tolerance.py and is excluded from pytest collection
+# by default anyway, per tests/conftest.py — this workflow doesn't even
+# invoke pytest to begin with, so the question doesn't arise here the
+# way it does for ci.yml). Whatever `python -m app.batch` does — today,
+# the real P1 fetch layer only; once P3-LLM wires it in, the LLM
+# enrichment stages too — is the one intended, already-budgeted
+# production call path; this workflow adds nothing extra that could
+# spend additional tokens beyond it.
+on:
+  schedule:
+    # 00:00 UTC = 06:00 Asia/Dhaka (UTC+6, no DST — storage-policy.md
+    # notes Dhaka has held a fixed +06:00 offset since 2009, so this
+    # mapping never drifts). Reasoning: Dhaka's *calendar day D* runs
+    # from UTC (D-1)18:00 to UTC D 17:59, so it is only fully over, and
+    # every source's "today" sitemap/RSS/API fully settled, from UTC
+    # D 18:00 onward. Firing at UTC 00:00 (= Dhaka 06:00, i.e. 6 hours
+    # into Dhaka's *next* day) is comfortably inside that "day D is
+    # over" window with margin for outlets whose own indexing lags
+    # slightly past local midnight, while still delivering a finished
+    # run before a typical Bangladesh business day starts — this
+    # mirrors the legacy system's own ~06:15 Dhaka run time
+    # (frontend-contract.md §3.10's "last run 06:15"), which the same
+    # reasoning already validated in production.
+    #
+    # Known GitHub limitation, not this workflow's bug: Actions documents
+    # that scheduled runs can be delayed (rarely dropped) during periods
+    # of high platform load, especially around common UTC-hour
+    # boundaries (00:00 UTC is one of the more popular cron slots
+    # site-wide). `workflow_dispatch` below exists partly to recover
+    # from that manually if a scheduled run is ever visibly missed.
+    - cron: "0 0 * * *"
+  workflow_dispatch: {}
+
+# Least-privilege GITHUB_TOKEN: read-only checkout, plus write only what
+# the failure-tracking-issue steps below need. No other permission is
+# requested.
+permissions:
+  contents: read
+  issues: write
+
+# Refuse to let two batch runs touch the database at once (a manual
+# workflow_dispatch fired while yesterday's scheduled run is still going
+# is the realistic way this happens). `cancel-in-progress: false` queues
+# the new run behind the current one rather than killing it — cancelling
+# a live run would itself produce exactly the kind of abandoned
+# `status='running'` row DoD #6 is about; queuing avoids manufacturing
+# the problem this workflow is also trying to guard against.
+concurrency:
+  group: daily-batch
+  cancel-in-progress: false
+
+jobs:
+  batch:
+    runs-on: ubuntu-latest
+
+    # Deliberately below the 360-min Actions cap. Sizing: measured
+    # collection is ~2.5 min (confirmed directly — a real local run
+    # against a fresh Postgres during this task's verification took
+    # 2m17s for the full 45-source fetch). LLM enrichment is the long
+    # pole and is rate-limit-paced, not compute-bound: token-budget.md
+    # §4's own central estimate is "~73 minutes at an assumed 15 RPM"
+    # once Groq's ~200K TPD is exhausted (in the first ~25-30 calls,
+    # ~5-10 min of wall clock per token-budget.md §3.5) and Gemini/
+    # Mistral carry the rest. That estimate's honest uncertainty (Gemini
+    # publishes no rate-limit headers; its real RPD is unverified and
+    # token-budget.md §4 flags the pessimistic end as "does not fit" in
+    # any bounded time) is exactly why this is ~2x that central
+    # estimate, not the estimate itself: generous room for a slower
+    # provider day, jittered retry/backoff, and setup/migration
+    # overhead, while still bounding a single stuck run's cost to ~42%
+    # of the hard 360-min ceiling and ~7.5% of the 2,000 free
+    # minutes/month this repo has to spend across every workflow.
+    timeout-minutes: 150
+
+    env:
+      APP_ENV: production
+      LOG_LEVEL: INFO
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      SECRET_KEY: ${{ secrets.SECRET_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install app package (runtime deps only — no [dev] extras)
+        # No pytest/ruff/mypy/httpx2 needed: this workflow never lints,
+        # type-checks, or runs the test suite (see the top-of-file note)
+        # — installing them here would only cost Actions minutes for no
+        # benefit.
+        run: pip install -e .
+
+      - name: Apply database migrations
+        # Same runner ci.yml uses (app/db/migrate.py), applied against
+        # the real production DATABASE_URL this time — never
+        # hand-maintained SQL in this workflow, so production can never
+        # drift from migrations/*.sql. Fails loudly (a plain Python
+        # traceback naming the exact connection/SQL error) if the
+        # database is unreachable or a migration is broken; that failure
+        # is itself what triggers the alerting step below, so a second,
+        # separate reachability guard (as ci.yml has, for a
+        # pytest-silent-skip problem this workflow doesn't have) isn't
+        # needed here.
+        run: python -m app.db.migrate
+
+      - name: Run the daily batch
+        run: python -m app.batch
+
+      - name: Open or update a tracking issue on failure
+        # Failure alerting (DoD #4). GitHub's own default behavior for a
+        # failed *scheduled* workflow already emails the user who last
+        # edited this file's cron line — zero configuration, but real
+        # reliability is bounded by that one person's GitHub email/
+        # notification settings, and it's easy to miss a single email in
+        # a normal inbox. This step is the leaner, more durable
+        # complement: `actions/github-script` is an official GitHub
+        # action already bundled with every runner, authenticated with
+        # the automatically-provided GITHUB_TOKEN — no new secret, no
+        # new external service (no Slack/Discord/PagerDuty webhook to
+        # provision and no new credential for ARCH-REPO to add). It
+        # leaves a persistent, unmissable signal in the repo's own
+        # Issues tab rather than a single ephemeral email, and updates
+        # (rather than duplicates) an existing open failure issue so a
+        # multi-day outage produces one growing thread, not a new issue
+        # every morning.
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const label = "daily-batch-failure";
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `The scheduled daily batch run failed.\n\nRun: ${runUrl}\nTrigger: ${context.eventName}\n\nCheck the run's step logs for the failing step and its error.`;
+
+            const { data: openIssues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: label,
+            });
+
+            if (openIssues.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: openIssues[0].number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: "Daily batch run failed",
+                body,
+                labels: [label],
+              });
+            }
+
+      - name: Close the tracking issue if this run succeeded
+        # The other half of the loop: a subsequent green run
+        # auto-resolves whatever the failure step opened, so a
+        # transient outage doesn't leave a permanently-open issue
+        # someone has to remember to close by hand.
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const label = "daily-batch-failure";
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const { data: openIssues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: label,
+            });
+
+            for (const issue of openIssues) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `Resolved: run ${runUrl} completed successfully.`,
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: "closed",
+              });
+            }
+
+# ── Stale-run reaper — NOT implemented here, on purpose ─────────────
+#
+# migrations/0002_reference_tables.sql's `runs` table has exactly the
+# columns a watchdog needs (`heartbeat_at`, `idx_runs_status_running`,
+# both with header comments naming this exact use case) and
+# app/services/collector.py's `run_collection()` (P1-INGEST, RT-1) now
+# writes and heartbeats a `runs` row for every invocation — but nothing
+# anywhere marks a PAST run stale if the process that owned it was
+# killed before it could finalize its own row (this job's own
+# `timeout-minutes` above is exactly that failure mode: a SIGKILL from
+# Actions cannot run Python's `finally` block reliably, so a run killed
+# by that timeout is a `status='running'` row with a `heartbeat_at` that
+# will simply stop advancing, forever, unless something else notices).
+#
+# This is not implemented in this workflow deliberately, not by
+# oversight: doing it here would mean hand-writing an `UPDATE runs SET
+# status='error' WHERE ...` statement in YAML, duplicating logic that
+# app/services/collector.py already owns (run status values, the
+# `details` JSONB shape, what a `finished_at` should look like on an
+# abnormal end) outside the module responsible for it — the exact
+# "hand-maintained SQL drifts from the source of truth" antipattern the
+# migrations step above avoids by using app/db/migrate.py instead of
+# inline SQL. app/services/** and app/batch/** are P1-INGEST's active
+# files this task, not ARCH-REPO's.
+#
+# Recommendation (see this task's report for the full version): a small
+# function alongside `_start_run`/`_touch_heartbeat`/`_finalize_run` in
+# app/services/collector.py — e.g. `reap_stale_runs(conn, stale_after=...)`
+# marking any `status='running'` row whose `heartbeat_at` is older than
+# some threshold (a few multiples of how often `_touch_heartbeat` fires,
+# i.e. minutes, not this job's 150-minute ceiling) as `status='error'` —
+# called at the START of `run_collection()`/`app.batch.run_daily.main()`,
+# so every new run first self-heals any previous run's abandoned row
+# before starting its own. That makes it correct by construction on
+# every future invocation (including a manual `workflow_dispatch`)
+# without this workflow needing a dedicated step or schedule of its own.

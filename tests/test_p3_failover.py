@@ -1,0 +1,201 @@
+"""`app.services.llm.failover.FailoverTransport` — automatic failover on
+429/5xx and quota exhaustion (DoD #2), AND per-key pooling within one
+provider (Task 3), proven with `FakeLLMProvider` doubles standing in
+for an ordered list of `(identity, Transport)` candidates (their
+`_generate()` signature is identical to the real thing — see
+`app/services/llm/transport.py`'s module docstring).
+
+The load-bearing property under test: once failover exhausts every
+candidate, the exception it raises is STILL exactly the shape
+`LLMClient`'s own `except Exception` (p3-contract.md §3) needs to fall
+back to the documented neutral value — i.e. failover composes cleanly
+with the frozen malformed-response contract rather than fighting it.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import pytest
+
+from app.errors import ProviderPermanentError, ProviderRateLimitedError
+from app.services.llm.failover import FailoverTransport, two_way
+from app.services.llm.provider import LLMClient
+from app.services.llm.quota import InMemoryQuotaStore, ProviderLimits, QuotaTracker
+from app.services.llm.types import Judgment
+from tests.helpers.fake_llm import FakeLLMProvider, judge_batch_response
+
+
+@dataclass
+class _RaisingTransport:
+    """A `Transport` double that always raises a specific
+    `ProviderError` — `FakeLLMProvider`'s failure modes raise
+    `requests` exceptions, not `app.errors.ProviderError` subclasses
+    (that mapping happens inside the real transports), so this double
+    tests `FailoverTransport`'s own catch/continue logic directly and
+    independent of any one real transport's error-mapping.
+    """
+
+    exc: Exception
+    calls: list[str] = field(default_factory=list)
+
+    def _generate(self, prompt: str, system: str = "", fmt: str | None = None, num_predict=None, num_ctx=None) -> str:
+        self.calls.append(prompt)
+        raise self.exc
+
+
+def _tracker(limits: dict[str, ProviderLimits] | None = None) -> QuotaTracker:
+    return QuotaTracker(store=InMemoryQuotaStore(), limits=limits or {})
+
+
+def _failover(primary, secondary=None, *, quota: QuotaTracker | None = None) -> FailoverTransport:
+    return two_way(quota or _tracker(), "groq", primary, "gemini" if secondary is not None else None, secondary)
+
+
+def test_primary_success_never_touches_secondary() -> None:
+    primary = FakeLLMProvider(responses=lambda p, s: "primary answer")
+    secondary = FakeLLMProvider(responses=lambda p, s: "secondary answer")
+    failover = _failover(primary, secondary)
+
+    result = failover._generate("prompt", system="sys")
+    assert result == "primary answer"
+    assert len(secondary.call_log) == 0
+
+
+def test_primary_429_falls_over_to_secondary() -> None:
+    primary = _RaisingTransport(exc=ProviderRateLimitedError("rate limited", provider="groq"))
+    secondary = FakeLLMProvider(responses=lambda p, s: "secondary answer")
+    failover = _failover(primary, secondary)
+
+    result = failover._generate("prompt")
+    assert result == "secondary answer"
+    assert primary.calls == ["prompt"]
+
+
+def test_primary_permanent_error_also_falls_over() -> None:
+    # DoD #2: "fail over when a provider is exhausted OR ERRORING" — not
+    # just the retryable 429/5xx case.
+    primary = _RaisingTransport(exc=ProviderPermanentError("bad key", provider="groq"))
+    secondary = FakeLLMProvider(responses=lambda p, s: "secondary answer")
+    failover = _failover(primary, secondary)
+
+    assert failover._generate("prompt") == "secondary answer"
+
+
+def test_both_providers_failing_raises_the_secondary_error() -> None:
+    primary = _RaisingTransport(exc=ProviderRateLimitedError("groq down", provider="groq"))
+    secondary = _RaisingTransport(exc=ProviderRateLimitedError("gemini down", provider="gemini"))
+    failover = _failover(primary, secondary)
+
+    with pytest.raises(ProviderRateLimitedError, match="gemini down"):
+        failover._generate("prompt")
+
+
+def test_no_secondary_configured_raises_primary_error_directly() -> None:
+    primary = _RaisingTransport(exc=ProviderRateLimitedError("groq down", provider="groq"))
+    failover = _failover(primary)
+
+    with pytest.raises(ProviderRateLimitedError, match="groq down"):
+        failover._generate("prompt")
+
+
+# ── N-way pooling (Task 3: per-key pooling within one provider) ────────
+
+
+def test_n_way_candidate_list_pools_across_more_than_two_entries() -> None:
+    """The generalized shape `two_way()` is built on top of: THREE
+    candidates (e.g. groq:key1, groq:key2, gemini:key1 — the pattern
+    `app.services.llm.registry` builds when a provider has multiple
+    pooled keys) are tried in order, not just a fixed primary/secondary
+    pair.
+    """
+    key1 = _RaisingTransport(exc=ProviderRateLimitedError("key1 exhausted", provider="groq:key1"))
+    key2 = _RaisingTransport(exc=ProviderRateLimitedError("key2 exhausted", provider="groq:key2"))
+    key3 = FakeLLMProvider(responses=lambda p, s: "third candidate answer")
+
+    failover = FailoverTransport(
+        quota=_tracker(), candidates=[("groq:key1", key1), ("groq:key2", key2), ("gemini:key1", key3)]
+    )
+    result = failover._generate("prompt")
+
+    assert result == "third candidate answer"
+    assert key1.calls == ["prompt"]
+    assert key2.calls == ["prompt"]
+
+
+def test_n_way_candidate_quota_tracked_independently_per_key() -> None:
+    """Two keys of the SAME provider must have INDEPENDENT quota — one
+    key hitting its ceiling must not affect the other key's availability
+    (this is the entire point of pooling: 2 keys = ~2x the effective
+    ceiling, not a shared bucket that empties twice as fast).
+    """
+    key1 = FakeLLMProvider(responses=lambda p, s: "key1 answer")
+    key2 = FakeLLMProvider(responses=lambda p, s: "key2 answer")
+    tracker = _tracker(limits={"groq:key1": ProviderLimits(rpd=1), "groq:key2": ProviderLimits(rpd=1)})
+    tracker.record("groq:key1", tokens=0, requests=1)  # key1 already exhausted; key2 is fresh
+
+    failover = FailoverTransport(quota=tracker, candidates=[("groq:key1", key1), ("groq:key2", key2)])
+    result = failover._generate("prompt")
+
+    assert result == "key2 answer"
+    assert len(key1.call_log) == 0  # skipped — quota exhausted before any HTTP attempt
+    assert len(key2.call_log) == 1
+
+
+def test_quota_exhausted_primary_skips_straight_to_secondary_without_a_call() -> None:
+    primary = FakeLLMProvider(responses=lambda p, s: "should not be called")
+    secondary = FakeLLMProvider(responses=lambda p, s: "secondary answer")
+    tracker = _tracker(limits={"groq": ProviderLimits(rpd=1)})
+    tracker.record("groq", tokens=100, requests=1)  # already at the RPD=1 ceiling
+
+    failover = _failover(primary, secondary, quota=tracker)
+    result = failover._generate("prompt")
+
+    assert result == "secondary answer"
+    assert len(primary.call_log) == 0  # never called — quota check happened BEFORE any HTTP attempt
+
+
+def test_both_quota_exhausted_raises_rate_limited_error() -> None:
+    primary = FakeLLMProvider()
+    secondary = FakeLLMProvider()
+    tracker = _tracker(limits={"groq": ProviderLimits(rpd=1), "gemini": ProviderLimits(rpd=1)})
+    tracker.record("groq", tokens=0, requests=1)
+    tracker.record("gemini", tokens=0, requests=1)
+
+    failover = _failover(primary, secondary, quota=tracker)
+    with pytest.raises(ProviderRateLimitedError):
+        failover._generate("prompt")
+    assert len(primary.call_log) == 0
+    assert len(secondary.call_log) == 0
+
+
+# ── composed with LLMClient — the whole-batch fallback still fires ──────
+
+
+def test_failover_exhaustion_still_produces_the_documented_llm_client_fallback() -> None:
+    """End-to-end: both providers down -> FailoverTransport raises ->
+    LLMClient.judge_batch's OWN except Exception (p3-contract.md §3)
+    catches it and returns the neutral-score fallback — proving
+    failover composes with, rather than breaks, the frozen contract.
+    """
+    primary = _RaisingTransport(exc=ProviderRateLimitedError("groq down", provider="groq"))
+    secondary = _RaisingTransport(exc=ProviderRateLimitedError("gemini down", provider="gemini"))
+    failover = _failover(primary, secondary)
+    client = LLMClient(transport=failover, name="failover-test")
+
+    result = client.judge_batch([{"title_en": "A"}, {"title_en": "B"}])
+    assert result == [
+        Judgment(relevant=True, score=5, reason=result[0].reason),
+        Judgment(relevant=True, score=5, reason=result[0].reason),
+    ]
+    assert "gemini down" in result[0].reason
+
+
+def test_failover_success_on_secondary_is_transparent_to_llm_client() -> None:
+    primary = _RaisingTransport(exc=ProviderRateLimitedError("groq down", provider="groq"))
+    secondary = FakeLLMProvider(responses=lambda p, s: judge_batch_response([(1, 9, "top tier")]))
+    failover = _failover(primary, secondary)
+    client = LLMClient(transport=failover, name="failover-test")
+
+    result = client.judge_batch([{"title_en": "A"}])
+    assert result == [Judgment(relevant=True, score=9, reason="top tier")]
