@@ -302,41 +302,146 @@ A silent failure is the worst outcome for an unattended daily job.
    than relying solely on one email, without adding a Slack/Discord/
    PagerDuty webhook or any other new service.
 
-### Stale-run reaper — recommended, not implemented here
+### Stale-run reaper — implemented (RT-1-residual, closed)
 
 `migrations/0002_reference_tables.sql`'s `runs` table has exactly the
 columns a watchdog needs (`heartbeat_at`, `idx_runs_status_running`) and
-`app/services/collector.py`'s `run_collection()` (P1-INGEST, RT-1) now
-writes and heartbeats a `runs` row per invocation — but nothing yet
-marks a *past* run stale if the process that owned it was killed before
-it could finalize its own row. `daily-batch.yml`'s own
+`app/services/collector.py`'s `run_collection()` (P1-INGEST, RT-1)
+writes and heartbeats a `runs` row per invocation — but until DEPLOY's
+pass, nothing marked a *past* run stale if the process that owned it was
+killed before it could finalize its own row. `daily-batch.yml`'s own
 `timeout-minutes: 150` is exactly that failure mode: a SIGKILL from
 Actions cannot reliably run Python's `finally` block, so a run killed by
-timeout is a `status='running'` row whose `heartbeat_at` simply stops
-advancing, forever, unless something else notices — legacy's own
-un-reaped equivalent left 16 of 110 runs stuck this way.
+timeout was a `status='running'` row whose `heartbeat_at` simply stopped
+advancing, forever, unless something else noticed — legacy's own
+un-reaped equivalent left 16 of 110 runs stuck this way
+(`docs/red-team-findings.md`, RT-1-residual).
 
-Not implemented in this workflow, on purpose: doing it as an `UPDATE
-runs SET status='error' WHERE ...` in the YAML would hand-maintain SQL
-that duplicates logic `app/services/collector.py` already owns (status
-values, the `details` shape, what a normal vs. abnormal finalize looks
-like) outside the module responsible for it — the same
-hand-maintained-SQL antipattern the migrations step avoids by calling
-`app/db/migrate.py` instead of embedding SQL in the workflow.
-`app/services/**` and `app/batch/**` are P1-INGEST's active files, not
-`ARCH-REPO`'s, so this is a recommendation to route rather than
-something reached into and changed here:
+**Fixed:** `app/db/reaper.py::reap_stale_runs(conn, stale_after=timedelta(minutes=30))`
+— lives in `app/db/` (this task's one exception to that directory
+otherwise being ARCH-DB's territory) rather than alongside `_start_run`/
+`_touch_heartbeat`/`_finalize_run` in `app/services/collector.py` (this
+document's own prior recommendation, before this task existed) because
+`app/services/**` was outside DEPLOY's owned-files list this round.
+Wired into `app/batch/run_daily.py::main()` — called at the very start
+of every batch run, before `run_collection()` touches the `runs` table
+again, so every new invocation (scheduled cron or manual
+`workflow_dispatch`) self-heals any previous run's abandoned row before
+starting its own, correct by construction, with no separate reaper
+schedule or workflow step. Full writeup, threshold reasoning, and the
+one honestly-not-closed piece (ADMIN-API's own admin-dashboard read path
+still doesn't surface a stale row as such — out of this task's
+owned-files list): `docs/deployment.md` §7 (news-intel-rebuild repo).
+Regression tests: `tests/test_reaper_stale_runs.py`.
 
-**Recommendation:** a small function alongside `_start_run` /
-`_touch_heartbeat` / `_finalize_run` in `app/services/collector.py` —
-e.g. `reap_stale_runs(conn, stale_after=...)` — marking any
-`status='running'` row whose `heartbeat_at` is older than a threshold
-(minutes, not this job's 150-minute ceiling) as `status='error'`, called
-at the **start** of `run_collection()` / `app.batch.run_daily.main()`.
-Every new run then self-heals any previous run's abandoned row before
-starting its own — correct by construction on every future invocation,
-scheduled or manual, with no separate reaper schedule or workflow step
-needed.
+## Render deployment — API + frontend
+
+`render.yaml` (repo root) is the committed Blueprint config for both
+Render-hosted surfaces (ADR §1/§9.4). Full walkthrough, including the
+`preDeployCommand`-is-paid-only reasoning behind chaining migrations
+into `startCommand`, and the liveness-vs-readiness tradeoff behind
+`healthCheckPath`: `docs/deployment.md` (news-intel-rebuild repo). No
+real Render account was created or deployed to for this — the owner
+launches both services from the Render dashboard ("New +" → "Blueprint")
+pointed at this repo.
+
+| Service | `render.yaml` name | Start command | Health check |
+|---|---|---|---|
+| API | `erm-backend` | `python -m app.db.migrate && uvicorn app.main:app --host 0.0.0.0 --port $PORT` | `GET /health/ready` |
+| Frontend | `erm-frontend` | *(none — static files, no build step)* | *(static sites have no health check)* |
+
+`GET /health/ready` (`app/api/routers/health.py`, additive — no existing
+admin-gated route in that file was touched) is a **readiness** check,
+not the existing `GET /healthz` liveness probe (`app/main.py`,
+unmodified): it runs a real `SELECT 1` against `DATABASE_URL` and
+returns `503` if the database is unreachable, `200` either way if
+`DATABASE_URL` is unset (the legitimate local-dev/CI state).
+Unauthenticated on purpose — Render's health-checker cannot present a
+session cookie. See `docs/deployment.md` §4 for why Render's single
+health-check knob is pointed at readiness rather than liveness, and the
+restart-loop tradeoff that implies during a genuine Supabase outage.
+
+### Required environment variables, per surface
+
+Every variable this task's mission named, and exactly which of the
+three surfaces (GitHub Actions secrets, the Render API service's
+environment, the Render static site) needs it. **No real value is
+committed anywhere in this repo** — `.env.example` documents names with
+blank defaults for local dev; real values live in a gitignored `.env`
+locally, GitHub's secret store for Actions, and Render's own per-service
+Environment tab in production.
+
+| Variable | GitHub Actions (`daily-batch.yml`) | Render API (`erm-backend`) | Render static (`erm-frontend`) | Notes |
+|---|---|---|---|---|
+| `DATABASE_URL` | required — Supabase **direct** connection string | required — Supabase **pooled** connection string | — | Different connection string per surface; see "Supabase connection pooling" below and `docs/deployment.md` §6 for why. |
+| `SECRET_KEY` | required | required | — | Fernet key encrypting admin-entered LLM provider keys at rest (ADR §9.1). Also gates `validate_production_settings()` in both surfaces (`APP_ENV=production` in both). |
+| `RESEND_API_KEY` | not needed (batch job sends no OTP email) | required | — | OTP email transport (ADR §9.3), API-only concern. |
+| `RESEND_FROM_EMAIL` | not needed | required | — | Not secret (a verified sender address, not a credential) but still not hardcoded — a plain env var on the API service. |
+| `GROQ_API_KEY` | required | required (bootstrap/CI fallback — ADR §9.1 admin-entered keys are the primary path) | — | LLM provider, ADR §9.1. |
+| `GEMINI_API_KEY` | required | required (same bootstrap-fallback caveat) | — | LLM provider, ADR §9.1. |
+| `MISTRAL_API_KEY` | required | required (same bootstrap-fallback caveat) | — | LLM provider — `provider-limits-VERIFIED.md`'s "Round 2". |
+| `NVIDIA_API_KEY` | not currently read by any bootstrap env var — see the flag below | not currently read by any bootstrap env var — see the flag below | — | P3-LLM's provider registry sources NVIDIA's key from the encrypted `provider_configs` DB table (admin-entered) only; `app.config.Settings` has no `nvidia_api_key` field the way it does for Groq/Gemini/Mistral. Listed here per this task's mission anyway; flagged in `docs/deployment.md` §3 for whoever owns `app/config.py` next if a bootstrap fallback is wanted. |
+| `TRUSTED_PROXY_HOPS` | not applicable (no HTTP requests to rate-limit in the batch job) | required, **set to `1`** | — | SECURITY-CRITICAL, see the dedicated section below. |
+| `CORS_ALLOW_ORIGINS` | not applicable | required — the `erm-frontend` service's exact origin, e.g. `https://erm-frontend.onrender.com` | — | `app.main._validate_cors_settings` fails fast at startup if this is empty in production. |
+| `APP_ENV` | `production` (hardcoded in the workflow) | `production` | — | Gates `validate_production_settings()`'s fail-fast checks. |
+
+The frontend needs **no environment variables at all** — it has no
+build step to inject them into (`frontend/js/config.js` resolves its API
+base at runtime via query param → `localStorage` → a hardcoded
+`DEFAULT_PROD_API` constant the owner edits once, in the source file
+itself, at deploy time — see that file's own comments).
+
+### `TRUSTED_PROXY_HOPS` on Render — set to `1`
+
+`app.config.Settings.trusted_proxy_hops` defaults to **0** (RT-5
+remediation — never trust `X-Forwarded-For` by default). Render's own
+load balancer always sits in front of the API, appending the real
+client IP as one `X-Forwarded-For` hop before forwarding — so `0` on
+Render would make every request appear to come from Render's own edge
+address, collapsing the per-IP OTP rate limiter into one shared bucket
+for every real user. **Render alone counts as exactly one reverse-proxy
+hop — set `TRUSTED_PROXY_HOPS=1`** (`render.yaml` does this already).
+
+Getting it wrong is not symmetric:
+
+- **Too low** (left at the default `0`): an availability/UX bug — the
+  per-IP limiter degrades to one global bucket. Nothing is bypassable.
+- **Too high** (`2+`, with nothing but Render in front): a real security
+  regression — `resolve_client_ip` would read an `X-Forwarded-For` entry
+  an attacker fully controls (anything the attacker prepends ahead of
+  the one entry Render itself appends), making the per-IP OTP rate limit
+  **spoofable** — the exact bypass RT-5 found and this field exists to
+  close. An attacker who can defeat the per-IP limit can brute-force OTP
+  codes or exhaust the org's 100/day Resend quota (ADR §9.3) behind a
+  never-repeating fake IP on every request.
+
+Full reasoning, including what changes if a CDN/WAF is ever added in
+front of Render: `docs/deployment.md` §5.
+
+### Supabase connection pooling — pooled for the API, direct for the batch job
+
+Supabase free tier: **60 direct connections, 200 pooled** (ADR §1). This
+app opens no connection pool of its own (`app/db/connection.py`'s own
+docstring: a short-lived `psycopg.connect()` per unit of work is enough
+at this traffic scale) — but *which* of Supabase's two connection
+strings each caller's `DATABASE_URL` should be is still a real per-surface
+choice:
+
+- **API (`erm-backend`):** Supabase's **pooled** (Supavisor, port 6543)
+  connection string. The API opens one connection per incoming HTTP
+  request with no app-level pool — exactly the "many short-lived
+  connections" pattern Supabase's pooler exists to absorb without
+  exhausting Postgres's own `max_connections`.
+- **Batch job (`daily-batch.yml`):** Supabase's **direct** (port 5432)
+  connection string. Exactly one connection, held for the run's
+  duration, once a day, from a single GitHub Actions runner — the
+  simpler, more predictable choice for a single-writer workload with no
+  concurrency to absorb, leaving the scarcer 60-direct ceiling reserved
+  for a caller whose pattern actually suits it.
+
+Both values come from Supabase's dashboard (**Project Settings →
+Database → Connection string**, which offers both forms) at real deploy
+time. Full reasoning: `docs/deployment.md` §6.
 
 ## Logging
 

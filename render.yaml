@@ -1,0 +1,123 @@
+# Render Blueprint (https://render.com/docs/blueprint-spec) for the two
+# Render-hosted surfaces this project's ADR rules (ADR §1, §9.4 —
+# /Users/ayo_on/Documents/news-intel-rebuild/docs/architecture-decision-record.md):
+# the API on a Render free web service, the frontend on a Render Static
+# Site. The database (Supabase Postgres free) and the batch job (GitHub
+# Actions cron, .github/workflows/daily-batch.yml) are NOT Render
+# services and have nothing to declare here.
+#
+# Committed config only — nobody has run `render blueprint launch`
+# against a real account for this task (explicit constraint: no real
+# Render/Supabase account, no deploy performed here). The owner connects
+# this repo from the Render dashboard ("New +" → "Blueprint") to actually
+# provision these two services from this file. See
+# docs/deployment.md (news-intel-rebuild repo) for the full walkthrough
+# and README-rebuild.md for the required-env-vars table.
+#
+# Secrets: every envVar below with `sync: false` and no `value` is a
+# secret Render prompts the owner to fill in at blueprint-launch time (or
+# later, in the dashboard) — never a real value in this file, ever.
+
+services:
+  # ── API: FastAPI + uvicorn (ADR §1: Render free web service) ────────
+  - type: web
+    name: erm-backend
+    runtime: python
+    plan: free
+    buildCommand: pip install -e .
+    # Migrations run here, chained with `&&` into the start command —
+    # deliberately NOT Render's `preDeployCommand` hook, even though
+    # that would otherwise be the natural place: Render's own docs state
+    # pre-deploy commands are "available for paid web services, private
+    # services, and background workers" — free web services (this
+    # service's plan, ADR §1) don't get one. Chaining into startCommand
+    # instead means `python -m app.db.migrate` (the project's own
+    # deterministic runner, migrations/*.sql, app/db/migrate.py — never
+    # hand-maintained SQL) runs on every deploy AND every free-tier
+    # cold-start wake from the 15-minute idle sleep, both of which are
+    # exactly the moments "before the API serves traffic" needs to hold.
+    # Cheap to pay on every wake: run_migrations() is idempotent, a
+    # single fast SELECT against schema_migrations when nothing is
+    # pending (storage-policy.md §8, docs/deployment.md). `&&`
+    # short-circuits on migration failure — uvicorn never starts, so a
+    # broken migration fails the deploy loudly instead of serving
+    # traffic against a schema migrations/*.sql doesn't agree with.
+    startCommand: "python -m app.db.migrate && uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+    # Readiness, not liveness — verifies DB reachability with a real
+    # `SELECT 1` (app/api/routers/health.py's new `GET /health/ready`),
+    # not app.main's existing `/healthz` (deliberately a zero-dependency
+    # liveness probe only, see that route's own docstring). Render has
+    # exactly one health-check knob, used to gate when a deploy is
+    # considered live and to decide whether to restart a wedged
+    # instance — see docs/deployment.md's "liveness vs readiness"
+    # section for the restart-loop tradeoff this implies if Supabase
+    # itself has an outage, and why it's still the right call for a
+    # single-instance free-tier service with no rolling deploys to
+    # protect.
+    healthCheckPath: /health/ready
+    autoDeploy: true
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: PORT
+        # Documented for clarity only — Render injects its own PORT at
+        # deploy time regardless of this value (app.config.Settings.port's
+        # own description; uvicorn's --port $PORT in startCommand above
+        # already reads Render's real one directly, not this Settings field).
+        value: "8000"
+      - key: DATABASE_URL
+        sync: false
+      - key: SECRET_KEY
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: MISTRAL_API_KEY
+        sync: false
+      - key: NVIDIA_API_KEY
+        sync: false
+      # SECURITY-CRITICAL — RT-5 (docs/red-team-findings.md), see
+      # app.config.Settings.trusted_proxy_hops's own description and
+      # README-rebuild.md / docs/deployment.md for the full writeup.
+      # Render's own load balancer is exactly ONE reverse-proxy hop
+      # between the real client and this process — it terminates TLS
+      # and appends the real client IP as the rightmost X-Forwarded-For
+      # entry before forwarding. 1 is correct for Render alone with
+      # nothing else (no separate CDN/WAF) in front. Set higher than the
+      # real hop count and an attacker-supplied X-Forwarded-For entry
+      # becomes trusted as if a real proxy appended it — the exact RT-5
+      # per-IP OTP rate-limit bypass. Set to 0 (or leave unset — 0 is
+      # the fail-safe default) and every request behind Render's proxy
+      # is seen as coming from the same IP, collapsing per-IP OTP limits
+      # to a single shared bucket for every real client — not a security
+      # hole, but it breaks the limiter's actual purpose.
+      - key: TRUSTED_PROXY_HOPS
+        value: "1"
+      # The Render Static Site's exact origin — must match the
+      # erm-frontend service's real onrender.com URL (or a custom
+      # domain, if one is later attached). app.main's own CORS
+      # validation (_validate_cors_settings) fails fast at startup if
+      # this is empty in production, and rejects a literal "*" outright
+      # (invalid per spec once allow_credentials=True, which this API
+      # requires for its cross-subdomain session cookie).
+      - key: CORS_ALLOW_ORIGINS
+        value: https://erm-frontend.onrender.com
+
+  # ── Frontend: static files, NO build step (ADR §1: Render Static
+  # Site; frontend/README.md: "No npm, no build step, no node_modules").
+  # frontend/js/config.js resolves its API base at runtime (query param
+  # → localStorage → same-origin heuristic → a hardcoded DEFAULT_PROD_API
+  # constant), so there is no env-substitution step for this service to
+  # run either — the one thing to edit at deploy time is that constant,
+  # documented in frontend/js/config.js itself and README-rebuild.md.
+  - type: web
+    name: erm-frontend
+    runtime: static
+    staticPublishPath: frontend

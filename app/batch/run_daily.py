@@ -23,12 +23,25 @@ module doesn't implement). Run-lifecycle bookkeeping itself
 (`runs` row created/heartbeated/finalized) lives in
 `app.services.collector.run_collection` — see that module's docstring
 for why (RT-1, docs/red-team-findings.md).
+
+**RT-1-residual (docs/red-team-findings.md; DEPLOY mission):** before
+`run_collection` touches the `runs` table again, this entrypoint first
+calls `app.db.reaper.reap_stale_runs(conn)` — marking any *previous*
+run still stuck at `status='running'` with a heartbeat that stopped
+advancing (a hard kill: SIGKILL, OOM, or `daily-batch.yml`'s own
+`timeout-minutes`, none of which `run_collection`'s own exception
+handling can observe) as `status='error'` before starting fresh. Every
+new invocation of this entrypoint — scheduled or manual — self-heals any
+abandoned row from a previous one, by construction. See
+`app/db/reaper.py`'s module docstring for the full RT-1-residual
+writeup and the stale-threshold reasoning.
 """
 
 from __future__ import annotations
 
 from app.config import get_settings, validate_production_settings
 from app.db.connection import get_connection
+from app.db.reaper import reap_stale_runs
 from app.logging import configure_logging, get_logger
 from app.services.collector import run_collection
 from app.sources.registry import all_sources, load_all
@@ -54,6 +67,12 @@ def main() -> int:
 
     if settings.database_url:
         with get_connection() as conn:
+            reaped = reap_stale_runs(conn)
+            if reaped:
+                logger.warning(
+                    "stale_runs_reaped_before_run",
+                    extra={"run_ids": reaped, "count": len(reaped)},
+                )
             result = run_collection(conn, source_classes=sources)
     else:
         logger.warning(

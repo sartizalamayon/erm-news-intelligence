@@ -33,7 +33,13 @@ may not add one); each stage-run request blocks until that stage
 finishes, which is a real limitation for the judge/topic stages against
 a large batch. Flagged in this task's report, not solved here.
 
-Every route is gated by `require_admin` (app.api.deps).
+Every route is gated by `require_admin` (app.api.deps) — EXCEPT
+`GET /health/ready` below, added by the DEPLOY mission (Render deploy
+config, docs/deployment.md): a readiness probe Render's own health
+checker calls has no way to authenticate (no session cookie, no
+browser), so it deliberately sits outside `require_admin`, unlike every
+other route in this file. Purely additive — nothing above this route was
+touched.
 """
 
 from __future__ import annotations
@@ -49,10 +55,53 @@ from app.api.schemas.admin import (
     SourceTestResult,
     StageRunResult,
 )
+from app.config import Settings, get_settings
 from app.db.connection import get_connection
+from app.logging import get_logger
 from app.services import admin as admin_service
 
+logger = get_logger(__name__)
+
 router = APIRouter(prefix="/health", tags=["admin", "health"])
+
+
+@router.get("/ready")
+def readiness(settings: Settings = Depends(get_settings)) -> dict[str, str]:
+    """Readiness probe for Render's `healthCheckPath` (render.yaml,
+    docs/deployment.md) — distinct from `app.main`'s existing `GET
+    /healthz`, which is a deliberate zero-dependency liveness probe only
+    (see that route's own docstring: "keep those separate if a readiness
+    probe is added later"). This is that later: added here, in
+    app/api/routers/health.py, rather than in app/main.py, because
+    app/main.py and app/middleware/** are out of this task's owned-files
+    list this round.
+
+    Runs a real `SELECT 1` against the configured database — a stale
+    `/healthz` that only ever returns `{"status": "ok"}` cannot tell
+    Render "the process is up but Supabase is unreachable" apart from
+    "everything is fine", which is exactly the false-positive this route
+    exists to close. `DATABASE_URL` unset (local dev / CI default) is
+    treated as a legitimate non-production state, not a failure — there
+    is nothing to check reachability of.
+
+    `settings` is a FastAPI dependency (not the raw `get_settings()`
+    singleton call every other route in this file uses) specifically so
+    tests can override it per-request via `app.dependency_overrides`
+    (see tests/test_deploy_readiness.py) without mutating the
+    process-wide `lru_cache`d settings singleton other tests also share.
+    """
+    if not settings.database_url:
+        return {"status": "ok", "database": "not_configured"}
+    try:
+        with get_connection(settings.database_url) as conn:
+            conn.execute("SELECT 1")
+    except Exception as exc:
+        # Deliberately broad: ANY DB failure means "not ready", not just
+        # the ones anticipated up front -- same reasoning
+        # app.services.collector.py documents for its own broad catch.
+        logger.error("readiness_db_unreachable", extra={"error": str(exc)})
+        raise HTTPException(status_code=503, detail="database unreachable") from exc
+    return {"status": "ok", "database": "reachable"}
 
 
 @router.get("/overview", response_model=HealthOverviewOut)
