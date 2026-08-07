@@ -143,6 +143,64 @@ def test_health_runs_orders_most_recent_first() -> None:
         assert rows[0]["trigger"] == "manual"
 
 
+def test_health_runs_surfaces_heartbeat_and_flags_stale_running_row() -> None:
+    """RT-1-residual (tests/test_redteam_orphaned_runs.py): a run whose
+    heartbeat stopped advancing (simulating a hard SIGKILL between
+    app.services.collector._start_run/_touch_heartbeat and
+    _finalize_run, which app.db.reaper.reap_stale_runs only cleans up on
+    the NEXT batch invocation) must be observable as stale through this
+    read path in the meantime, not silently reported as still running.
+    """
+    with migrated_schema() as conn:
+        stale_id = _insert_run(conn, details={}, status="running")
+        conn.execute(
+            "UPDATE runs SET heartbeat_at = now() - interval '2 hours' WHERE id = %s", (stale_id,)
+        )
+        healthy_id = _insert_run(conn, details={}, status="running")
+        conn.execute("UPDATE runs SET heartbeat_at = now() WHERE id = %s", (healthy_id,))
+        conn.commit()
+
+        rows = {r["id"]: r for r in admin_service.health_runs(conn, limit=5)}
+
+        assert rows[stale_id]["heartbeat_at"] is not None
+        assert rows[stale_id]["status"] == "running"
+        assert rows[stale_id]["heartbeat_stale"] is True
+
+        assert rows[healthy_id]["heartbeat_stale"] is False
+
+
+def test_health_runs_finished_row_never_flagged_stale_regardless_of_heartbeat_age() -> None:
+    with migrated_schema() as conn:
+        done_id = _insert_run(conn, details={}, status="done")
+        conn.execute("UPDATE runs SET heartbeat_at = now() - interval '2 hours' WHERE id = %s", (done_id,))
+        conn.commit()
+
+        rows = {r["id"]: r for r in admin_service.health_runs(conn, limit=5)}
+        assert rows[done_id]["heartbeat_stale"] is False
+
+
+def test_router_health_runs_response_includes_heartbeat_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    with migrated_schema() as conn:
+        import app.api.routers.health as health_router_module
+
+        stale_id = _insert_run(conn, details={}, status="running")
+        conn.execute(
+            "UPDATE runs SET heartbeat_at = now() - interval '2 hours' WHERE id = %s", (stale_id,)
+        )
+        conn.commit()
+
+        monkeypatch.setattr(health_router_module, "get_connection", lambda: contextlib.nullcontext(conn))
+
+        app = create_app()
+        app.dependency_overrides[get_current_user] = lambda: ADMIN
+        with TestClient(app) as client:
+            resp = client.get("/health/runs")
+            assert resp.status_code == 200
+            row = next(r for r in resp.json() if r["id"] == stale_id)
+            assert row["heartbeat_stale"] is True
+            assert row["heartbeat_at"] is not None
+
+
 # ── Pipeline stage runs ──────────────────────────────────────────────────
 
 

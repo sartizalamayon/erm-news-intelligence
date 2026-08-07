@@ -374,6 +374,14 @@ class RunRowOut(BaseModel):
     new_count: int
     matched_count: int
     status: str
+    # RT-1-residual (tests/test_redteam_orphaned_runs.py): a hard-killed
+    # run leaves status='running' forever between kills and the next
+    # batch's app.db.reaper.reap_stale_runs sweep. Surfacing the raw
+    # heartbeat plus a computed staleness flag lets an operator (or the
+    # Source-health screen) tell that apart from a run genuinely still
+    # in progress, instead of trusting `status` alone.
+    heartbeat_at: str | None = None
+    heartbeat_stale: bool = False
 
 
 class StageRunResult(BaseModel):

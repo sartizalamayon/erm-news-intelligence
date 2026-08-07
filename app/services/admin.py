@@ -1247,19 +1247,41 @@ def health_overview(conn: DictConnection) -> dict[str, Any]:
     }
 
 
+# RT-1-residual (docs/red-team-findings.md,
+# tests/test_redteam_orphaned_runs.py): app.db.reaper.reap_stale_runs
+# (DEPLOY, 59dbae7) self-heals a hard-killed run's abandoned
+# status='running' row on the NEXT batch invocation, but between the
+# kill and that next run, nothing surfaced heartbeat_at at all -- a
+# stuck row read exactly like a healthy one. Mirrors
+# app.db.reaper.DEFAULT_STALE_AFTER so "stale" means the same thing here
+# as it does to the thing that eventually reaps it.
+_HEARTBEAT_STALE_AFTER = timedelta(minutes=30)
+
+
 def health_runs(conn: DictConnection, limit: int = 5) -> list[dict[str, Any]]:
     rows = conn.execute(
-        "SELECT id, started_at, trigger, total_new, total_matched, status FROM runs ORDER BY started_at DESC LIMIT %s",
+        "SELECT id, started_at, heartbeat_at, trigger, total_new, total_matched, status "
+        "FROM runs ORDER BY started_at DESC LIMIT %s",
         (limit,),
     ).fetchall()
-    return [
-        {
-            "id": r["id"],
-            "when": r["started_at"].isoformat() if r["started_at"] else "",
-            "trigger": r["trigger"],
-            "new_count": r["total_new"],
-            "matched_count": r["total_matched"],
-            "status": r["status"],
-        }
-        for r in rows
-    ]
+    now = datetime.now(timezone.utc)
+    out = []
+    for r in rows:
+        heartbeat_at = r["heartbeat_at"]
+        last_beat = heartbeat_at or r["started_at"]
+        heartbeat_stale = bool(
+            r["status"] == "running" and last_beat is not None and (now - last_beat) > _HEARTBEAT_STALE_AFTER
+        )
+        out.append(
+            {
+                "id": r["id"],
+                "when": r["started_at"].isoformat() if r["started_at"] else "",
+                "trigger": r["trigger"],
+                "new_count": r["total_new"],
+                "matched_count": r["total_matched"],
+                "status": r["status"],
+                "heartbeat_at": heartbeat_at.isoformat() if heartbeat_at else None,
+                "heartbeat_stale": heartbeat_stale,
+            }
+        )
+    return out
