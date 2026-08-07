@@ -123,7 +123,10 @@ class _FakeSource(NewsSource):
 
 
 def _now_dhaka() -> datetime:
-    return datetime.now(timezone.utc) + timedelta(hours=6)
+    # A real, correctly-labeled UTC instant -- probe_source's own
+    # `.astimezone(dhaka)` does the +6h conversion; shifting here too
+    # double-applies the offset and can roll the date over.
+    return datetime.now(timezone.utc)
 
 
 def test_probe_source_unknown_id_returns_none() -> None:

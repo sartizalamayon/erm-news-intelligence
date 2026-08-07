@@ -650,7 +650,7 @@ def mine_keyword_candidates(conn: DictConnection, *, limit: int = 6, sample: int
         for word, count in approved_counts.items()
         if word not in existing_terms
     ]
-    candidates.sort(key=lambda c: (-c["approved"], c["rejected"]))
+    candidates.sort(key=lambda c: (-int(c["approved"]), int(c["rejected"])))
     return candidates[:limit]
 
 
