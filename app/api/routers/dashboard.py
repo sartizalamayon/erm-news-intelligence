@@ -29,7 +29,7 @@ import dataclasses
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.api.deps import AuthenticatedUser, get_current_user, require_admin
 from app.api.schemas.admin import (
@@ -300,7 +300,9 @@ def _add_months(d: date, delta: int) -> date:
 
 
 @router.get("/trends", response_model=DashboardTrendsOut)
-def dashboard_trends(range: str = "12mo", user: AuthenticatedUser = Depends(get_current_user)) -> DashboardTrendsOut:
+def dashboard_trends(
+    range_param: str = Query("12mo", alias="range"), user: AuthenticatedUser = Depends(get_current_user)
+) -> DashboardTrendsOut:
     today = _today_dhaka()
     since_month = _add_months(_month_start(today), -11)
     month_list = [_add_months(since_month, i) for i in range(12)]

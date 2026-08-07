@@ -9,7 +9,8 @@ Service-layer-shaped tests run against a real, migrated Postgres schema
 from __future__ import annotations
 
 import contextlib
-from datetime import date, timedelta
+import itertools
+from datetime import date, datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,10 +25,14 @@ pytestmark = pytest.mark.skipif(not pg_available(), reason="no reachable Postgre
 
 USER = AuthenticatedUser(id=1, email="analyst@grameenphone.com", role="analyst", display_name="Analyst", session_id=1)
 
+_url_seq = itertools.count()
+
 
 def _insert_article(conn, **fields):
+    if fields.get("review_status") == "approved" and "reviewed_at" not in fields:
+        fields["reviewed_at"] = datetime.now(timezone.utc)
     defaults = {
-        "url": f"https://x.test/{fields.get('title', 'a')}-{fields.get('day')}-{fields.get('source','s')}",
+        "url": f"https://x.test/article-{next(_url_seq)}",
         "url_norm": "",
         "source": "Prothom Alo",
         "title": "Test headline",
@@ -76,7 +81,7 @@ def test_today_counts_reflect_real_rows(dash_client) -> None:
     today = date.today()
     _insert_article(conn, day=today, source="Prothom Alo", sections="Macroeconomy", keywords="inflation", review_status="pending", llm_score=9)
     _insert_article(conn, day=today, source="Daily Star", sections="", keywords="", review_status="filtered_out")
-    _insert_article(conn, day=today, source="Daily Star", sections="Telco/regulatory", keywords="spectrum", review_status="approved", llm_score=6, reviewed_at="now()")
+    _insert_article(conn, day=today, source="Daily Star", sections="Telco/regulatory", keywords="spectrum", review_status="approved", llm_score=6)
     conn.commit()
 
     resp = client.get("/dashboard/today")
