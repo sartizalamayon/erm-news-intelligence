@@ -79,7 +79,18 @@ def test_unmodeled_exception_returns_generic_500(client, monkeypatch: pytest.Mon
 
     app = create_app()
     app.dependency_overrides[get_current_user] = lambda: ADMIN
-    with TestClient(app) as test_client:
+    # raise_server_exceptions=False: Starlette's ServerErrorMiddleware
+    # (which owns the Exception/500 handler app.api.error_handlers
+    # registers) sends the client a clean response AND THEN
+    # deliberately re-raises the original exception -- documented
+    # Starlette behavior, "allows test clients to optionally raise the
+    # error within the test case." TestClient's default is to honor
+    # that re-raise (useful for catching bugs elsewhere); here the
+    # thing under test IS "what does the client actually receive", so
+    # that re-raise is turned off to inspect the real response instead
+    # of treating our own deliberately-raised RuntimeError as a pytest
+    # failure.
+    with TestClient(app, raise_server_exceptions=False) as test_client:
         response = test_client.get("/health/runs")
 
     assert response.status_code == 500
@@ -115,7 +126,18 @@ def test_unmodeled_exception_returns_generic_500_in_production_too(
 
     app = create_app()
     app.dependency_overrides[get_current_user] = lambda: ADMIN
-    with TestClient(app) as test_client:
+    # raise_server_exceptions=False: Starlette's ServerErrorMiddleware
+    # (which owns the Exception/500 handler app.api.error_handlers
+    # registers) sends the client a clean response AND THEN
+    # deliberately re-raises the original exception -- documented
+    # Starlette behavior, "allows test clients to optionally raise the
+    # error within the test case." TestClient's default is to honor
+    # that re-raise (useful for catching bugs elsewhere); here the
+    # thing under test IS "what does the client actually receive", so
+    # that re-raise is turned off to inspect the real response instead
+    # of treating our own deliberately-raised RuntimeError as a pytest
+    # failure.
+    with TestClient(app, raise_server_exceptions=False) as test_client:
         response = test_client.get("/health/runs")
 
     assert response.status_code == 500

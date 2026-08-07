@@ -57,16 +57,35 @@ def test_reasonable_pagination_limit_reaches_the_route(client):
 
 
 def test_negative_offset_is_rejected(client):
+    # "offset" is checked generically by key name, regardless of whether
+    # the route on the receiving end actually declares one -- GET
+    # /search (CORE-API) uses `page`, not `offset`, but the bounds check
+    # runs in front of every route and doesn't know or care.
     response = client.get("/search", params={"offset": "-1"})
     assert response.status_code == 400
 
 
 def test_zero_offset_is_allowed_through(client):
-    # GET /search has no route yet (app/api/routers/search.py is a
-    # route-less stub) -- 404 here, not 400, proves offset=0 passed the
-    # bounds middleware and only then hit "no such route".
+    # GET /search now exists (CORE-API) and requires an authenticated
+    # session -- 401, not 400, proves offset=0 passed the bounds
+    # middleware and only then hit the real route.
     response = client.get("/search", params={"offset": "0"})
-    assert response.status_code == 404
+    assert response.status_code == 401
+
+
+def test_search_free_text_over_length_limit_is_rejected(client):
+    # The mission-named case: GET /search's free-text `q=` hits a
+    # GIN-indexed column with no length cap of its own (`q: str = ""`,
+    # a plain function param, not schema-validated) -- this middleware
+    # is what actually bounds it.
+    response = client.get("/search", params={"q": "x" * 3000})
+    assert response.status_code == 400
+    assert response.json()["error"] == "validation_error"
+
+
+def test_search_reasonable_query_reaches_the_route(client):
+    response = client.get("/search", params={"q": "election"})
+    assert response.status_code == 401  # unauthenticated, but past the bounds check
 
 
 @pytest.fixture
