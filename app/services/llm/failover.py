@@ -25,6 +25,22 @@ try, not a bug in this layer.
 Quota is checked BEFORE spending a real call: a candidate already at
 its configured daily ceiling (`app.services.llm.quota.QuotaTracker`) is
 skipped without an HTTP request, moving straight to the next one.
+
+**RT-7 fix (docs/red-team-findings.md):** a candidate's `_generate()`
+call is guarded by TWO except clauses, not one — the original
+`(ProviderRateLimitedError, ProviderPermanentError)` clause (unchanged
+behavior: logs `.retryable`, falls through) PLUS a broader
+`except Exception` beneath it for anything else (an unmodeled SDK bug,
+or — the concrete reproduction — `OpenAICompatibleTransport` indexing
+`data["choices"][0]` into a well-formed HTTP 200 with an empty
+`choices` array). Without the second clause, a healthy secondary
+candidate is never tried and the run silently degrades straight to
+`LLMClient`'s neutral fallback despite having somewhere real left to
+go. Both clauses feed the SAME `last_exc`/fall-through loop, so "every
+candidate failed" is still surfaced as one real exception (the LAST
+candidate's own failure, whatever its type) once every candidate has
+actually been tried — not a generic swallowed value, and not an
+infinite retry: each candidate is attempted at most once per call.
 """
 
 from __future__ import annotations
@@ -69,6 +85,19 @@ class FailoverTransport:
                 logger.warning(
                     "llm_candidate_failed",
                     extra={"candidate": name, "retryable": exc.retryable, "error": str(exc)},
+                )
+                last_exc = exc
+                continue
+            except Exception as exc:  # noqa: BLE001 - RT-7: ANY candidate failure must fall through to the
+                # next candidate, not just a modeled ProviderError -- a malformed response body
+                # (e.g. OpenAICompatibleTransport indexing an empty `choices` list) or an
+                # unanticipated SDK bug must not silently strand a healthy remaining candidate.
+                # LLMClient's own outer `except Exception` (p3-contract.md §3) is still the
+                # ultimate backstop if EVERY candidate fails this way -- this layer's job is only
+                # to keep trying while a real option remains.
+                logger.warning(
+                    "llm_candidate_failed_unmodeled",
+                    extra={"candidate": name, "error_type": type(exc).__name__, "error": str(exc)},
                 )
                 last_exc = exc
                 continue

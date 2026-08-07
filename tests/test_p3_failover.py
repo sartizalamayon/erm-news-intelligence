@@ -199,3 +199,100 @@ def test_failover_success_on_secondary_is_transparent_to_llm_client() -> None:
 
     result = client.judge_batch([{"title_en": "A"}])
     assert result == [Judgment(relevant=True, score=9, reason="top tier")]
+
+
+# ── RT-7 regression: any exception from a candidate must fall through ───
+# (docs/red-team-findings.md — app/services/llm/failover.py's module
+# docstring "RT-7 fix" section). Own coverage per the coordinator's
+# request, independent of tests/test_redteam_p3_failover_gap.py (not
+# owned by P3-LLM, never edited here).
+
+
+def test_non_provider_error_from_primary_falls_over_to_secondary() -> None:
+    """A completely unmodeled exception (not app.errors.ProviderError at
+    all) from the primary must still try a healthy secondary — this is
+    the exact gap RT-7 reported: only (ProviderRateLimitedError,
+    ProviderPermanentError) used to be caught around a candidate call.
+    """
+    for unmodeled_exc in (
+        TypeError("unexpected SDK bug"),
+        IndexError("list index out of range"),
+        KeyError("choices"),
+        ValueError("Expecting value: line 1 column 1 (char 0)"),
+    ):
+        primary = _RaisingTransport(exc=unmodeled_exc)
+        secondary = FakeLLMProvider(responses=lambda p, s: "healthy secondary answer")
+        failover = _failover(primary, secondary)
+
+        result = failover._generate("prompt")
+
+        assert result == "healthy secondary answer"
+        assert primary.calls == ["prompt"]
+        assert len(secondary.call_log) == 1
+
+
+def test_all_candidates_failing_with_non_provider_errors_raises_the_last_one() -> None:
+    """When EVERY candidate fails — even with unmodeled exception types —
+    something meaningful escapes: the LAST candidate's own real
+    exception (type and message preserved), not a generic swallowed
+    value and not a silent empty-string "success".
+    """
+    primary = _RaisingTransport(exc=IndexError("primary: empty choices"))
+    secondary = _RaisingTransport(exc=KeyError("secondary: missing choices key"))
+    failover = _failover(primary, secondary)
+
+    with pytest.raises(KeyError, match="secondary: missing choices key"):
+        failover._generate("prompt")
+    assert primary.calls == ["prompt"]
+    assert secondary.calls == ["prompt"]
+
+
+def test_mixed_provider_error_then_unmodeled_error_still_falls_through() -> None:
+    """A modeled ProviderError from the first candidate and an unmodeled
+    exception from the second must BOTH fall through when a third,
+    healthy candidate exists — proving the two except clauses compose
+    across a chain longer than two.
+    """
+    key1 = _RaisingTransport(exc=ProviderRateLimitedError("groq exhausted", provider="groq"))
+    key2 = _RaisingTransport(exc=TypeError("gemini SDK bug"))
+    key3 = FakeLLMProvider(responses=lambda p, s: "third candidate answer")
+
+    failover = FailoverTransport(quota=_tracker(), candidates=[("groq", key1), ("gemini", key2), ("mistral", key3)])
+    result = failover._generate("prompt")
+
+    assert result == "third candidate answer"
+    assert key1.calls == ["prompt"]
+    assert key2.calls == ["prompt"]
+
+
+def test_quota_still_records_provider_reported_total_on_the_fallback_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The concrete RT-7 reproduction: a REAL OpenAICompatibleTransport
+    gets a well-formed HTTP 200 with an EMPTY `choices` array (a
+    documented real possibility for content-filtered responses) and
+    raises IndexError while parsing it — but only AFTER it already
+    recorded the provider-reported `total_tokens` from that response
+    into quota. Falling over to a healthy secondary must not lose that
+    already-real usage record.
+    """
+    from app.services.llm.transport import OpenAICompatibleTransport
+
+    class _FakeEmptyChoicesResponse:
+        status_code = 200
+        text = '{"choices": [], "usage": {"total_tokens": 37}}'
+
+        def json(self) -> dict[str, object]:
+            return {"choices": [], "usage": {"total_tokens": 37}}
+
+    monkeypatch.setattr("app.services.llm.transport.requests.post", lambda *a, **kw: _FakeEmptyChoicesResponse())
+
+    tracker = _tracker(limits={"groq": ProviderLimits(), "gemini": ProviderLimits()})
+    primary = OpenAICompatibleTransport(
+        base_url="https://api.example.test/v1", api_key="k", model="m", provider_name="groq", quota=tracker
+    )
+    secondary = FakeLLMProvider(responses=lambda p, s: "healthy secondary answer")
+    failover = _failover(primary, secondary, quota=tracker)
+
+    result = failover._generate("prompt")
+
+    assert result == "healthy secondary answer"
+    assert tracker.status("groq").used.tokens == 37  # recorded BEFORE the IndexError, not lost on fallback
