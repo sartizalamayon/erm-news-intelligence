@@ -3,15 +3,15 @@
   "configurations": [
     {
       "name": "erm-api",
-      "runtimeExecutable": ".venv/bin/python",
-      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--port", "8000"],
+      "runtimeExecutable": ".venv/bin/uvicorn",
+      "runtimeArgs": ["app.main:app", "--host", "127.0.0.1", "--port", "8000"],
       "port": 8000
     },
     {
       "name": "erm-frontend",
       "runtimeExecutable": ".venv/bin/python",
-      "runtimeArgs": ["-m", "http.server", "5500", "--directory", "frontend"],
-      "port": 5500
+      "runtimeArgs": ["-m", "http.server", "5173", "--directory", "frontend"],
+      "port": 5173
     }
   ]
 }

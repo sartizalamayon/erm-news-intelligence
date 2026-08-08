@@ -9,7 +9,7 @@ real curl invocation in a test).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -17,20 +17,34 @@ from app.errors import SourceFetchError
 from app.sources import _bbc, _curl_sitemap, _dated_sitemap, _sitemap, _sitemap_index_merge
 from tests.test_p1_helpers import FakeResponse, FakeSession
 
-GOOGLE_NEWS_SITEMAP = """<?xml version="1.0" encoding="UTF-8"?>
+# Dates below are generated relative to the REAL wall clock at import time
+# (every pytest run re-imports this module), not frozen literals -- the
+# production window (app/sources/_util.py WINDOW = 30h) is real-time, so
+# a hardcoded "2026-08-06T09:00:00Z" ages out and silently fails once the
+# suite runs >30h after that literal was written. Recomputing "recent"
+# relative to `datetime.now(timezone.utc)` every run makes this
+# deterministic regardless of when the suite executes.
+_NOW = datetime.now(timezone.utc)
+
+
+def _recent_iso(hours_ago: float) -> str:
+    return (_NOW - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+GOOGLE_NEWS_SITEMAP = f"""<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
         xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
   <url>
     <loc>https://example.com/2026/08/06/first-story</loc>
     <news:news>
-      <news:publication_date>2026-08-06T09:00:00Z</news:publication_date>
+      <news:publication_date>{_recent_iso(1)}</news:publication_date>
       <news:title>First Story Title</news:title>
     </news:news>
   </url>
   <url>
     <loc>https://example.com/2026/08/06/second-story</loc>
     <news:news>
-      <news:publication_date>2026-08-06T08:30:00Z</news:publication_date>
+      <news:publication_date>{_recent_iso(1.5)}</news:publication_date>
       <news:title>Second Story Title</news:title>
     </news:news>
   </url>
@@ -186,18 +200,18 @@ class TestBbcSitemaps:
         "<sitemap><loc>https://www.bbc.com/sitemaps/https-sitemap-com-news-1.xml</loc></sitemap>"
         "</sitemapindex>"
     )
-    SUB_SITEMAP = """<?xml version="1.0"?>
+    SUB_SITEMAP = f"""<?xml version="1.0"?>
     <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
             xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
       <url><loc>https://www.bbc.com/news/world-123</loc>
         <news:news>
-          <news:publication_date>2026-08-06T09:00:00Z</news:publication_date>
+          <news:publication_date>{_recent_iso(1)}</news:publication_date>
           <news:title>World story</news:title>
         </news:news>
       </url>
       <url><loc>https://www.bbc.com/sport/football-456</loc>
         <news:news>
-          <news:publication_date>2026-08-06T09:00:00Z</news:publication_date>
+          <news:publication_date>{_recent_iso(1)}</news:publication_date>
           <news:title>Sport story</news:title>
         </news:news>
       </url>

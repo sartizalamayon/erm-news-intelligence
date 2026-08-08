@@ -209,11 +209,18 @@ class TestJsonApi:
             paginate="cursor",
             max_pages=5,
         )
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        recent_iso = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
         page1 = {
-            "items": [{"title": "First", "slug": "/first", "datetime": "2026-08-06T09:00:00Z"}],
+            # Must be inside app.sources._util.WINDOW (30h) at whatever
+            # real time the suite runs, or page_had_recent goes False and
+            # pagination stops before nextPageUrl is ever fetched.
+            "items": [{"title": "First", "slug": "/first", "datetime": recent_iso}],
             "nextPageUrl": "https://api.example.com/posts?page=2",
         }
-        page2 = {"items": [{"title": "Second", "slug": "/second", "datetime": "2026-08-06T08:00:00Z"}]}
+        page2 = {"items": [{"title": "Second", "slug": "/second", "datetime": recent_iso}]}
         session = FakeSession()
         session.add("https://api.example.com/posts", FakeResponse(status_code=200, json_data=page1))
         session.add("https://api.example.com/posts?page=2", FakeResponse(status_code=200, json_data=page2))
