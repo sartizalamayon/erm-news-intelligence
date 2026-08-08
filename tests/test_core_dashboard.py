@@ -79,9 +79,15 @@ def test_trends_unauthenticated_returns_401() -> None:
 def test_today_counts_reflect_real_rows(dash_client) -> None:
     client, conn = dash_client
     today = date.today()
-    _insert_article(conn, day=today, source="Prothom Alo", sections="Macroeconomy", keywords="inflation", review_status="pending", llm_score=9)
+    _insert_article(
+        conn, day=today, source="Prothom Alo", sections="Macroeconomy",
+        keywords="inflation", review_status="pending", llm_score=9,
+    )
     _insert_article(conn, day=today, source="Daily Star", sections="", keywords="", review_status="filtered_out")
-    _insert_article(conn, day=today, source="Daily Star", sections="Telco/regulatory", keywords="spectrum", review_status="approved", llm_score=6)
+    _insert_article(
+        conn, day=today, source="Daily Star", sections="Telco/regulatory",
+        keywords="spectrum", review_status="approved", llm_score=6,
+    )
     conn.commit()
 
     resp = client.get("/dashboard/today")
@@ -92,7 +98,8 @@ def test_today_counts_reflect_real_rows(dash_client) -> None:
     assert len(data["funnel"]) == 4
     assert len(data["days14"]) == 14
     assert data["days14"][-1]["date"] == today.isoformat()
-    assert {s["label"] for s in data["bySection"]} == {"Geopolitical", "Macroeconomy", "Telco/regulatory", "Political", "Others"}
+    section_labels = {s["label"] for s in data["bySection"]}
+    assert section_labels == {"Geopolitical", "Macroeconomy", "Telco/regulatory", "Political", "Others"}
     by_section = {s["label"]: s["count"] for s in data["bySection"]}
     assert by_section["Macroeconomy"] == 1
     assert by_section["Telco/regulatory"] == 1

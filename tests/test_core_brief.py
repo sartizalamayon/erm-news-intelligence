@@ -107,18 +107,29 @@ def test_put_fuel_line_persists(brief_client) -> None:
     assert get_fuel_line(conn) == "Fuel Prices: Crude - $70.2"
 
 
-def test_post_draft_generates_bullets_from_approved_articles_only(brief_client, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_post_draft_generates_bullets_from_approved_articles_only(
+    brief_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client, conn = brief_client
     import app.services.brief as brief_service_module
 
-    monkeypatch.setattr(brief_service_module, "_build_client", lambda conn: _fake_client("Port policy tension – Chattogram committee calls to halt leasing."))
+    bullet_text = "Port policy tension – Chattogram committee calls to halt leasing."
+    monkeypatch.setattr(brief_service_module, "_build_client", lambda conn: _fake_client(bullet_text))
 
     today = date.today()
-    _insert_article(conn, title="Approved macro story", day=today, sections="Macroeconomy", review_status="approved", llm_score=9)
-    _insert_article(conn, title="Pending story, not approved", day=today, sections="Macroeconomy", review_status="pending", llm_score=9)
+    _insert_article(
+        conn, title="Approved macro story", day=today,
+        sections="Macroeconomy", review_status="approved", llm_score=9,
+    )
+    _insert_article(
+        conn, title="Pending story, not approved", day=today,
+        sections="Macroeconomy", review_status="pending", llm_score=9,
+    )
     conn.commit()
 
-    resp = client.post("/brief/draft", json={"fuel": "Fuel Prices: Crude – $70.2"}, params={"date": today.isoformat()})
+    resp = client.post(
+        "/brief/draft", json={"fuel": "Fuel Prices: Crude – $70.2"}, params={"date": today.isoformat()}
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert data["ready"] is True
@@ -144,7 +155,9 @@ def test_get_draft_after_post_returns_the_persisted_draft(brief_client, monkeypa
     monkeypatch.setattr(brief_service_module, "_build_client", lambda conn: _fake_client("Hook – rest."))
 
     today = date.today()
-    _insert_article(conn, title="Approved story", day=today, sections="Political", review_status="approved", llm_score=8)
+    _insert_article(
+        conn, title="Approved story", day=today, sections="Political", review_status="approved", llm_score=8
+    )
     conn.commit()
 
     posted = client.post("/brief/draft", json={}, params={"date": today.isoformat()})
@@ -155,8 +168,38 @@ def test_get_draft_after_post_returns_the_persisted_draft(brief_client, monkeypa
     assert got.json()["sections"] == posted.json()["sections"]
 
 
-def test_download_docx_returns_501_not_a_fake_file(brief_client) -> None:
+def test_download_docx_with_no_draft_returns_404(brief_client) -> None:
     client, _conn = brief_client
     resp = client.get("/brief/download.docx", params={"date": date.today().isoformat()})
-    assert resp.status_code == 501
-    assert "python-docx" in resp.json()["detail"]
+    assert resp.status_code == 404
+
+
+def test_download_docx_returns_a_real_document_matching_the_draft(
+    brief_client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, conn = brief_client
+    import app.services.brief as brief_service_module
+
+    monkeypatch.setattr(brief_service_module, "_build_client", lambda conn: _fake_client("Hook – rest of it."))
+
+    today = date.today()
+    _insert_article(
+        conn, title="Approved macro story", day=today, sections="Macroeconomy", review_status="approved", llm_score=9
+    )
+    conn.commit()
+    client.post("/brief/draft", json={}, params={"date": today.isoformat()})
+
+    resp = client.get("/brief/download.docx", params={"date": today.isoformat()})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    assert "attachment" in resp.headers["content-disposition"]
+
+    import io
+
+    from docx import Document
+
+    doc = Document(io.BytesIO(resp.content))
+    text = "\n".join(p.text for p in doc.paragraphs)
+    assert "Daily Risk Insights" in text
+    assert "Hook" in text
+    assert "rest of it." in text

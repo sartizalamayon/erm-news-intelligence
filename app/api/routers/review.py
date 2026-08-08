@@ -41,6 +41,9 @@ from app.api.schemas.core import (
     ArticlePatchIn,
     BulkActionIn,
     BulkActionOut,
+    DupOut,
+    SourceFilterOut,
+    TopicPeerOut,
 )
 from app.db.connection import get_connection
 from app.services.matching import is_bengali
@@ -131,7 +134,9 @@ def _build_where(*, status: str | None, tier_keys: list[str] | None, q: str | No
         if tier_clauses:
             clauses.append("a.llm_score IS NOT NULL AND (" + " OR ".join(tier_clauses) + ")")
     if q:
-        clauses.append("(a.title ILIKE %(q)s OR a.title_en ILIKE %(q)s OR a.source ILIKE %(q)s OR a.sections ILIKE %(q)s)")
+        clauses.append(
+            "(a.title ILIKE %(q)s OR a.title_en ILIKE %(q)s OR a.source ILIKE %(q)s OR a.sections ILIKE %(q)s)"
+        )
         params["q"] = f"%{q}%"
     return " AND ".join(clauses), params
 
@@ -193,15 +198,20 @@ def _enrich_and_build(conn: Any, rows: list[dict[str, Any]]) -> list[ArticleOut]
     out: list[ArticleOut] = []
     for r in rows:
         rid = r["id"]
-        dups = None
+        dups: list[DupOut] | None = None
         if r.get("dup_group") is not None:
             siblings = [s for s in dup_siblings.get(r["dup_group"], []) if s["id"] != rid]
-            dups = [{"id": s["id"], "source": s["source"], "title": s["title"], "url": s.get("url") or ""} for s in siblings]
-        peers = None
+            dups = [
+                DupOut(id=s["id"], source=s["source"], title=s["title"], url=s.get("url") or "") for s in siblings
+            ]
+        peers: list[TopicPeerOut] | None = None
         topic = r.get("topic_tag") or ""
         if topic:
             plist = [p for p in topic_peers.get(topic, []) if p["id"] != rid]
-            peers = [{"id": p["id"], "source": p["source"], "title": p["title"], "score": p.get("llm_score")} for p in plist]
+            peers = [
+                TopicPeerOut(id=p["id"], source=p["source"], title=p["title"], score=p.get("llm_score"))
+                for p in plist
+            ]
         out.append(
             ArticleOut(
                 id=rid,
@@ -254,7 +264,9 @@ def list_articles(
         source_counts: dict[str, int] = {}
         for r in rows:
             source_counts[r["source"]] = source_counts.get(r["source"], 0) + 1
-        sources = [{"name": name, "count": n} for name, n in sorted(source_counts.items(), key=lambda kv: -kv[1])]
+        sources = [
+            SourceFilterOut(name=name, count=n) for name, n in sorted(source_counts.items(), key=lambda kv: -kv[1])
+        ]
 
         excluded = {s for s in (exclude_source.split(",") if exclude_source else []) if s}
         if excluded:
@@ -267,11 +279,13 @@ def list_articles(
 
         items = _enrich_and_build(conn, rows)
 
-    return ArticleListOut(items=items, total=len(items), sources=[dict(s) for s in sources])
+    return ArticleListOut(items=items, total=len(items), sources=sources)
 
 
 @router.patch("/{article_id}", response_model=ArticleOut)
-def patch_article(article_id: int, body: ArticlePatchIn, user: AuthenticatedUser = Depends(get_current_user)) -> ArticleOut:
+def patch_article(
+    article_id: int, body: ArticlePatchIn, user: AuthenticatedUser = Depends(get_current_user)
+) -> ArticleOut:
     with get_connection() as conn:
         exists = conn.execute("SELECT id FROM articles WHERE id = %s", (article_id,)).fetchone()
         if exists is None:
@@ -331,7 +345,9 @@ def keep_dup(article_id: int, dup_id: int, user: AuthenticatedUser = Depends(get
         if cur is None or cur["dup_group"] is None:
             raise HTTPException(status_code=404, detail="article not found or has no duplicate group")
         dup_group = cur["dup_group"]
-        dup_row = conn.execute("SELECT id FROM articles WHERE id = %s AND dup_group = %s", (dup_id, dup_group)).fetchone()
+        dup_row = conn.execute(
+            "SELECT id FROM articles WHERE id = %s AND dup_group = %s", (dup_id, dup_group)
+        ).fetchone()
         if dup_row is None:
             raise HTTPException(status_code=404, detail="duplicate not found in this article's group")
 
@@ -358,7 +374,9 @@ def drop_dup(article_id: int, dup_id: int, user: AuthenticatedUser = Depends(get
         if cur is None or cur["dup_group"] is None:
             raise HTTPException(status_code=404, detail="article not found or has no duplicate group")
         dup_group = cur["dup_group"]
-        dup_row = conn.execute("SELECT id FROM articles WHERE id = %s AND dup_group = %s", (dup_id, dup_group)).fetchone()
+        dup_row = conn.execute(
+            "SELECT id FROM articles WHERE id = %s AND dup_group = %s", (dup_id, dup_group)
+        ).fetchone()
         if dup_row is None:
             raise HTTPException(status_code=404, detail="duplicate not found in this article's group")
 

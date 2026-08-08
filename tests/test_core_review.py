@@ -70,7 +70,9 @@ def test_patch_article_unauthenticated_returns_401() -> None:
 
 def test_list_excludes_filtered_out_and_includes_pending(review_client) -> None:
     client, conn = review_client
-    _insert_article(conn, title="Matched one", sections="Macroeconomy", keywords="inflation", llm_score=8, review_status="pending")
+    _insert_article(
+        conn, title="Matched one", sections="Macroeconomy", keywords="inflation", llm_score=8, review_status="pending"
+    )
     _insert_article(conn, title="Unmatched", sections="", keywords="", review_status="filtered_out")
     conn.commit()
 
@@ -218,21 +220,31 @@ def test_bulk_star_sets_starred_flag(review_client) -> None:
     assert item["isStarred"] is True
 
 
+def _insert_dup_pair(conn, group: int) -> tuple[int, int]:
+    primary = _insert_article(
+        conn, title="Original", source="Daily Star", sections="Others", dup_group=group, is_primary=True
+    )
+    sibling = _insert_article(
+        conn, title="Duplicate", source="The Business Standard", sections="Others",
+        dup_group=group, is_primary=False,
+    )
+    return primary, sibling
+
+
 def test_dup_keep_promotes_the_chosen_sibling_to_primary(review_client) -> None:
     client, conn = review_client
     group = 4242
-    primary = _insert_article(conn, title="Original", source="Daily Star", sections="Others", dup_group=group, is_primary=True)
-    sibling = _insert_article(conn, title="Duplicate", source="The Business Standard", sections="Others", dup_group=group, is_primary=False)
+    primary, sibling = _insert_dup_pair(conn, group)
     conn.commit()
 
     resp = client.post(f"/articles/{primary}/dups/{sibling}/keep")
     assert resp.status_code == 200
     assert resp.json()["id"] == sibling
 
-    rows = {
-        r["id"]: (r["is_primary"], r["also_in"])
-        for r in conn.execute("SELECT id, is_primary, also_in FROM articles WHERE dup_group = %s", (group,)).fetchall()
-    }
+    dup_rows = conn.execute(
+        "SELECT id, is_primary, also_in FROM articles WHERE dup_group = %s", (group,)
+    ).fetchall()
+    rows = {r["id"]: (r["is_primary"], r["also_in"]) for r in dup_rows}
     assert rows[sibling][0] is True
     assert rows[sibling][1] == "Daily Star"
     assert rows[primary][0] is False
@@ -242,8 +254,7 @@ def test_dup_keep_promotes_the_chosen_sibling_to_primary(review_client) -> None:
 def test_dup_drop_removes_sibling_from_group(review_client) -> None:
     client, conn = review_client
     group = 4343
-    primary = _insert_article(conn, title="Original", source="Daily Star", sections="Others", dup_group=group, is_primary=True)
-    sibling = _insert_article(conn, title="Duplicate", source="The Business Standard", sections="Others", dup_group=group, is_primary=False)
+    primary, sibling = _insert_dup_pair(conn, group)
     conn.commit()
 
     resp = client.post(f"/articles/{primary}/dups/{sibling}/drop")

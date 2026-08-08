@@ -208,6 +208,7 @@ class ExportPresetIn(BaseModel):
     sections: str | list[str] = ""
     sort: str = "relevance"
     format: str = "xlsx"
+    columns: str | list[str] = ""
 
 
 class ExportPresetOut(BaseModel):
@@ -220,6 +221,7 @@ class ExportPresetOut(BaseModel):
     sections: list[str]
     sort: str
     format: str
+    columns: list[str] = Field(default_factory=list)
 
 
 # ── Daily Risk Insight brief (frontend-contract.md §3.5) ─────────────────

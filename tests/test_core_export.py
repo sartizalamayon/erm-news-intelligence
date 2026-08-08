@@ -107,7 +107,10 @@ def test_preview_invalid_filter_returns_422(export_client) -> None:
 def test_export_csv_returns_rows_for_scope(export_client) -> None:
     client, conn = export_client
     today = date.today()
-    _insert_article(conn, title="Approved story", source="Daily Star", day=today, sections="Macroeconomy", review_status="approved", llm_score=8)
+    _insert_article(
+        conn, title="Approved story", source="Daily Star", day=today,
+        sections="Macroeconomy", review_status="approved", llm_score=8,
+    )
     conn.commit()
 
     resp = client.post("/export", params={"filter": "approved", "scope": "today", "format": "csv"})
@@ -119,11 +122,43 @@ def test_export_csv_returns_rows_for_scope(export_client) -> None:
     assert "Daily Star" in body
 
 
-def test_export_xlsx_returns_501_not_a_fake_file(export_client) -> None:
-    client, _conn = export_client
-    resp = client.post("/export", params={"filter": "matched", "format": "xlsx"})
-    assert resp.status_code == 501
-    assert "openpyxl" in resp.json()["detail"]
+def test_export_xlsx_returns_a_real_workbook(export_client) -> None:
+    client, conn = export_client
+    _insert_article(
+        conn, title="Xlsx story", source="Prothom Alo", day=date.today(),
+        sections="Others", review_status="approved", llm_score=8,
+    )
+    conn.commit()
+
+    resp = client.post("/export", params={"filter": "approved", "format": "xlsx"})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert "attachment" in resp.headers["content-disposition"]
+
+    import io
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(resp.content))
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    assert rows[0][0] == "Headline"
+    assert any(row[0] == "Xlsx story" for row in rows[1:])
+
+
+def test_export_columns_selection_and_order_are_honored(export_client) -> None:
+    client, conn = export_client
+    _insert_article(
+        conn, title="Column test", source="Daily Star", day=date.today(),
+        sections="Political", review_status="approved", llm_score=7,
+    )
+    conn.commit()
+
+    resp = client.post("/export", params={"filter": "approved", "format": "csv", "columns": "source,headline"})
+    assert resp.status_code == 200
+    lines = resp.text.lstrip("﻿").strip().splitlines()
+    assert lines[0].startswith("Source,Headline")
+    assert lines[1].startswith("Daily Star,Column test")
 
 
 def test_export_range_scope_filters_by_custom_dates(export_client) -> None:
@@ -153,7 +188,16 @@ def test_presets_round_trip(export_client) -> None:
     client, _conn = export_client
     resp = client.post(
         "/export/presets",
-        json={"name": "Monday digest", "note": "Top 50", "filter": "topn", "topN": 50, "scope": "week", "sections": "Macroeconomy,Political", "sort": "relevance", "format": "xlsx"},
+        json={
+            "name": "Monday digest",
+            "note": "Top 50",
+            "filter": "topn",
+            "topN": 50,
+            "scope": "week",
+            "sections": "Macroeconomy,Political",
+            "sort": "relevance",
+            "format": "xlsx",
+        },
     )
     assert resp.status_code == 201
     created = resp.json()

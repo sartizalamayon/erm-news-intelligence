@@ -42,6 +42,7 @@ from app.api.schemas.admin import (
     StorageUsageOut,
 )
 from app.api.schemas.core import (
+    RISK_SECTIONS,
     DashboardTodayOut,
     DashboardTrendsOut,
     DayVolumeOut,
@@ -50,7 +51,6 @@ from app.api.schemas.core import (
     KpiOut,
     MonthVolumeOut,
     RelMixOut,
-    RISK_SECTIONS,
     SectionCountOut,
     SourceCountOut,
     StandingThemeOut,
@@ -231,7 +231,8 @@ def dashboard_today(user: AuthenticatedUser = Depends(get_current_user)) -> Dash
         days14 = []
         for offset in range(13, -1, -1):
             d = today - timedelta(days=offset)
-            days14.append(DayVolumeOut(date=d.isoformat(), count=_count(conn, "day = %s AND review_status != 'filtered_out'", (d,))))
+            count = _count(conn, "day = %s AND review_status != 'filtered_out'", (d,))
+            days14.append(DayVolumeOut(date=d.isoformat(), count=count))
 
         rel_row = conn.execute(
             """
@@ -264,7 +265,8 @@ def dashboard_today(user: AuthenticatedUser = Depends(get_current_user)) -> Dash
         by_section = [SectionCountOut(label=s, count=section_counts.get(s, 0)) for s in RISK_SECTIONS]
 
         top_source_rows = conn.execute(
-            "SELECT source AS label, count(*) AS n FROM articles WHERE day = %s GROUP BY source ORDER BY n DESC LIMIT 6",
+            "SELECT source AS label, count(*) AS n FROM articles WHERE day = %s "
+            "GROUP BY source ORDER BY n DESC LIMIT 6",
             (today,),
         ).fetchall()
         top_sources = [SourceCountOut(label=r["label"], count=int(r["n"])) for r in top_source_rows]
@@ -282,11 +284,19 @@ def dashboard_today(user: AuthenticatedUser = Depends(get_current_user)) -> Dash
     )
 
 
-_MACRO_META = {
-    "taka_usd": {"label": "Taka / USD", "unit": "BDT", "decimals": 1, "bad": True},
-    "inflation": {"label": "Inflation", "unit": "%", "decimals": 1, "bad": True},
-    "brent_crude": {"label": "Brent crude", "unit": "USD/bbl", "decimals": 0, "bad": True},
-    "remittance": {"label": "Remittance", "unit": "USD mn", "decimals": 1, "bad": False},
+@dataclasses.dataclass(frozen=True)
+class _MacroMeta:
+    label: str
+    unit: str
+    decimals: int
+    bad: bool
+
+
+_MACRO_META: dict[str, _MacroMeta] = {
+    "taka_usd": _MacroMeta(label="Taka / USD", unit="BDT", decimals=1, bad=True),
+    "inflation": _MacroMeta(label="Inflation", unit="%", decimals=1, bad=True),
+    "brent_crude": _MacroMeta(label="Brent crude", unit="USD/bbl", decimals=0, bad=True),
+    "remittance": _MacroMeta(label="Remittance", unit="USD mn", decimals=1, bad=False),
 }
 
 
@@ -317,7 +327,7 @@ def dashboard_trends(
             by_month = {r["month"]: float(r["value"]) for r in rows}
             vals = [by_month.get(m, 0.0) for m in month_list]
             trend_cards.append(
-                TrendCardOut(label=meta["label"], unit=meta["unit"], vals=vals, bad=meta["bad"], decimals=meta["decimals"])
+                TrendCardOut(label=meta.label, unit=meta.unit, vals=vals, bad=meta.bad, decimals=meta.decimals)
             )
 
         section_rows = conn.execute(
@@ -330,7 +340,8 @@ def dashboard_trends(
         months12 = [MonthVolumeOut(label=m.strftime("%b"), segments=section_by_month.get(m, {})) for m in month_list]
 
         theme_rows = conn.execute(
-            "SELECT theme, month, article_count, intensity FROM rollup_monthly_theme WHERE month >= %s ORDER BY theme, month",
+            "SELECT theme, month, article_count, intensity FROM rollup_monthly_theme "
+            "WHERE month >= %s ORDER BY theme, month",
             (since_month,),
         ).fetchall()
         theme_totals: dict[str, int] = defaultdict(int)
@@ -340,7 +351,8 @@ def dashboard_trends(
             theme_series[r["theme"]][r["month"]] = float(r["intensity"])
         top_themes = sorted(theme_totals, key=lambda t: -theme_totals[t])[:6]
         heat_rows = [
-            HeatRowOut(label=theme, values=[theme_series[theme].get(m, 0.0) for m in month_list]) for theme in top_themes
+            HeatRowOut(label=theme, values=[theme_series[theme].get(m, 0.0) for m in month_list])
+            for theme in top_themes
         ]
 
         standing_raw = queries.standing_themes(conn, since_month, min_consecutive_months=9)

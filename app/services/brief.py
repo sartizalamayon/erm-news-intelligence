@@ -24,13 +24,26 @@ key/value table (0001_settings.sql), same reuse-not-reinvent move as
 app/services/export.py's presets and app/api/routers/review.py's
 star/note (see those modules' docstrings for the fuller rationale and
 the flag back to ARCH-DB about dedicated tables).
+
+`render_docx` (below) uses `python-docx` (added to pyproject.toml by
+ARCH-REPO, commit 9ba3ad9) to turn a persisted draft dict — the exact
+shape `generate_draft` returns and `load_draft` reads back — into the
+Word document `GET /brief/download.docx` serves. It renders the same
+content the `/brief/draft` JSON already carries, in the same section
+order and lead/rest bullet split as the frontend's own preview card
+(frontend/js/screens/brief.js's `renderPreview()`) — no new drafting
+logic, purely a second rendering of already-drafted data.
 """
 
 from __future__ import annotations
 
+import io
 import json
 from datetime import date
 from typing import Any
+
+from docx import Document
+from docx.shared import Pt
 
 from app.db.connection import DictConnection
 from app.db.settings import get_setting, set_setting
@@ -145,3 +158,40 @@ def generate_draft(conn: DictConnection, *, day: date, fuel: str | None = None) 
     draft = {"fuel": fuel_value, "ready": True, "sections": sections_out}
     set_setting(conn, _draft_key(day), json.dumps(draft))
     return draft
+
+
+def render_docx(draft: dict[str, Any], day: date) -> bytes:
+    """Word document for `GET /brief/download.docx` — same content as
+    the persisted `draft` dict (see module docstring), never regenerated
+    or re-drafted here.
+    """
+    doc = Document()
+
+    title = doc.add_heading(f"Daily Risk Insights | {day.day} {day.strftime('%b %Y')}", level=1)
+    title.runs[0].font.size = Pt(20)
+
+    for section in draft.get("sections", []):
+        heading = doc.add_heading(section.get("title", ""), level=2)
+        heading.runs[0].font.size = Pt(14)
+
+        fuel_line = section.get("fuelLine") or ""
+        if fuel_line:
+            p = doc.add_paragraph()
+            run = p.add_run(fuel_line)
+            run.bold = True
+
+        bullets = section.get("bullets") or []
+        if not bullets:
+            doc.add_paragraph("No approved articles in this section.")
+            continue
+        for bullet in bullets:
+            p = doc.add_paragraph(style="List Bullet")
+            lead_run = p.add_run(bullet.get("lead", ""))
+            lead_run.bold = True
+            rest = bullet.get("rest") or ""
+            if rest:
+                p.add_run(" – " + rest)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
