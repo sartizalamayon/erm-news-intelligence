@@ -1,0 +1,27 @@
+-- 0012_keywords_section_nullable.sql
+--
+-- KEYWORDS-CONFIG mission: admins can now save a keyword with no section
+-- assigned at all ("Uncategorized"), not just pick among a fixed list.
+--
+-- `keywords.section` (migrations/0002_reference_tables.sql) was already
+-- plain TEXT with no CHECK constraint and no enum anywhere at the DB
+-- layer -- an arbitrary custom section NAME already worked before this
+-- migration. What didn't work: every row was still forced into SOME
+-- section (NOT NULL, and app.services.admin.create_keyword raised
+-- ValidationError on a blank one). This migration drops that NOT NULL
+-- so "no section" can be represented as a real NULL instead of inventing
+-- a magic sentinel row value.
+--
+-- NULL is coerced back to the display string "Uncategorized" wherever a
+-- caller sees it: app.services.admin._keyword_row_to_dict (API
+-- responses -- KeywordOut.section stays typed `str`, contract
+-- unchanged) and app.services.matching.load_keywords (COALESCE in the
+-- SELECT, so a NULL-section keyword still gets a valid, sortable group
+-- key at match time instead of crashing match_keywords()'s
+-- `sorted(secs)` on a None-vs-str comparison -- see that function's
+-- docstring for why).
+--
+-- idx_keywords_section_enabled's predicate is `WHERE enabled`, not
+-- `WHERE section IS NOT NULL` -- it already indexes NULL-section rows
+-- fine, so no index change is needed here.
+ALTER TABLE keywords ALTER COLUMN section DROP NOT NULL;

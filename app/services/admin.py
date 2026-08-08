@@ -28,11 +28,13 @@ persisted through the existing generic settings key/value table").
 
 from __future__ import annotations
 
+import io
 import json
 import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from openpyxl import Workbook, load_workbook
 from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 
@@ -325,14 +327,43 @@ def diagnose_source(conn: DictConnection, source_id: int) -> dict[str, Any] | No
 
 
 # ═════════════════════════════════════════════════════════════════════
-# Keywords (frontend-contract.md §3.8)
+# Keywords (frontend-contract.md §3.8; KEYWORDS-CONFIG: custom sections,
+# nullable section, independently-optional bilingual terms, xlsx
+# import/export)
 # ═════════════════════════════════════════════════════════════════════
+
+# `keywords.section` has never had a CHECK constraint or an enum at any
+# layer (migrations/0002_reference_tables.sql: plain TEXT) -- an admin
+# could already save an arbitrary custom section name before this
+# mission touched anything. What this mission adds is (a) a NULL
+# section (migrations/0012_keywords_section_nullable.sql) for "no
+# section assigned", and (b) treating that NULL consistently as the
+# display string below everywhere a section is read, written, or
+# filtered on. "Uncategorized" is never itself stored as a real section
+# value -- it is always a stand-in for SQL NULL, both coming out
+# (_keyword_row_to_dict) and going in (_normalize_section), so a caller
+# can round-trip it (e.g. via xlsx export -> re-import) without ever
+# creating a second, indistinguishable section literally named that.
+UNCATEGORIZED_SECTION = "Uncategorized"
+
+
+def _normalize_section(value: str | None) -> str | None:
+    """None / "" / whitespace-only / the literal "Uncategorized" all
+    normalize to SQL NULL. Anything else is stored verbatim (stripped)
+    -- this is the entire mechanism behind "custom sections": there is
+    no allowlist to extend, any non-empty string an admin types becomes
+    a valid section the moment a keyword is saved with it.
+    """
+    section = (value or "").strip()
+    if not section or section == UNCATEGORIZED_SECTION:
+        return None
+    return section
 
 
 def _keyword_row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": row["id"],
-        "section": row["section"],
+        "section": row["section"] or UNCATEGORIZED_SECTION,
         "term_en": row["term_en"],
         "term_bn": row["term_bn"],
         "enabled": row["enabled"],
@@ -342,15 +373,55 @@ def _keyword_row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
 
 def list_keywords(conn: DictConnection, *, section: str | None = None) -> list[dict[str, Any]]:
     if section:
-        rows = conn.execute("SELECT * FROM keywords WHERE section = %s ORDER BY term_en", (section,)).fetchall()
+        normalized = _normalize_section(section)
+        if normalized is None:
+            rows = conn.execute("SELECT * FROM keywords WHERE section IS NULL ORDER BY term_en").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM keywords WHERE section = %s ORDER BY term_en", (normalized,)
+            ).fetchall()
     else:
-        rows = conn.execute("SELECT * FROM keywords ORDER BY section, term_en").fetchall()
+        rows = conn.execute("SELECT * FROM keywords ORDER BY section NULLS LAST, term_en").fetchall()
     return [_keyword_row_to_dict(dict(r)) for r in rows]
 
 
 def list_keyword_sections(conn: DictConnection) -> list[dict[str, Any]]:
-    rows = conn.execute("SELECT section, count(*) AS count FROM keywords GROUP BY section ORDER BY section").fetchall()
+    """The list of sections "in use" (task 1's "browse/manage" surface)
+    is deliberately DERIVED from distinct `keywords.section` values, not
+    a separate authoritative table -- there is nothing a dedicated
+    sections table would let an admin do that GROUP BY doesn't already
+    give for free at this scale (a few dozen sections, at most), and a
+    second table would just be one more place a section name could get
+    out of sync with what keyword rows actually say.
+    """
+    rows = conn.execute(
+        "SELECT COALESCE(section, %(u)s) AS section, count(*) AS count FROM keywords "
+        "GROUP BY COALESCE(section, %(u)s) ORDER BY section",
+        {"u": UNCATEGORIZED_SECTION},
+    ).fetchall()
     return [{"section": r["section"], "count": r["count"]} for r in rows]
+
+
+def rename_keyword_section(conn: DictConnection, section: str, new_name: str | None) -> int:
+    """The "manage" half of task 1: since sections are derived values
+    (no dedicated table -- see list_keyword_sections), "rename a
+    section" IS "bulk-update every keyword row currently in it" -- there
+    is nothing else to rename. Returns the number of rows touched.
+    `new_name=None`/""/"Uncategorized" moves every matched row to no
+    section at all, same normalization as create/update.
+    """
+    from_section = _normalize_section(section)
+    to_section = _normalize_section(new_name)
+    if from_section is None:
+        rows = conn.execute(
+            "UPDATE keywords SET section = %s WHERE section IS NULL RETURNING id", (to_section,)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "UPDATE keywords SET section = %s WHERE section = %s RETURNING id", (to_section, from_section)
+        ).fetchall()
+    conn.commit()
+    return len(rows)
 
 
 def get_keyword(conn: DictConnection, keyword_id: int) -> dict[str, Any] | None:
@@ -359,15 +430,13 @@ def get_keyword(conn: DictConnection, keyword_id: int) -> dict[str, Any] | None:
 
 
 def create_keyword(
-    conn: DictConnection, *, section: str, term_en: str = "", term_bn: str = "", enabled: bool = True
+    conn: DictConnection, *, section: str | None = None, term_en: str = "", term_bn: str = "", enabled: bool = True
 ) -> dict[str, Any]:
-    if not section.strip():
-        raise ValidationError("section is required")
     if not term_en.strip() and not term_bn.strip():
         raise ValidationError("at least one of term_en/term_bn is required")
     row = conn.execute(
         "INSERT INTO keywords (section, term_en, term_bn, enabled) VALUES (%s, %s, %s, %s) RETURNING *",
-        (section.strip(), term_en.strip(), term_bn.strip(), enabled),
+        (_normalize_section(section), term_en.strip(), term_bn.strip(), enabled),
     ).fetchone()
     conn.commit()
     assert row is not None
@@ -380,7 +449,14 @@ def update_keyword(conn: DictConnection, keyword_id: int, **fields: Any) -> dict
         return None
     sets: list[str] = []
     params: dict[str, Any] = {"id": keyword_id}
-    for col in ("section", "term_en", "term_bn", "enabled"):
+    # `section` is handled by presence-in-`fields`, not `is not None`:
+    # unlike term_en/term_bn/enabled, `None` is a meaningful value here
+    # (explicitly clear to "no section") that a caller must be able to
+    # send, distinct from "field omitted, leave it alone".
+    if "section" in fields:
+        sets.append("section = %(section)s")
+        params["section"] = _normalize_section(fields["section"])
+    for col in ("term_en", "term_bn", "enabled"):
         if fields.get(col) is not None:
             sets.append(f"{col} = %({col})s")
             params[col] = fields[col]
@@ -434,6 +510,162 @@ def rematch_today(conn: DictConnection) -> dict[str, int]:
             filtered_out += 1
     conn.commit()
     return {"matched": matched, "filtered_out": filtered_out, "total": len(rows)}
+
+
+# ── Excel export/import (KEYWORDS-CONFIG tasks 4/5) ─────────────────────
+#
+# Both writer and reader are `openpyxl` (already a dependency —
+# app.services.export uses it identically for GET /export). Column shape
+# is fixed and shared between the two directions: `id, section, term_en,
+# term_bn, enabled`. `id` is included in the export specifically so a
+# re-import can match by identity rather than only by content — see
+# import_keywords_xlsx's docstring for why that matters.
+
+KEYWORD_EXPORT_COLUMNS = ("id", "section", "term_en", "term_bn", "enabled")
+
+
+def export_keywords_xlsx(conn: DictConnection) -> bytes:
+    """Every keyword, one row each, in `KEYWORD_EXPORT_COLUMNS` order.
+    `section` is written as the display string "Uncategorized" for a
+    NULL-section row (`_keyword_row_to_dict`'s coercion) — so re-running
+    this same file through `import_keywords_xlsx` round-trips it back to
+    NULL via that function's own `_normalize_section` call, with no
+    special-casing needed on either side.
+    """
+    rows = conn.execute("SELECT * FROM keywords ORDER BY section NULLS LAST, term_en").fetchall()
+    wb = Workbook()
+    ws = wb.active
+    assert ws is not None
+    ws.title = "Keywords"
+    ws.append(list(KEYWORD_EXPORT_COLUMNS))
+    for r in rows:
+        d = _keyword_row_to_dict(dict(r))
+        ws.append([d["id"], d["section"], d["term_en"], d["term_bn"], d["enabled"]])
+    for i in range(1, len(KEYWORD_EXPORT_COLUMNS) + 1):
+        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = 22
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _parse_bool_cell(value: Any) -> bool:
+    """openpyxl hands back a real `bool` for an actual Excel boolean
+    cell; anything typed in as text (a re-saved/hand-edited sheet) is
+    tolerant-parsed — only an explicit false-ish token turns a row off,
+    everything else (including a blank cell) defaults enabled=True,
+    matching `KeywordCreate`'s own default.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return True
+    return str(value).strip().lower() not in ("false", "0", "no", "n", "off")
+
+
+def import_keywords_xlsx(conn: DictConnection, content: bytes) -> dict[str, Any]:
+    """UPSERT semantics (task 5's "auto-update"): a row is matched
+    first by `id` (if the sheet has one and it names a keyword that
+    still exists), then by the `(section, term_en, term_bn)` triple —
+    either match UPDATEs that row in place; no match INSERTs a new one.
+    Nothing already in the table is ever deleted just for being absent
+    from the sheet — a partial or filtered export re-imported cleanly
+    can't wipe the rest of the keyword list.
+
+    Row-level errors (bad id, unexpected exception) are caught per-row
+    and reported in `errors` rather than aborting the whole import or
+    raising a 500 — only a structurally bad file (wrong columns, not a
+    real .xlsx) raises `ValidationError` (-> 422) for the request as a
+    whole.
+    """
+    try:
+        wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    except Exception as exc:  # noqa: BLE001 - any parse failure is a bad-file 422, not a 500
+        raise ValidationError(f"not a valid .xlsx file: {exc}") from exc
+
+    ws = wb.active
+    if ws is None:
+        raise ValidationError("workbook has no sheets")
+
+    rows_iter = ws.iter_rows(values_only=True)
+    try:
+        header = next(rows_iter)
+    except StopIteration:
+        raise ValidationError("workbook is empty (no header row)") from None
+
+    header_norm = [str(h).strip().lower() if h is not None else "" for h in header]
+    required = {"term_en", "term_bn"}
+    if not required.issubset(header_norm):
+        raise ValidationError(
+            f"expected columns {list(KEYWORD_EXPORT_COLUMNS)} (found {header_norm!r})"
+        )
+    col_idx = {name: idx for idx, name in enumerate(header_norm) if name}
+
+    def cell(row: tuple[Any, ...], name: str) -> Any:
+        idx = col_idx.get(name)
+        if idx is None or idx >= len(row):
+            return None
+        return row[idx]
+
+    created = updated = skipped = 0
+    errors: list[str] = []
+
+    for i, row in enumerate(rows_iter, start=2):  # row 1 is the header
+        if row is None or all(v is None for v in row):
+            continue
+        try:
+            raw_id = cell(row, "id")
+            section = str(cell(row, "section") or "").strip()
+            term_en = str(cell(row, "term_en") or "").strip()
+            term_bn = str(cell(row, "term_bn") or "").strip()
+            enabled = _parse_bool_cell(cell(row, "enabled"))
+
+            if not term_en and not term_bn:
+                skipped += 1
+                errors.append(f"row {i}: skipped — both term_en and term_bn are blank")
+                continue
+
+            normalized_section = _normalize_section(section)
+
+            existing_id: int | None = None
+            if raw_id not in (None, ""):
+                try:
+                    candidate = get_keyword(conn, int(raw_id))
+                except (TypeError, ValueError):
+                    candidate = None
+                if candidate is not None:
+                    existing_id = candidate["id"]
+
+            if existing_id is None:
+                if normalized_section is None:
+                    match = conn.execute(
+                        "SELECT id FROM keywords WHERE section IS NULL AND term_en = %s AND term_bn = %s",
+                        (term_en, term_bn),
+                    ).fetchone()
+                else:
+                    match = conn.execute(
+                        "SELECT id FROM keywords WHERE section = %s AND term_en = %s AND term_bn = %s",
+                        (normalized_section, term_en, term_bn),
+                    ).fetchone()
+                existing_id = match["id"] if match else None
+
+            if existing_id is not None:
+                conn.execute(
+                    "UPDATE keywords SET section = %s, term_en = %s, term_bn = %s, enabled = %s WHERE id = %s",
+                    (normalized_section, term_en, term_bn, enabled, existing_id),
+                )
+                updated += 1
+            else:
+                conn.execute(
+                    "INSERT INTO keywords (section, term_en, term_bn, enabled) VALUES (%s, %s, %s, %s)",
+                    (normalized_section, term_en, term_bn, enabled),
+                )
+                created += 1
+        except Exception as exc:  # noqa: BLE001 - one bad row must not fail the whole import
+            skipped += 1
+            errors.append(f"row {i}: {exc}")
+
+    conn.commit()
+    return {"created": created, "updated": updated, "skipped": skipped, "errors": errors}
 
 
 # ═════════════════════════════════════════════════════════════════════

@@ -100,8 +100,22 @@ def load_keywords(conn: DictConnection) -> list[dict[str, Any]]:
     (migrations/0002_reference_tables.sql), the DB-read half of legacy's
     `collection_service._patterns_from_db()` (`:46-69`). 271 rows across
     5 sections in the current live data (legacy-behavior.md §4.1).
+
+    KEYWORDS-CONFIG (migrations/0012_keywords_section_nullable.sql):
+    `section` can now be SQL NULL ("no section assigned"). COALESCE'd to
+    the literal string `"Uncategorized"` right here, at the read
+    boundary, rather than downstream in `keyword_rows_to_groups` /
+    `match_keywords` — those two build/consume a `{section: [...]}`
+    dict and a `set()` of section labels respectively; either one
+    seeing a bare `None` next to real section strings would raise on
+    `match_keywords`'s `sorted(secs)` (`None < str` is unorderable in
+    Python 3). Coercing at the SQL layer keeps every function below
+    this one exactly as it was — none of them need to know NULL
+    sections exist at all.
     """
-    rows = conn.execute("SELECT section, term_en, term_bn FROM keywords WHERE enabled").fetchall()
+    rows = conn.execute(
+        "SELECT COALESCE(section, 'Uncategorized') AS section, term_en, term_bn FROM keywords WHERE enabled"
+    ).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -109,20 +123,34 @@ def keyword_rows_to_groups(rows: list[dict[str, Any]]) -> KeywordGroups:
     """Group DB keyword rows into `{section: [(term, label), ...]}` —
     the grouping half of `_patterns_from_db()`. The English term is
     added once with itself as its own label; each comma-split Bengali
-    synonym is added as its own `(bn_term, label=english_term)` pair, so
-    a Bengali-only match is still reported under its English label.
+    synonym is added as its own `(bn_term, label)` pair, so a
+    Bengali-only match is still reported under one consistent label.
+
+    KEYWORDS-CONFIG (bilingual entry, independently optional): `term_en`
+    and `term_bn` can each be blank on their own now (never both — the
+    API layer's `create_keyword` rejects that). Previously this function
+    required a truthy `term_en` before adding ANY Bengali synonym
+    (`if bn_term and term_en`), so a Bengali-only row silently compiled
+    to zero patterns — a keyword an admin believed was live would never
+    match anything. Fixed by computing one label per row up front
+    (`term_en` if present, else that row's first Bengali synonym) and no
+    longer gating the Bengali loop on `term_en` at all. Behavior is
+    unchanged for every row that already had a `term_en` — same pairs,
+    same order, same label.
     """
     groups: KeywordGroups = {}
     for row in rows:
         section = row["section"]
         pairs = groups.setdefault(section, [])
         term_en = (row.get("term_en") or "").strip()
+        bn_terms = [t.strip() for t in (row.get("term_bn") or "").split(",") if t.strip()]
+        label = term_en or (bn_terms[0] if bn_terms else "")
+        if not label:
+            continue
         if term_en:
-            pairs.append((term_en, term_en))
-        for bn_term in (row.get("term_bn") or "").split(","):
-            bn_term = bn_term.strip()
-            if bn_term and term_en:
-                pairs.append((bn_term, term_en))
+            pairs.append((term_en, label))
+        for bn_term in bn_terms:
+            pairs.append((bn_term, label))
     return groups
 
 

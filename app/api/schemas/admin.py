@@ -78,6 +78,14 @@ class SourceDiagnoseResult(BaseModel):
 
 
 class KeywordOut(BaseModel):
+    """`section` is always a non-empty string in every response — a
+    keyword saved with no section comes back as the literal
+    "Uncategorized" (app.services.admin._keyword_row_to_dict), never
+    `null`. The DB column itself is nullable
+    (migrations/0012_keywords_section_nullable.sql); that NULL is
+    strictly an internal storage detail this API never surfaces.
+    """
+
     id: int
     section: str
     term_en: str
@@ -87,7 +95,14 @@ class KeywordOut(BaseModel):
 
 
 class KeywordCreate(BaseModel):
-    section: str
+    """`section` is optional: omit it, send `null`, `""`, or the literal
+    "Uncategorized" to create a keyword with no section assigned (all
+    four normalize identically — app.services.admin._normalize_section).
+    `term_en`/`term_bn` are independently optional (each may be blank)
+    but not BOTH — the service layer rejects that combination.
+    """
+
+    section: str | None = None
     term_en: str = ""
     term_bn: str = ""
     enabled: bool = True
@@ -101,8 +116,40 @@ class KeywordUpdate(BaseModel):
 
 
 class KeywordSectionOut(BaseModel):
+    """One entry per DISTINCT `keywords.section` value currently in use
+    (`GROUP BY`, not a dedicated sections table — see
+    app.services.admin.list_keyword_sections's docstring for why).
+    "Uncategorized" is a real, always-present-when-nonzero entry here,
+    standing in for every keyword with no section assigned.
+    """
+
     section: str
     count: int
+
+
+class KeywordSectionRename(BaseModel):
+    """`PATCH /keywords/sections/{section}` body — bulk-renames every
+    keyword currently in `{section}` to `name` (or to no section at all
+    if `name` is omitted/blank/"Uncategorized"). See
+    app.services.admin.rename_keyword_section.
+    """
+
+    name: str | None = None
+
+
+class KeywordImportResultOut(BaseModel):
+    """`POST /keywords/import` response — a summary rather than a bare
+    200, per task 5: how many rows were newly inserted, how many
+    existing rows were updated in place, how many input rows were
+    skipped (blank term_en AND term_bn), and any per-row error messages
+    (a bad `id` cell, an unexpected exception) that didn't abort the
+    rest of the import.
+    """
+
+    created: int
+    updated: int
+    skipped: int
+    errors: list[str] = Field(default_factory=list)
 
 
 class RematchResult(BaseModel):
