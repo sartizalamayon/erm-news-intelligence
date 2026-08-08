@@ -122,6 +122,9 @@ def test_export_csv_returns_rows_for_scope(export_client) -> None:
     assert "Daily Star" in body
 
 
+XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
 def test_export_xlsx_returns_a_real_workbook(export_client) -> None:
     client, conn = export_client
     _insert_article(
@@ -132,8 +135,10 @@ def test_export_xlsx_returns_a_real_workbook(export_client) -> None:
 
     resp = client.post("/export", params={"filter": "approved", "format": "xlsx"})
     assert resp.status_code == 200
-    assert resp.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert resp.headers["content-type"] == XLSX_MEDIA_TYPE
     assert "attachment" in resp.headers["content-disposition"]
+    assert resp.headers["content-disposition"].endswith('.xlsx"')
+    assert resp.content[:2] == b"PK"  # xlsx IS a zip archive — this is the one format that should be.
 
     import io
 
@@ -146,7 +151,56 @@ def test_export_xlsx_returns_a_real_workbook(export_client) -> None:
     assert any(row[0] == "Xlsx story" for row in rows[1:])
 
 
-def test_export_columns_selection_and_order_are_honored(export_client) -> None:
+def test_export_csv_is_real_csv_not_a_zip(export_client) -> None:
+    client, conn = export_client
+    _insert_article(
+        conn, title="Csv story", source="Prothom Alo", day=date.today(),
+        sections="Others", review_status="approved", llm_score=8,
+    )
+    conn.commit()
+
+    resp = client.post("/export", params={"filter": "approved", "format": "csv"})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/csv")
+    assert resp.headers["content-disposition"].endswith('.csv"')
+    assert resp.content[:2] != b"PK"
+    body = resp.text.lstrip("﻿")
+    assert body.startswith("Headline,Source,Section,Keywords hit,Published,Relevance,Also reported by,Link")
+    assert "Csv story" in body
+
+
+def test_do_export_format_from_json_body_is_honored_not_ignored(export_client) -> None:
+    """Regression for the bug FE-WIRE found driving the live API: POST
+    /export previously read `format` (and everything else) as a
+    query-param-only default, so a caller that sends parameters as a
+    JSON body — the normal way to POST — silently always got the
+    `format="xlsx"` default no matter what the body said. Both format
+    branches must now produce genuinely different bytes/content-type
+    when selected via the body alone, no query string at all.
+    """
+    client, conn = export_client
+    _insert_article(
+        conn, title="Body param story", source="Daily Star", day=date.today(),
+        sections="Others", review_status="approved", llm_score=8,
+    )
+    conn.commit()
+
+    csv_resp = client.post("/export", json={"format": "csv"})
+    assert csv_resp.status_code == 200
+    assert csv_resp.headers["content-type"].startswith("text/csv")
+    assert csv_resp.content[:2] != b"PK"
+    assert csv_resp.text.lstrip("﻿").startswith("Headline,")
+
+    xlsx_resp = client.post("/export", json={"format": "xlsx"})
+    assert xlsx_resp.status_code == 200
+    assert xlsx_resp.headers["content-type"] == XLSX_MEDIA_TYPE
+    assert xlsx_resp.content[:2] == b"PK"
+
+    assert csv_resp.headers["content-type"] != xlsx_resp.headers["content-type"]
+    assert csv_resp.content != xlsx_resp.content
+
+
+def test_export_columns_selection_and_order_honored_in_csv(export_client) -> None:
     client, conn = export_client
     _insert_article(
         conn, title="Column test", source="Daily Star", day=date.today(),
@@ -159,6 +213,44 @@ def test_export_columns_selection_and_order_are_honored(export_client) -> None:
     lines = resp.text.lstrip("﻿").strip().splitlines()
     assert lines[0].startswith("Source,Headline")
     assert lines[1].startswith("Daily Star,Column test")
+
+    # Reversed order changes the file, not just a preview field.
+    reversed_resp = client.post(
+        "/export", params={"filter": "approved", "format": "csv", "columns": "headline,source"}
+    )
+    reversed_lines = reversed_resp.text.lstrip("﻿").strip().splitlines()
+    assert reversed_lines[0].startswith("Headline,Source")
+    assert reversed_lines[1].startswith("Column test,Daily Star")
+
+
+def test_export_columns_selection_and_order_honored_in_xlsx(export_client) -> None:
+    client, conn = export_client
+    _insert_article(
+        conn, title="Xlsx column test", source="Daily Star", day=date.today(),
+        sections="Political", review_status="approved", llm_score=7,
+    )
+    conn.commit()
+
+    resp = client.post(
+        "/export", params={"filter": "approved", "format": "xlsx", "columns": "source,headline"}
+    )
+    assert resp.status_code == 200
+
+    import io
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(resp.content))
+    rows = list(wb.active.iter_rows(values_only=True))
+    assert rows[0] == ("Source", "Headline")
+    assert rows[1] == ("Daily Star", "Xlsx column test")
+
+    # Also via the JSON-body path, matching the query-param path exactly.
+    body_resp = client.post("/export", json={"filter": "approved", "format": "xlsx", "columns": ["headline", "source"]})
+    body_wb = load_workbook(io.BytesIO(body_resp.content))
+    body_rows = list(body_wb.active.iter_rows(values_only=True))
+    assert body_rows[0] == ("Headline", "Source")
+    assert body_rows[1] == ("Xlsx column test", "Daily Star")
 
 
 def test_export_range_scope_filters_by_custom_dates(export_client) -> None:

@@ -199,6 +199,31 @@ class ExportPreviewOut(BaseModel):
     counts: dict[str, int]
 
 
+class ExportDownloadBody(BaseModel):
+    """Optional JSON body for `POST /export`. frontend/js/screens/export.js's
+    `doExport()` sends every parameter via the query string (no body) —
+    that path keeps working unchanged (every field here defaults to
+    `None`, meaning "use the query param"). This exists so a JSON-body
+    caller (any REST client that doesn't special-case this one route)
+    gets the SAME parameters honored, not silently ignored: a query
+    param and a body field of the same name must never both be live and
+    disagree silently, so the router treats a non-None body field as
+    authoritative over its query counterpart, per field.
+    """
+
+    filter: str | None = None
+    topN: int | None = None
+    scope: str | None = None
+    from_: str | None = Field(default=None, alias="from")
+    to: str | None = None
+    sections: str | list[str] | None = None
+    columns: str | list[str] | None = None
+    sort: str | None = None
+    format: str | None = None
+
+    model_config = {"populate_by_name": True}
+
+
 class ExportPresetIn(BaseModel):
     name: str
     note: str = ""

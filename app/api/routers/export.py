@@ -22,7 +22,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from app.api.deps import AuthenticatedUser, get_current_user
-from app.api.schemas.core import ExportPresetIn, ExportPresetOut, ExportPreviewOut
+from app.api.schemas.core import ExportDownloadBody, ExportPresetIn, ExportPresetOut, ExportPreviewOut
 from app.db.connection import get_connection
 from app.services import export as export_service
 
@@ -33,6 +33,10 @@ XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.s
 
 def _split_list(value: str) -> list[str]:
     return [s for s in value.split(",") if s] if value else []
+
+
+def _as_list(value: str | list[str]) -> list[str]:
+    return value if isinstance(value, list) else _split_list(value)
 
 
 def _validate_filter(filter: str) -> None:
@@ -84,8 +88,8 @@ def list_presets(user: AuthenticatedUser = Depends(get_current_user)) -> list[Ex
 @router.post("/presets", response_model=ExportPresetOut, status_code=status.HTTP_201_CREATED)
 def create_preset(body: ExportPresetIn, user: AuthenticatedUser = Depends(get_current_user)) -> ExportPresetOut:
     _validate_filter(body.filter)
-    sections = body.sections if isinstance(body.sections, list) else _split_list(body.sections)
-    columns = body.columns if isinstance(body.columns, list) else _split_list(body.columns)
+    sections = _as_list(body.sections)
+    columns = _as_list(body.columns)
     with get_connection() as conn:
         row = export_service.create_preset(
             conn,
@@ -113,25 +117,42 @@ def do_export(
     columns: str = "",
     sort: str = "relevance",
     format: str = "xlsx",
+    body: ExportDownloadBody | None = None,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> Response:
-    _validate_filter(filter)
-    if format not in ("xlsx", "csv"):
+    # frontend/js/screens/export.js sends every param via the query
+    # string with no JSON body at all (body stays None, every eff_*
+    # below falls straight through to its query default — unchanged
+    # behavior). A JSON-body caller's non-None fields win per-field over
+    # the query string, so `format`/`filter`/etc. are never silently
+    # dropped just because they arrived in the body instead of the URL.
+    eff_filter = body.filter if body and body.filter is not None else filter
+    eff_top_n = body.topN if body and body.topN is not None else topN
+    eff_scope = body.scope if body and body.scope is not None else scope
+    eff_from = body.from_ if body and body.from_ is not None else from_
+    eff_to = body.to if body and body.to is not None else to
+    eff_sections = body.sections if body and body.sections is not None else sections
+    eff_columns = body.columns if body and body.columns is not None else columns
+    eff_sort = body.sort if body and body.sort is not None else sort
+    eff_format = body.format if body and body.format is not None else format
+
+    _validate_filter(eff_filter)
+    if eff_format not in ("xlsx", "csv"):
         raise HTTPException(status_code=422, detail="format must be one of xlsx, csv")
 
-    writer = export_service.export_xlsx if format == "xlsx" else export_service.export_csv
-    media_type = XLSX_MEDIA_TYPE if format == "xlsx" else "text/csv"
+    writer = export_service.export_xlsx if eff_format == "xlsx" else export_service.export_csv
+    media_type = XLSX_MEDIA_TYPE if eff_format == "xlsx" else "text/csv"
     with get_connection() as conn:
         content, filename = writer(
             conn,
-            filter=filter,
-            top_n=topN,
-            scope=scope,
-            date_from=from_,
-            date_to=to,
-            sections=_split_list(sections),
-            sort=sort,
-            columns=_split_list(columns),
+            filter=eff_filter,
+            top_n=eff_top_n,
+            scope=eff_scope,
+            date_from=eff_from,
+            date_to=eff_to,
+            sections=_as_list(eff_sections),
+            sort=eff_sort,
+            columns=_as_list(eff_columns),
         )
     return Response(
         content=content,
