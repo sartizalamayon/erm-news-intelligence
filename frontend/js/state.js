@@ -14,7 +14,7 @@ export const state = {
   theme: "dark",
   railOpen: true,
 
-  screen: "login", // one of the 11 screen keys
+  screen: "login", // one of the 10 screen keys (Daily Risk Insight/"brief" removed — see this task's report)
   dashMode: "short",
 
   progress: "", // active job/run status text, shell header (§2)
@@ -39,7 +39,6 @@ function notify() {
 export const SCREEN_TITLES = {
   dash: ["Dashboard", null], // kicker computed from dashMode
   review: ["Review queue", "Keyword-matched stories awaiting a decision"],
-  brief: ["Daily Risk Insight", "Draft and download the daily brief"],
   export: ["Export", "Build an Excel or CSV extract"],
   search: ["Search archive", "Every article ever collected"],
   manual: ["How it works", "The four phases, explained"],
@@ -55,7 +54,6 @@ export const NAV_STRUCTURE = [
     items: [
       { key: "dash", label: "Dashboard", icon: "◫" },
       { key: "review", label: "Review queue", icon: "▤", badgeKey: "pendingCount" },
-      { key: "brief", label: "Daily Risk Insight", icon: "✎" },
       { key: "export", label: "Export", icon: "↓" },
       { key: "search", label: "Search archive", icon: "⌕" },
     ],

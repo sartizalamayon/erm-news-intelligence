@@ -16,15 +16,72 @@ ceremony for something this small — see each constant's own docstring.
 
 from __future__ import annotations
 
+import time
+
 from pydantic import BaseModel, Field
+
+from app.db.connection import DictConnection
 
 # ── Shared constants (not pydantic — reused across dashboard/review/export/brief) ──
 
-# The 5 fixed risk sections (frontend-contract.md §1/§8 item 6 — observed
-# as fixed in the mock; keyword rows are section-scoped, matching
-# app/services/matching.py's real section strings, confirmed against
-# tests/test_p2_matching.py's literal section names).
-RISK_SECTIONS: tuple[str, ...] = ("Geopolitical", "Macroeconomy", "Telco/regulatory", "Political", "Others")
+# HISTORICAL NOTE / hardcoded-sections bug fix: this used to be a static
+# 5-value tuple ("Geopolitical", "Macroeconomy", "Telco/regulatory",
+# "Political", "Others") duplicated here, in app/services/brief.py, and
+# in frontend/js/util.js. KEYWORDS-CONFIG (a concurrent task) made
+# `keywords.section` admin-creatable — an admin can add e.g. a
+# "Competitors" section with no migration or code change — but a static
+# list meant that new section would never show up anywhere still reading
+# it. `get_risk_sections()` below replaces the static tuple with a real,
+# cached query over distinct `keywords.section` values so the dashboard
+# picks up new sections automatically. `app/services/brief.py`'s own
+# RISK_SECTIONS constant is a deliberately separate, untouched duplicate
+# — the Daily Risk Insight screen is being discarded this round (see
+# this task's report), not fixed.
+_RISK_SECTIONS_FALLBACK: tuple[str, ...] = ("Geopolitical", "Macroeconomy", "Telco/regulatory", "Political", "Others")
+_RISK_SECTIONS_CACHE_TTL_SECONDS = 60.0
+_risk_sections_cache: tuple[str, ...] | None = None
+_risk_sections_cache_at = 0.0
+
+
+def get_risk_sections(conn: DictConnection) -> tuple[str, ...]:
+    """Distinct keyword sections currently configured (NULL sections
+    normalized to "Uncategorized"), derived via
+    app.services.admin.list_keyword_sections — one source of truth for
+    what "a section" means, shared with the Keywords admin screen —
+    rather than a second, possibly-diverging query here. Falls back to
+    the original fixed 5-value list when no keywords exist yet (a fresh
+    install) or the query fails for any reason, so callers never see an
+    empty section list. Cached for `_RISK_SECTIONS_CACHE_TTL_SECONDS`
+    (this runs on every `/dashboard/today` request; section rows change
+    rarely) rather than queried fresh every time.
+    """
+    global _risk_sections_cache, _risk_sections_cache_at
+    now = time.monotonic()
+    if _risk_sections_cache is not None and (now - _risk_sections_cache_at) < _RISK_SECTIONS_CACHE_TTL_SECONDS:
+        return _risk_sections_cache
+
+    from app.services.admin import list_keyword_sections  # lazy: keep schemas -> services out of module load order
+
+    try:
+        rows = list_keyword_sections(conn)
+        sections = tuple(r["section"] for r in rows if r.get("section")) or _RISK_SECTIONS_FALLBACK
+    except Exception:
+        sections = _risk_sections_cache or _RISK_SECTIONS_FALLBACK
+
+    _risk_sections_cache = sections
+    _risk_sections_cache_at = now
+    return sections
+
+
+def _reset_risk_sections_cache_for_tests() -> None:
+    """Test-only. tests/test_core_dashboard.py runs each test against its
+    own freshly migrated Postgres *schema* (app.db.testing.migrated_schema)
+    — without this reset, this module-global cache would leak one test's
+    section list into the next test's assertions.
+    """
+    global _risk_sections_cache, _risk_sections_cache_at
+    _risk_sections_cache = None
+    _risk_sections_cache_at = 0.0
 
 # Score -> tier-key SQL fragments (frontend-contract.md §3.1/§3.3's fixed
 # 4-tier banding: >=8 / 6-7 / =5 / <5). Client computes the label/color
@@ -46,6 +103,13 @@ class KpiOut(BaseModel):
     label: str
     delta: str = ""
     note: str = ""
+    # SHORT-TERM sparkline (dashboard-longterm-spec.md's short-term
+    # section): real last-14-days daily counts for this KPI, computed
+    # from the same grouped queries days14[] already uses — not a
+    # decorative fabricated series. Empty for KPIs with no daily time
+    # series to show (e.g. "Awaiting review" is a point-in-time queue
+    # depth, not something this app retains a history of).
+    vals: list[int] = Field(default_factory=list)
 
 
 class FunnelStageOut(BaseModel):
@@ -117,11 +181,35 @@ class StandingThemeOut(BaseModel):
     dir: str
 
 
+class RelMixTrendPointOut(BaseModel):
+    """One month of dashboard-longterm-spec.md item 2's "relevance-mix
+    trend" — the share of matched coverage that scored high (>=8),
+    month by month, from `rollup_monthly_score_band`
+    (migrations/0007_rollups.sql). GLOBAL, not per-section: that rollup
+    table has no `section` column (only `month, band`), so a genuine
+    per-section cut isn't representable without a schema change outside
+    this task's owned files (migrations/**) — flagged in this task's
+    report as a real, structural gap rather than approximated by
+    assuming an even score distribution across sections.
+    """
+
+    label: str
+    highShare: float
+    total: int
+
+
 class DashboardTrendsOut(BaseModel):
     trendCards: list[TrendCardOut]
     months12: list[MonthVolumeOut]
     heatRows: list[HeatRowOut]
     standing: list[StandingThemeOut]
+    relMixTrend: list[RelMixTrendPointOut] = Field(default_factory=list)
+    # 12-month "top sources" (spec item 5, "top sources by section"):
+    # same structural gap as relMixTrend above -- rollup_monthly_source
+    # has no section column either, so this is the aggregate 12-month
+    # equivalent of the short-term "most productive sources" card, not a
+    # per-section cut. Additive, defaults empty for backward compat.
+    topSources: list[SourceCountOut] = Field(default_factory=list)
 
 
 # ── Review queue (frontend-contract.md §3.3) ─────────────────────────────

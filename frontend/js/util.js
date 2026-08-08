@@ -1,5 +1,9 @@
 // Small shared helpers used across screens. Deliberately dependency-free
-// (no framework, per the mission's no-npm constraint).
+// (no framework, per the mission's no-npm constraint) — except for
+// ensureRiskSections() below, which needs api.js to populate
+// RISK_SECTIONS for real; every other export here stays dependency-free.
+
+import { api } from "./api.js";
 
 export function escapeHtml(value) {
   if (value === null || value === undefined) return "";
@@ -23,7 +27,59 @@ export function tier(score) {
   return { key: "magenta", label: "Least", color: "var(--violet)", bg: "var(--violetsoft)" };
 }
 
-export const RISK_SECTIONS = ["Geopolitical", "Macroeconomy", "Telco/regulatory", "Political", "Others"];
+// HARDCODED-SECTIONS BUG FIX: this used to be a static 5-value array.
+// KEYWORDS-CONFIG made keyword sections admin-creatable (an admin can
+// add e.g. a "Competitors" section with no code change), so a static
+// list here meant a new section would never appear in the dashboard's
+// by-section chart, export's section filter, or the prompts screen's
+// section picker — every consumer of this export. Fixed by keeping
+// RISK_SECTIONS as a plain, mutable `let` binding (still the exact same
+// array-of-strings shape every importer already expects) and populating
+// it for real via ensureRiskSections() below, instead of turning it
+// into a function — export.js/prompts.js import and use it as a plain
+// array and are NOT touched by this task, so the shape has to stay
+// exactly what it always was. ES module imports are live bindings, so a
+// reassignment here (`RISK_SECTIONS = [...]`) is visible to every
+// importer's next read of it, without them needing to re-import
+// anything.
+export let RISK_SECTIONS = ["Geopolitical", "Macroeconomy", "Telco/regulatory", "Political", "Others"];
+
+let _riskSectionsPromise = null;
+
+// Populates RISK_SECTIONS from the real, currently-configured section
+// list, once per page load, and caches the in-flight/settled promise so
+// repeated calls (every screen that renders section data can safely
+// call this) don't re-fetch. Reads GET /dashboard/today's bySection[]
+// rather than the admin-only GET /keywords/sections, specifically so
+// this works for every authenticated role (analyst or admin) — the
+// long-term dashboard tab that's the main consumer of RISK_SECTIONS is
+// not an admin-only screen — and stays derived from the exact same
+// app.api.schemas.core.get_risk_sections() the backend now uses, so
+// frontend and backend never disagree about what "a section" is.
+// Failure (not yet authenticated, network down) is a silent no-op that
+// leaves the fixed 5-value fallback above in place — same pattern as
+// shell.js's refreshShellCounts.
+export function ensureRiskSections() {
+  if (!_riskSectionsPromise) {
+    _riskSectionsPromise = api
+      .get("/dashboard/today")
+      .then((data) => {
+        const labels = ((data && data.bySection) || []).map((s) => s.label).filter(Boolean);
+        if (labels.length) RISK_SECTIONS = labels;
+        return RISK_SECTIONS;
+      })
+      .catch(() => RISK_SECTIONS);
+  }
+  return _riskSectionsPromise;
+}
+
+const SECTION_COLOR_PALETTE = [
+  "var(--sec-geopolitical)",
+  "var(--sec-macroeconomy)",
+  "var(--sec-telco)",
+  "var(--sec-political)",
+  "var(--sec-others)",
+];
 
 export const SECTION_COLORS = {
   Geopolitical: "var(--sec-geopolitical)",
@@ -32,6 +88,17 @@ export const SECTION_COLORS = {
   Political: "var(--sec-political)",
   Others: "var(--sec-others)",
 };
+
+// A section RISK_SECTIONS picked up at runtime (e.g. an admin-created
+// "Competitors" section) has no fixed entry in SECTION_COLORS above —
+// falls back to a stable color assigned by name so it's still readable
+// (not `undefined` background) and doesn't shift on every re-render.
+export function sectionColor(section) {
+  if (SECTION_COLORS[section]) return SECTION_COLORS[section];
+  let hash = 0;
+  for (let i = 0; i < section.length; i++) hash = (hash * 31 + section.charCodeAt(i)) >>> 0;
+  return SECTION_COLOR_PALETTE[hash % SECTION_COLOR_PALETTE.length];
+}
 
 export function formatNumber(n) {
   const v = Number(n);

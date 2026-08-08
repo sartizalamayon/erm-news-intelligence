@@ -1,26 +1,23 @@
-// Dashboard — Short term + Long term tabs (frontend-contract.md §3.1/§3.2).
-//
-// Expected API shapes (proposal — GET /dashboard/today and
-// GET /dashboard/trends?range=12mo don't exist on the backend yet; see
-// app/api/routers/dashboard.py, a stub with zero routes registered).
-// Comments below document exactly what shape this screen expects so
-// whoever builds the real endpoint has a concrete target, per the
-// mission brief's "code against §9's proposed shape" instruction.
+// Dashboard — Short term + Long term tabs (frontend-contract.md §3.1/§3.2,
+// docs/dashboard-longterm-spec.md). Both endpoints are real and live —
+// app/api/routers/dashboard.py:
 //
 //   GET /dashboard/today ->
 //     { pendingCount, approvedCount, todayLabel,
-//       kpis: [{ value, label, delta, note }, ...4 fixed cards],
+//       kpis: [{ value, label, delta, note, vals: [14 real daily counts, may be empty] }, ...4],
 //       funnel: [{ phase, label, value, pct, note }, ...4],
 //       days14: [{ date: "YYYY-MM-DD", count }, ...14],
 //       relMix: [{ key: "red"|"yellow"|"green"|"magenta", count }, ...4],
-//       bySection: [{ label, count }, ...],
+//       bySection: [{ label, count }, ...],  // one row per REAL configured section (get_risk_sections), not a fixed 5
 //       topSources: [{ label, count }, ...] }
 //
 //   GET /dashboard/trends?range=12mo ->
-//     { trendCards: [{ label, unit, vals: [12 numbers], bad, decimals }, ...4],
-//       months12: [{ label, segments: { <section>: count, ... } }, ...12],
+//     { trendCards: [{ label, unit, vals: [12 numbers], bad, decimals }, ...4],  // macro indicators
+//       months12: [{ label, segments: { <section>: count, ... } }, ...12],       // primary chart, per dashboard-longterm-spec.md
 //       heatRows: [{ label, values: [12 floats 0..1], trend }, ...],
-//       standing: [{ name, note, count, months, dir: "up"|"down"|"flat" }, ...] }
+//       standing: [{ name, note, count, months, dir: "up"|"down"|"flat" }, ...],
+//       relMixTrend: [{ label, highShare: 0..1, total }, ...12],  // global, not per-section — see RelMixTrendPointOut
+//       topSources: [{ label, count }, ...] }                    // 12mo aggregate, not per-section — see DashboardTrendsOut.topSources
 //
 // Bar-width / heatmap-cell scaling is computed here from the REAL
 // maximum in the returned set (util.pctOfMax) — not the prototype's
@@ -28,7 +25,32 @@
 
 import { api } from "../api.js";
 import { setState, state } from "../state.js";
-import { escapeHtml, formatNumber, pctOfMax, pctOfTotal, poly, tier, RISK_SECTIONS, SECTION_COLORS, fmtErr, skeletonRows, notWiredBanner } from "../util.js";
+import {
+  escapeHtml,
+  formatNumber,
+  pctOfMax,
+  pctOfTotal,
+  poly,
+  tier,
+  RISK_SECTIONS,
+  ensureRiskSections,
+  sectionColor,
+  fmtErr,
+  skeletonRows,
+  notWiredBanner,
+} from "../util.js";
+
+// Fixed 5-stage pipeline (app/services/admin.py's PIPELINE_STAGES) used
+// only as a fallback if GET /health/overview can't be reached before a
+// run starts — the real run always drives off whatever stage list that
+// endpoint actually returns.
+const PIPELINE_STAGE_FALLBACK = [
+  { key: "translate", name: "Translate", desc: "Bengali headlines → English" },
+  { key: "bodies", name: "Get article text", desc: "Fetch full article bodies for today's matched stories" },
+  { key: "dedup", name: "Group duplicates", desc: "Cluster near-duplicate coverage of the same event" },
+  { key: "judge", name: "Score relevance", desc: "LLM relevance scoring, 1–10" },
+  { key: "topic", name: "Group topics", desc: "Cluster scored articles into broad topics" },
+];
 
 const REL_TIER_META = {
   red: { label: "High", band: "8–10", color: "var(--red)" },
@@ -39,10 +61,41 @@ const REL_TIER_META = {
 
 const DAY_LETTERS = ["S", "M", "T", "W", "T", "F", "S"]; // Date#getDay() index 0=Sun
 
+// SHORT-TERM: direction-colored deltas, applied uniformly. Previously
+// hardcoded to var(--tx3) (neutral) for every KPI regardless of sign,
+// while the long-term trend cards already color by direction
+// (dashboard-longterm-spec.md's short-term section flags this exact
+// inconsistency). KpiOut.delta is always a pre-signed string
+// ("+3.2%"/"-4.1%", app/api/routers/dashboard.py's `_pct_delta`), so the
+// sign is read directly off it rather than re-deriving direction.
+function deltaColor(delta) {
+  const s = String(delta || "").trim();
+  if (s.startsWith("-")) return "var(--red)";
+  if (s.startsWith("+")) return "var(--green)";
+  return "var(--tx3)";
+}
+
+// SHORT-TERM: real 14-day sparkline per KPI tile, from KpiOut.vals
+// (app/api/routers/dashboard.py — real grouped daily counts, not a
+// decorative series). Renders nothing when the backend sent no series
+// (e.g. "Awaiting review", a point-in-time queue depth with no daily
+// history to show) rather than fabricating one.
+function kpiSparklineHtml(vals) {
+  if (!vals || vals.length < 2) return "";
+  const pts = poly(vals, 100, 26, false);
+  return `<svg viewBox="0 0 100 26" preserveAspectRatio="none" style="width:100%;height:22px;margin:6px 0 2px;display:block;overflow:visible;">
+    <polyline points="${pts}" fill="none" stroke="var(--tx4)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></polyline>
+  </svg>`;
+}
+
 export function mountDashboard(root, { navigate }) {
   let alive = true;
   const mode = state.dashMode || "short";
+  let lastData = null; // cached last-loaded payload, so pipeline ticks can re-render without re-fetching
+  let pipeline = null; // { active, startedAt, finishedAt, stages: [{key,name,desc,status,detail,startedAt,finishedAt}] }
+  let tickTimer = null;
 
+  ensureRiskSections();
   render(loadingShell(mode));
   load();
 
@@ -51,8 +104,9 @@ export function mountDashboard(root, { navigate }) {
       const path = mode === "short" ? "/dashboard/today" : "/dashboard/trends";
       const data = await api.get(path, mode === "short" ? undefined : { query: { range: "12mo" } });
       if (!alive) return;
-      if (mode === "short") renderShort(data || {});
-      else renderLong(data || {});
+      lastData = data || {};
+      if (mode === "short") renderShort(lastData);
+      else renderLong(lastData);
     } catch (err) {
       if (!alive) return;
       renderError(err);
@@ -74,15 +128,126 @@ export function mountDashboard(root, { navigate }) {
     if (buildExportBtn) buildExportBtn.addEventListener("click", () => navigate("export"));
   }
 
+  // Re-renders whatever's currently on screen from the cached payload —
+  // used to tick the pipeline-progress panel (elapsed time, per-stage
+  // status) without a network round trip.
+  function rerenderCurrent() {
+    if (!alive || lastData === null) return;
+    if (mode === "short") renderShort(lastData);
+    else renderLong(lastData);
+  }
+
+  function startTicking() {
+    stopTicking();
+    tickTimer = setInterval(() => {
+      if (!alive) return stopTicking();
+      rerenderCurrent();
+    }, 500);
+  }
+  function stopTicking() {
+    if (tickTimer) clearInterval(tickTimer);
+    tickTimer = null;
+  }
+
+  // Real per-stage progress for "Run all stages" (owner: "I want to see
+  // every step here, with real progress"). Previously this posted to
+  // /pipeline/run-all, a path that doesn't exist (the real one is
+  // /health/pipeline/run-all — see app/api/routers/health.py's own
+  // deviation note), so every click silently 404'd behind a spinner that
+  // vanished with nothing having run. Fixed by driving the SAME 5 stages
+  // one at a time via the real, already-working per-stage endpoint
+  // (frontend/js/screens/health.js's `runStage`), so each stage's
+  // pending → running → done/error transition and elapsed time are real
+  // events off real network responses, not a fabricated progress bar.
+  // Each stage's `detail` (once it resolves) is the real count string
+  // the backend already returns (e.g. "attempted 42, fetched 39, failed
+  // 3" for the body-fetch stage) — there is no live in-stage progress
+  // signal available for a synchronous, one-shot stage call (e.g. LLM
+  // scoring runs as one batch), so while a stage is running this shows
+  // real elapsed time and "running", not an invented percentage.
   async function runAll() {
-    setState({ progress: "All stages · running" });
+    if (pipeline && pipeline.active) return;
+
+    let stageDefs = PIPELINE_STAGE_FALLBACK;
     try {
-      await api.post("/pipeline/run-all");
+      const overview = await api.get("/health/overview");
+      if (overview && Array.isArray(overview.stages) && overview.stages.length) {
+        stageDefs = overview.stages.map((s) => ({ key: s.key, name: s.name, desc: s.desc }));
+      }
     } catch (err) {
-      // stub endpoint — surface nothing alarming, just stop the spinner.
-    } finally {
-      setState({ progress: "" });
+      // Falls back to the fixed 5-stage list above — still real stage
+      // keys/endpoints, just without live names/descriptions from the API.
     }
+    if (!alive) return;
+
+    pipeline = {
+      active: true,
+      startedAt: Date.now(),
+      finishedAt: null,
+      stages: stageDefs.map((s) => ({ ...s, status: "pending", detail: "", startedAt: null, finishedAt: null })),
+    };
+    setState({ progress: `Run all stages · 0/${pipeline.stages.length}` });
+    startTicking();
+    rerenderCurrent();
+
+    for (const stage of pipeline.stages) {
+      if (!alive) return;
+      stage.status = "running";
+      stage.startedAt = Date.now();
+      const doneCount = pipeline.stages.filter((s) => s.status === "done" || s.status === "error").length;
+      setState({ progress: `Run all stages · ${stage.name} (${doneCount}/${pipeline.stages.length})` });
+      rerenderCurrent();
+      try {
+        const result = await api.post(`/health/pipeline/stages/${stage.key}/run`);
+        stage.status = (result && result.status) || "done";
+        stage.detail = (result && result.detail) || "";
+      } catch (err) {
+        stage.status = "error";
+        stage.detail = fmtErr(err);
+      }
+      stage.finishedAt = Date.now();
+      if (!alive) return;
+      rerenderCurrent();
+    }
+
+    pipeline.active = false;
+    pipeline.finishedAt = Date.now();
+    stopTicking();
+    setState({ progress: "" });
+    rerenderCurrent();
+  }
+
+  function pipelinePanelHtml() {
+    if (!pipeline) return "";
+    const elapsedTotal = ((pipeline.finishedAt || Date.now()) - pipeline.startedAt) / 1000;
+    const hasError = pipeline.stages.some((s) => s.status === "error");
+    const rows = pipeline.stages
+      .map((s) => {
+        const icon = s.status === "done" ? "&#10003;" : s.status === "error" ? "&#10005;" : s.status === "running" ? "&#8987;" : "&#183;";
+        const color =
+          s.status === "done" ? "var(--green)" : s.status === "error" ? "var(--red)" : s.status === "running" ? "var(--actx)" : "var(--tx4)";
+        const elapsed = s.startedAt ? ((s.finishedAt || Date.now()) - s.startedAt) / 1000 : 0;
+        const detail =
+          s.status === "pending"
+            ? "waiting…"
+            : s.status === "running"
+            ? `running · ${elapsed.toFixed(0)}s elapsed`
+            : `${s.status} · ${elapsed.toFixed(1)}s${s.detail ? " · " + escapeHtml(s.detail) : ""}`;
+        return `<div class="row" style="gap:11px;padding:6px 0;">
+          <span style="width:16px;text-align:center;color:${color};font-size:13px;">${icon}</span>
+          <span style="flex:0 0 150px;font-size:12.5px;font-weight:600;">${escapeHtml(s.name)}</span>
+          <span style="flex:1;min-width:0;font-size:11.5px;color:var(--tx3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${detail}">${detail}</span>
+        </div>`;
+      })
+      .join("");
+    return `<div class="card" style="margin-bottom:16px;border-color:${pipeline.active ? "var(--ac2)" : hasError ? "var(--red)" : "var(--line)"};">
+      <div class="row-between" style="margin-bottom:4px;">
+        <h3 style="margin:0;">Run all stages ${pipeline.active ? "· running" : hasError ? "· finished with errors" : "· done"}</h3>
+        <span class="mono" style="font-size:11px;color:var(--tx3);">${elapsedTotal.toFixed(0)}s elapsed</span>
+      </div>
+      <p class="hint" style="margin:0 0 10px;">Fetching new articles runs on a separate schedule — this runs the 5 enrichment stages against what's already collected.</p>
+      <div class="stack" style="gap:0;">${rows}</div>
+    </div>`;
   }
 
   function header(isAdmin) {
@@ -154,9 +319,10 @@ export function mountDashboard(root, { navigate }) {
         <div class="card card-sm kpi">
           <div class="kpi-value-row">
             <div class="kpi-value" style="color:${kpiColors[i] || "var(--tx)"}">${escapeHtml(k.value)}</div>
-            ${k.delta ? `<div class="kpi-delta" style="color:var(--tx3)">${escapeHtml(k.delta)}</div>` : ""}
+            ${k.delta ? `<div class="kpi-delta" style="color:${deltaColor(k.delta)}">${escapeHtml(k.delta)}</div>` : ""}
           </div>
           <div class="kpi-label">${escapeHtml(k.label)}</div>
+          ${kpiSparklineHtml(k.vals)}
           <div class="kpi-note">${escapeHtml(k.note || "")}</div>
         </div>`
           )
@@ -275,6 +441,7 @@ export function mountDashboard(root, { navigate }) {
 
     render(`
       ${header(isAdmin)}
+      ${pipelinePanelHtml()}
       <div class="grid-4" style="margin-bottom:16px;">${kpisHtml}</div>
       <div class="grid-2" style="margin-bottom:16px;">
         <div class="card">
@@ -358,7 +525,17 @@ export function mountDashboard(root, { navigate }) {
     const months = data.months12 || [];
     const monthTotals = months.map((m) => Object.values(m.segments || {}).reduce((a, b) => a + b, 0));
     const monthMax = Math.max(1, ...monthTotals);
-    const secOrder = RISK_SECTIONS;
+    // Union of every section actually present in the 12 months of data,
+    // ordered by RISK_SECTIONS where possible (stable legend order) with
+    // any section RISK_SECTIONS doesn't know about yet appended after —
+    // so a brand-new admin-created section still renders/stacks/colors
+    // correctly even if the frontend's cached section list (util.js's
+    // ensureRiskSections()) hasn't caught up yet. This is the long-term
+    // chart's own half of the hardcoded-sections fix: RISK_SECTIONS used
+    // to be the ONLY source for which sections this chart would ever draw.
+    const seenSections = new Set();
+    months.forEach((m) => Object.keys(m.segments || {}).forEach((k) => seenSections.add(k)));
+    const secOrder = [...RISK_SECTIONS.filter((k) => seenSections.has(k)), ...[...seenSections].filter((k) => !RISK_SECTIONS.includes(k))];
     const monthsHtml = months
       .map((m, i) => {
         const total = monthTotals[i] || 0;
@@ -366,7 +543,7 @@ export function mountDashboard(root, { navigate }) {
           .map((k) => {
             const v = (m.segments || {})[k] || 0;
             const h = total ? (v / total) * 100 : 0;
-            return `<div style="height:${h}%;background:${SECTION_COLORS[k]}"></div>`;
+            return `<div style="height:${h}%;background:${sectionColor(k)}"></div>`;
           })
           .join("");
         return `<div class="months-col">
@@ -376,7 +553,42 @@ export function mountDashboard(root, { navigate }) {
       })
       .join("");
     const legendHtml = secOrder
-      .map((k) => `<div class="row" style="gap:7px;"><span style="width:8px;height:8px;border-radius:2px;background:${SECTION_COLORS[k]}"></span><span style="font-size:11.5px;color:var(--tx2);">${k}</span></div>`)
+      .map((k) => `<div class="row" style="gap:7px;"><span style="width:8px;height:8px;border-radius:2px;background:${sectionColor(k)}"></span><span style="font-size:11.5px;color:var(--tx2);">${escapeHtml(k)}</span></div>`)
+      .join("");
+
+    // Relevance-mix trend (dashboard-longterm-spec.md item 2): monthly
+    // share of high-scoring (>=8) matched coverage. GLOBAL, not
+    // per-section — see RelMixTrendPointOut's docstring
+    // (app/api/schemas/core.py) for the rollup-schema gap that makes a
+    // per-section cut unavailable this round.
+    const relMixTrend = data.relMixTrend || [];
+    const relMixHtml = relMixTrend
+      .map((p) => {
+        const sharePct = Math.round((p.highShare || 0) * 100);
+        return `<div class="chart-col" title="${escapeHtml(p.label)} · ${sharePct}% high of ${p.total} matched">
+          <div class="chart-bar" style="height:${sharePct}%;background:var(--red);"></div>
+          <span class="chart-daylabel">${escapeHtml(p.label)}</span>
+        </div>`;
+      })
+      .join("");
+
+    // Top sources, 12 months (spec item 5) — aggregate across the whole
+    // window (rollup_monthly_source has no section column; see
+    // DashboardTrendsOut.topSources's docstring).
+    const topSources12 = data.topSources || [];
+    const topSources12Html = topSources12
+      .map(
+        (s, i) => `<div>
+          <div class="row-between" style="margin-bottom:6px;"><span style="font-size:12.5px;color:var(--tx2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(
+            s.label
+          )}</span><span style="font-size:12.5px;font-weight:600;flex:0 0 auto;padding-left:8px;">${s.count}</span></div>
+          <div class="bar-track bar-track-sm"><div class="bar-fill" style="width:${pctOfMax(
+            s.count,
+            topSources12,
+            (x) => x.count
+          )};background:${i === 0 ? "var(--ac3)" : "var(--ac)"};"></div></div>
+        </div>`
+      )
       .join("");
 
     const heatRows = data.heatRows || [];
@@ -420,13 +632,19 @@ export function mountDashboard(root, { navigate }) {
 
     render(`
       ${header(isAdmin)}
+      ${pipelinePanelHtml()}
       <div class="grid-4" style="margin-bottom:16px;">${trendHtml}</div>
+      <div class="card" style="margin-bottom:16px;">
+        <h3>Coverage volume by section · 12 months</h3>
+        <p class="hint">Matched articles per month, stacked by section — this is the competitor/regulatory/economic tracker once sections are configured (Keywords admin screen). The primary chart on this tab.</p>
+        <div class="months-cols">${monthsHtml || `<div class="state-body">No data.</div>`}</div>
+        <div class="row wrap" style="gap:16px;margin-top:18px;padding-top:14px;border-top:1px solid var(--line);">${legendHtml}</div>
+      </div>
       <div class="grid-2-long" style="margin-bottom:16px;">
         <div class="card">
-          <h3>Coverage volume by section · 12 months</h3>
-          <p class="hint">Matched articles per month, stacked.</p>
-          <div class="months-cols">${monthsHtml || `<div class="state-body">No data.</div>`}</div>
-          <div class="row wrap" style="gap:16px;margin-top:18px;padding-top:14px;border-top:1px solid var(--line);">${legendHtml}</div>
+          <h3>Relevance mix · 12 months</h3>
+          <p class="hint">Share of matched coverage scoring high (8–10) each month, across all sections.</p>
+          <div class="chart-cols">${relMixHtml || `<div class="state-body">No data.</div>`}</div>
         </div>
         <div class="card">
           <h3>Theme intensity</h3>
@@ -434,10 +652,16 @@ export function mountDashboard(root, { navigate }) {
           <div class="stack" style="gap:7px;">${heatHtml || `<div class="state-body">No data.</div>`}</div>
         </div>
       </div>
-      <div class="card">
-        <h3>Standing themes</h3>
-        <p class="hint">Themes that have run for three months or more.</p>
-        <div class="grid-3">${standingHtml}</div>
+      <div class="grid-2" style="margin-bottom:16px;">
+        <div class="card">
+          <h3>Standing themes</h3>
+          <p class="hint">Themes that have run for three months or more.</p>
+          <div class="grid-2">${standingHtml}</div>
+        </div>
+        <div class="card">
+          <h3 style="margin-bottom:18px;">Top sources · 12 months</h3>
+          <div class="stack" style="gap:14px;">${topSources12Html || `<div class="state-body">No data.</div>`}</div>
+        </div>
       </div>
     `);
   }
@@ -455,6 +679,7 @@ export function mountDashboard(root, { navigate }) {
   return {
     destroy() {
       alive = false;
+      stopTicking();
     },
   };
 }

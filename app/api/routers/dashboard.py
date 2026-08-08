@@ -42,7 +42,6 @@ from app.api.schemas.admin import (
     StorageUsageOut,
 )
 from app.api.schemas.core import (
-    RISK_SECTIONS,
     DashboardTodayOut,
     DashboardTrendsOut,
     DayVolumeOut,
@@ -51,10 +50,12 @@ from app.api.schemas.core import (
     KpiOut,
     MonthVolumeOut,
     RelMixOut,
+    RelMixTrendPointOut,
     SectionCountOut,
     SourceCountOut,
     StandingThemeOut,
     TrendCardOut,
+    get_risk_sections,
 )
 from app.db import queries
 from app.db.connection import DictConnection, get_connection
@@ -163,15 +164,50 @@ def _pct_of(part: int, whole: int) -> str:
 def dashboard_today(user: AuthenticatedUser = Depends(get_current_user)) -> DashboardTodayOut:
     today = _today_dhaka()
     yesterday = today - timedelta(days=1)
+    day_range14 = [today - timedelta(days=offset) for offset in range(13, -1, -1)]
+    day_from14 = day_range14[0]
 
     with get_connection() as conn:
-        fetched_today = _count(conn, "day = %s", (today,))
-        fetched_yesterday = _count(conn, "day = %s", (yesterday,))
-        matched_today = _count(conn, "day = %s AND review_status != 'filtered_out'", (today,))
-        matched_yesterday = _count(conn, "day = %s AND review_status != 'filtered_out'", (yesterday,))
+        # Real last-14-days series, one grouped query per metric instead
+        # of 3x14 individual per-day COUNTs — backs both days14[] (as
+        # before) and each KPI's new sparkline `vals` (dashboard-longterm-spec.md's
+        # short-term section) from the SAME real daily numbers, not a
+        # decorative series.
+        fetched_by_day = {
+            r["d"]: int(r["n"])
+            for r in conn.execute(
+                "SELECT day AS d, count(*) AS n FROM articles WHERE day BETWEEN %s AND %s GROUP BY day",
+                (day_from14, today),
+            ).fetchall()
+        }
+        matched_by_day = {
+            r["d"]: int(r["n"])
+            for r in conn.execute(
+                "SELECT day AS d, count(*) AS n FROM articles WHERE day BETWEEN %s AND %s "
+                "AND review_status != 'filtered_out' GROUP BY day",
+                (day_from14, today),
+            ).fetchall()
+        }
+        approved_by_day = {
+            r["d"]: int(r["n"])
+            for r in conn.execute(
+                "SELECT reviewed_at::date AS d, count(*) AS n FROM articles WHERE review_status = 'approved' "
+                "AND reviewed_at::date BETWEEN %s AND %s GROUP BY reviewed_at::date",
+                (day_from14, today),
+            ).fetchall()
+        }
+
+        fetched_today = fetched_by_day.get(today, 0)
+        fetched_yesterday = fetched_by_day.get(yesterday, 0)
+        matched_today = matched_by_day.get(today, 0)
+        matched_yesterday = matched_by_day.get(yesterday, 0)
+        approved_today = approved_by_day.get(today, 0)
         pending_count = _count(conn, "review_status = 'pending'", ())
-        approved_today = _count(conn, "review_status = 'approved' AND reviewed_at::date = %s", (today,))
         scored_today = _count(conn, "day = %s AND llm_score IS NOT NULL", (today,))
+
+        fetched_vals14 = [fetched_by_day.get(d, 0) for d in day_range14]
+        matched_vals14 = [matched_by_day.get(d, 0) for d in day_range14]
+        approved_vals14 = [approved_by_day.get(d, 0) for d in day_range14]
 
         sources_total_row = conn.execute("SELECT count(*) AS n FROM sources WHERE enabled").fetchone()
         sources_total = int(sources_total_row["n"]) if sources_total_row else 0
@@ -186,15 +222,25 @@ def dashboard_today(user: AuthenticatedUser = Depends(get_current_user)) -> Dash
                 label="Fetched today",
                 delta=_pct_delta(fetched_today, fetched_yesterday),
                 note=f"{sources_responded} of {sources_total} sources responded",
+                vals=fetched_vals14,
             ),
             KpiOut(
                 value=f"{matched_today:,}",
                 label="Keyword matched",
                 delta=_pct_delta(matched_today, matched_yesterday),
                 note="of everything fetched",
+                vals=matched_vals14,
             ),
+            # No `vals`: "awaiting review" is a point-in-time queue depth
+            # (current pending count), not a daily series this app keeps
+            # history of — a sparkline here would have to be fabricated.
             KpiOut(value=f"{pending_count:,}", label="Awaiting review", note="across all matched articles"),
-            KpiOut(value=f"{approved_today:,}", label="Approved today", note="ready for export"),
+            KpiOut(
+                value=f"{approved_today:,}",
+                label="Approved today",
+                note="ready for export",
+                vals=approved_vals14,
+            ),
         ]
 
         funnel = [
@@ -228,11 +274,7 @@ def dashboard_today(user: AuthenticatedUser = Depends(get_current_user)) -> Dash
             ),
         ]
 
-        days14 = []
-        for offset in range(13, -1, -1):
-            d = today - timedelta(days=offset)
-            count = _count(conn, "day = %s AND review_status != 'filtered_out'", (d,))
-            days14.append(DayVolumeOut(date=d.isoformat(), count=count))
+        days14 = [DayVolumeOut(date=d.isoformat(), count=matched_by_day.get(d, 0)) for d in day_range14]
 
         rel_row = conn.execute(
             """
@@ -262,7 +304,7 @@ def dashboard_today(user: AuthenticatedUser = Depends(get_current_user)) -> Dash
             (today,),
         ).fetchall()
         section_counts = {r["label"]: int(r["n"]) for r in section_rows}
-        by_section = [SectionCountOut(label=s, count=section_counts.get(s, 0)) for s in RISK_SECTIONS]
+        by_section = [SectionCountOut(label=s, count=section_counts.get(s, 0)) for s in get_risk_sections(conn)]
 
         top_source_rows = conn.execute(
             "SELECT source AS label, count(*) AS n FROM articles WHERE day = %s "
@@ -377,4 +419,44 @@ def dashboard_trends(
                 )
             )
 
-    return DashboardTrendsOut(trendCards=trend_cards, months12=months12, heatRows=heat_rows, standing=standing)
+        # Relevance-mix trend (dashboard-longterm-spec.md item 2): monthly
+        # share of high-scoring (band='high', i.e. score >= 8) matched
+        # coverage, from rollup_monthly_score_band
+        # (migrations/0007_rollups.sql: PRIMARY KEY (month, band), no
+        # section column) -- see RelMixTrendPointOut's docstring for why
+        # this is a global trend, not per-section.
+        band_rows = conn.execute(
+            "SELECT month, band, article_count FROM rollup_monthly_score_band WHERE month >= %s ORDER BY month",
+            (since_month,),
+        ).fetchall()
+        band_by_month: dict[date, dict[str, int]] = defaultdict(dict)
+        for r in band_rows:
+            band_by_month[r["month"]][r["band"]] = int(r["article_count"])
+        rel_mix_trend = []
+        for m in month_list:
+            bands = band_by_month.get(m, {})
+            total = sum(bands.values())
+            high = bands.get("high", 0)
+            rel_mix_trend.append(
+                RelMixTrendPointOut(
+                    label=m.strftime("%b"), highShare=(high / total if total else 0.0), total=total
+                )
+            )
+
+        # Top sources, 12 months (spec item 5) -- aggregate, from
+        # rollup_monthly_source (same "no section column" gap as above).
+        source_rows = conn.execute(
+            "SELECT source, sum(matched_count) AS n FROM rollup_monthly_source WHERE month >= %s "
+            "GROUP BY source ORDER BY n DESC LIMIT 8",
+            (since_month,),
+        ).fetchall()
+        top_sources_12mo = [SourceCountOut(label=r["source"], count=int(r["n"])) for r in source_rows]
+
+    return DashboardTrendsOut(
+        trendCards=trend_cards,
+        months12=months12,
+        heatRows=heat_rows,
+        standing=standing,
+        relMixTrend=rel_mix_trend,
+        topSources=top_sources_12mo,
+    )

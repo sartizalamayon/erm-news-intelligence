@@ -3,7 +3,6 @@
 
 import { mountDashboard } from "./screens/dashboard.js";
 import { mountReview } from "./screens/review.js";
-import { mountBrief } from "./screens/brief.js";
 import { mountExport } from "./screens/export.js";
 import { mountSearch } from "./screens/search.js";
 import { mountSources } from "./screens/sources.js";
@@ -15,7 +14,6 @@ import { mountManual } from "./screens/manual.js";
 const SCREENS = {
   dash: mountDashboard,
   review: mountReview,
-  brief: mountBrief,
   export: mountExport,
   search: mountSearch,
   sources: mountSources,
