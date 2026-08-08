@@ -116,6 +116,14 @@ class Settings(BaseSettings):
     mistral_model: str = Field(
         default="mistral-small-latest", description="Live-verified working model per provider-limits-VERIFIED.md."
     )
+    nvidia_api_key: str = Field(
+        default="",
+        repr=False,
+        description="NVIDIA API key (optional bootstrap/CI fallback, parity with "
+        "groq/gemini/mistral). Admin-DB-configured routing is P3-LLM's primary "
+        "design for this provider; this env var only exists so a bootstrap "
+        "key can be supplied the same way as the other three.",
+    )
     llm_provider_primary: str = Field(default="groq", description="ADR §9.1.")
     llm_provider_secondary: str = Field(default="gemini", description="ADR §9.1.")
 

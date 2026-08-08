@@ -24,6 +24,8 @@ dependencies = [
   "cryptography>=43",          # Fernet encryption for admin-entered LLM provider keys at rest, required by ADR §9.1; provisioned for ARCH-DB.
   "groq>=0.11",                # official SDK for the ruled primary LLM provider (ADR §9.1); provisioned ahead of P3-LLM for the same reason as psycopg above.
   "google-genai>=0.3",         # official SDK for the ruled secondary LLM provider, Google AI Studio (ADR §9.1); same reasoning.
+  "openpyxl>=3.1",             # xlsx writer for GET /export, the product's primary deliverable; legacy shipped it too.
+  "python-docx>=1.1",          # .docx writer for GET /brief/download.docx (imports as `docx`); legacy backend/report.py uses the same package.
 ]
 
 [project.optional-dependencies]
