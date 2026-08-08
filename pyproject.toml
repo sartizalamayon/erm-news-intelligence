@@ -26,6 +26,7 @@ dependencies = [
   "google-genai>=0.3",         # official SDK for the ruled secondary LLM provider, Google AI Studio (ADR §9.1); same reasoning.
   "openpyxl>=3.1",             # xlsx writer for GET /export, the product's primary deliverable; legacy shipped it too.
   "python-docx>=1.1",          # .docx writer for GET /brief/download.docx (imports as `docx`); legacy backend/report.py uses the same package.
+  "argon2-cffi>=23.1",         # Argon2id password hashing (PHC-encoded) for the owner-changed OTP-at-signup + email/password-at-signin auth model.
 ]
 
 [project.optional-dependencies]

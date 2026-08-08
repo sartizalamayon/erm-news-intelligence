@@ -138,6 +138,18 @@ class Settings(BaseSettings):
     resend_from_email: str = Field(
         default="", description="Verified Resend sender address OTP emails are sent from. See app.services.email."
     )
+
+    # ── Brevo (verified email provider, additive alternative to Resend) ─
+    # 300 emails/day free tier, verified sender noshinarthi9@gmail.com /
+    # display name "ERM". Resend stays supported; email_provider selects
+    # which one app.services.email actually calls.
+    email_provider: str = Field(
+        default="resend", description="Active email transport: 'resend' or 'brevo'. See app.services.email."
+    )
+    brevo_api_key: str = Field(default="", repr=False, description="Brevo API key, sent as a Bearer/api-key header.")
+    brevo_from_email: str = Field(default="", description="Verified Brevo sender address.")
+    brevo_from_name: str = Field(default="", description="Brevo sender display name, e.g. 'ERM'.")
+
     otp_console_fallback_enabled: bool = Field(
         default=True,
         description="When True AND app_env is NOT production/staging, an "
