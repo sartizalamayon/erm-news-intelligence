@@ -87,10 +87,17 @@ def create_app() -> FastAPI:
     # the strict CSP this app sends (app.middleware.security_headers)
     # does not allow, and which is not something an unauthenticated
     # internet-facing docs page needs to be reachable for anyway.
-    # Disabled outright in production/staging; left on in dev/test where
-    # they're genuinely useful and the CSP exemption in
-    # SecurityHeadersMiddleware already accounts for them.
-    docs_kwargs = {"docs_url": None, "redoc_url": None, "openapi_url": None} if production_like else {}
+    # Disabled outright in production/staging; left on (FastAPI's own
+    # defaults) in dev/test where they're genuinely useful and the CSP
+    # exemption in SecurityHeadersMiddleware already accounts for them.
+    # Passed as three explicit `str | None` keywords rather than a
+    # splatted dict: a dict built from a single ternary (all-None vs
+    # empty) infers as `dict[str, None]`, which mypy cannot match against
+    # FastAPI's actual, differently-typed keyword parameters when
+    # splatted — explicit keywords type-check cleanly instead.
+    docs_url: str | None = None if production_like else "/docs"
+    redoc_url: str | None = None if production_like else "/redoc"
+    openapi_url: str | None = None if production_like else "/openapi.json"
 
     app = FastAPI(
         title="ERM News Intelligence API",
@@ -103,7 +110,9 @@ def create_app() -> FastAPI:
         # traceback, including source snippets and local variables, as
         # the HTTP response body) to state rather than inherit silently.
         debug=False,
-        **docs_kwargs,
+        docs_url=docs_url,
+        redoc_url=redoc_url,
+        openapi_url=openapi_url,
     )
 
     # ── Middleware (see module docstring for why this exact order) ────
