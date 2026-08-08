@@ -20,13 +20,23 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.deps import AuthenticatedUser, get_current_user
+from app.db.connection import DictConnection
 from app.db.queries import insert_article
+from app.db.settings import set_setting
 from app.db.testing import migrated_schema, pg_available
 from app.errors import ValidationError
 from app.main import create_app
 from app.services import admin as admin_service
-from app.services.llm.prompts import get_relevance_examples, get_relevance_guidance
+from app.services.llm.prompts import (
+    RELEVANCE_EXAMPLES_KEY,
+    RELEVANCE_GUIDANCE_KEY,
+    get_relevance_examples,
+    get_relevance_guidance,
+)
 from app.services.llm.provider import LLMClient
+from app.services.llm.provider_registry import PROVIDER_DEFINITIONS_SETTINGS_KEY
+from app.services.llm.quota import PROVIDER_LIMITS_SETTINGS_KEY
+from app.services.llm.routing import ROUTING_SETTINGS_KEY
 from tests.helpers.fake_llm import FakeLLMProvider
 
 pytestmark = pytest.mark.skipif(not pg_available(), reason="no reachable Postgres (set TEST_DATABASE_URL)")
@@ -34,11 +44,40 @@ pytestmark = pytest.mark.skipif(not pg_available(), reason="no reachable Postgre
 ADMIN = AuthenticatedUser(id=9, email="admin@grameenphone.com", role="admin", display_name="Admin", session_id=9)
 
 
+def _reset_llm_settings(conn: DictConnection) -> None:
+    """Force the three generic-`settings`-table keys this file's
+    "defaults" tests depend on (routing/quota-limits/provider-definitions)
+    to their genuinely-unset state, then commit.
+
+    `migrated_schema()` already hands each test a brand-new, freshly
+    migrated schema, so in the normal case these keys are already unset.
+    This exists as a second, explicit guarantee that does not rely on
+    that being true: `app.db.settings.get_setting`'s own fallback
+    contract treats an EMPTY string identically to a missing row (every
+    `load_*` function below checks `if raw.strip(): ...`), so writing ""
+    is equivalent to "never configured" regardless of whatever a prior
+    write (in this schema or, if schema isolation is ever imperfect for
+    any reason — e.g. a pooled connection not fully honoring per-session
+    search_path — a DIFFERENT one) left behind. A "defaults round-trip
+    correctly" test must not depend on ambient state to be true; this
+    makes that explicit rather than assumed.
+    """
+    set_setting(conn, ROUTING_SETTINGS_KEY, "")
+    set_setting(conn, PROVIDER_LIMITS_SETTINGS_KEY, "")
+    set_setting(conn, PROVIDER_DEFINITIONS_SETTINGS_KEY, "")
+    set_setting(conn, RELEVANCE_GUIDANCE_KEY, "")
+    set_setting(conn, RELEVANCE_EXAMPLES_KEY, "")
+    set_setting(conn, "prompt_versions:guidance", "")
+    set_setting(conn, "prompt_versions:examples", "")
+    conn.commit()
+
+
 # ── Versioning ────────────────────────────────────────────────────────
 
 
 def test_first_save_creates_version_2_after_the_seeded_version_1() -> None:
     with migrated_schema() as conn:
+        _reset_llm_settings(conn)
         versions = admin_service.list_prompt_versions(conn, "guidance")
         assert [v["version"] for v in versions] == [1]
         assert versions[0]["active"] is True
@@ -95,6 +134,7 @@ def test_invalid_field_raises_validation_error() -> None:
 
 def test_get_prompt_config_reflects_active_versions_and_real_counts() -> None:
     with migrated_schema() as conn:
+        _reset_llm_settings(conn)
         insert_article(
             conn,
             url="https://x.test/1",
@@ -197,6 +237,7 @@ def test_suggest_refinement_calls_llm_client_with_approved_and_rejected_titles(m
 
 def test_get_routing_config_defaults_to_groq_primary_gemini_secondary() -> None:
     with migrated_schema() as conn:
+        _reset_llm_settings(conn)
         routes = admin_service.get_routing_config(conn)
         assert set(routes.keys()) == {
             "scoring",
@@ -303,6 +344,7 @@ def test_upsert_provider_config_rejects_unknown_provider_or_role() -> None:
 
 def test_get_quota_status_defaults_and_save_quota_limit_round_trips() -> None:
     with migrated_schema() as conn:
+        _reset_llm_settings(conn)
         statuses = {s["provider"]: s for s in admin_service.get_quota_status(conn)}
         assert statuses["groq"]["rpd"] == 1000
         assert statuses["gemini"]["rpd"] is None
@@ -333,6 +375,7 @@ def test_get_quota_status_includes_arbitrary_providers_once_defined_or_limited()
 
 def test_list_provider_definitions_includes_the_documented_defaults() -> None:
     with migrated_schema() as conn:
+        _reset_llm_settings(conn)
         definitions = {d["provider"]: d for d in admin_service.list_provider_definitions(conn)}
         assert definitions["groq"]["adapter"] == "openai_compatible"
         assert definitions["mistral"]["enabled"] is True
