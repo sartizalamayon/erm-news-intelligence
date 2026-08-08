@@ -6,9 +6,11 @@
 //   GET  /export/presets -> [{ id, name, note, filter, topN, scope, sections: [], sort, format }]
 //   POST /export/presets  { name, note, filter, topN, scope, sections, sort, format }
 //   POST /export?<same query params>  -> binary file, downloaded client-side.
-//     format=csv works (stdlib csv). format=xlsx returns 501 — openpyxl
-//     isn't an installed dependency (ARCH-REPO's file to add it, not
-//     done yet) — surfaced verbatim below, csv is the default here.
+//     Both format=xlsx (openpyxl) and format=csv (stdlib csv) are real
+//     writers on the backend (app/services/export.py). EXPORT-XLSX-
+//     DEFAULT: xlsx is the default here and on the backend — the owner's
+//     explicit call ("export should have .xlsx mainly, not csv") — csv
+//     stays available as an explicit second choice.
 //
 // Known backend gap: `do_export`/`export_preview` take no `columns`
 // param — the server always writes its own fixed CSV column set. The
@@ -56,8 +58,8 @@ const SORTS = [
   { k: "date", l: "Date" },
 ];
 const FORMATS = [
+  { k: "xlsx", l: "Excel .xlsx" },
   { k: "csv", l: "CSV" },
-  { k: "xlsx", l: "Excel .xlsx (not available yet)" },
 ];
 
 export function mountExport(root) {
@@ -71,7 +73,7 @@ export function mountExport(root) {
     sections: [...RISK_SECTIONS],
     cols: { headline: 1, source: 1, section: 1, keywords: 1, published: 1, score: 1, reason: 0, alsoIn: 1, link: 1, body: 0 },
     sort: "relevance",
-    format: "csv", // xlsx is 501 on the backend today (openpyxl not installed) — default to what works
+    format: "xlsx", // EXPORT-XLSX-DEFAULT: xlsx is the primary format now (owner's call); csv stays a choice
     preview: null,
     previewLoading: true,
     previewError: null,

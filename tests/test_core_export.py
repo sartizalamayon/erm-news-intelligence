@@ -151,6 +151,31 @@ def test_export_xlsx_returns_a_real_workbook(export_client) -> None:
     assert any(row[0] == "Xlsx story" for row in rows[1:])
 
 
+def test_export_defaults_to_xlsx_when_format_omitted(export_client) -> None:
+    """EXPORT-XLSX-DEFAULT: owner's explicit call ("export should have
+    .xlsx mainly, not csv") — a caller that never specifies `format` at
+    all (no query param, no JSON body) must get xlsx back, not csv.
+    Covers both POST /export (the actual download) and GET
+    /export/preview (whose `filename` the FE surfaces before download).
+    """
+    client, conn = export_client
+    _insert_article(
+        conn, title="Default format story", source="Prothom Alo", day=date.today(),
+        sections="Others", review_status="approved", llm_score=8,
+    )
+    conn.commit()
+
+    resp = client.post("/export", params={"filter": "approved"})
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == XLSX_MEDIA_TYPE
+    assert resp.headers["content-disposition"].endswith('.xlsx"')
+    assert resp.content[:2] == b"PK"
+
+    preview_resp = client.get("/export/preview", params={"filter": "approved"})
+    assert preview_resp.status_code == 200
+    assert preview_resp.json()["filename"].endswith(".xlsx")
+
+
 def test_export_csv_is_real_csv_not_a_zip(export_client) -> None:
     client, conn = export_client
     _insert_article(

@@ -298,3 +298,4 @@ class SearchOut(BaseModel):
     results: list[SearchResultOut]
     total: int
     corpusSize: int
+    sources: list[SourceFilterOut] = Field(default_factory=list)
