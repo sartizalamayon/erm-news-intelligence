@@ -143,84 +143,85 @@ def test_batch_main_records_a_runs_row(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
 
-# ── RT-1-residual: the fix closes every CAUGHT-exception crash, not a ──
-# ── genuine hard kill (SIGKILL/OOM/power loss) ──────────────────────────
+# ── RT-1-residual: hard-kill detection and self-healing ─────────────────
+# FIXED by DEPLOY (app/db/reaper.py::reap_stale_runs, commit 59dbae7,
+# called at the start of every app.batch.run_daily.main()) and
+# ADMIN-API (app.services.admin.health_runs surfacing heartbeat_at +
+# a computed heartbeat_stale, commit 9315218).
 
 
 @pg_gated
-@pytest.mark.xfail(
-    strict=True,
-    reason="RT-1-residual (docs/red-team-findings.md): a hard process kill between "
-    "_start_run() and _finalize_run() -- not simulable by raising a Python exception, which "
-    "IS handled -- leaves a status='running' row with a heartbeat that stops advancing, and "
-    "nothing anywhere in app/ (no reaper, no scheduled sweep, no admin health-check comparison "
-    "of heartbeat_at against now()) ever surfaces that as stale. Owner: P1-INGEST (write side "
-    "already fixed) / open for whoever builds the watchdog consumer.",
-)
-def test_a_run_that_stops_advancing_its_heartbeat_is_detected_as_stale() -> None:
-    """Simulates a hard kill: start a run and touch its heartbeat once
-    (exactly what a real run does before any work begins), then -- since
-    an OS-level SIGKILL cannot be simulated by raising a Python
-    exception (that path IS handled by run_collection()'s own
-    try/except, verified fixed above) -- simply stop, as a killed
-    process would. No further code runs. The row is now indistinguishable
-    from a live run except that its heartbeat has gone stale.
+def test_a_hard_killed_run_is_visible_as_stale_before_the_next_batch_reaps_it() -> None:
+    """RT-1-residual, CONFIRMED FIXED -- was xfail(strict=True).
 
-    Asserts the property RT-1's own mission brief actually asked for:
-    the rebuild "reaps or PREVENTS" orphaned runs. This checks for any
-    mechanism, anywhere in app/, that would let an operator or an
-    automated process tell this row apart from one that's genuinely
-    still in progress. As of this writing there is none -- this is the
-    same defect legacy had, for this one specific failure mode.
+    Simulates a hard kill exactly as before (start + one heartbeat, then
+    stop -- no exception, nothing a try/except could observe), backdates
+    the heartbeat past the 30-minute threshold, then checks BOTH halves
+    of the fix: (1) admin.health_runs marks it heartbeat_stale=True
+    before anything reaps it, using the SAME 30-minute threshold
+    app.db.reaper uses, and (2) the next app.batch.run_daily.main()
+    invocation self-heals it to status='error' before starting its own
+    run, per reap_stale_runs' own "prevents, not just reaps after the
+    fact" design.
     """
+    from app.db.reaper import DEFAULT_STALE_AFTER, reap_stale_runs
+    from app.services import admin as admin_module
+
     with migrated_schema() as conn:
         run_id = collector_module._start_run(conn, trigger="scheduled")
         collector_module._touch_heartbeat(conn, run_id)
-        # <-- a real SIGKILL happens here; no further Python code runs,
-        # _finalize_run() is never reached, nothing rolls back (both
-        # prior statements already committed by design).
+        # <-- a real SIGKILL happens here; no further Python code runs.
 
-        row = conn.execute("SELECT status, heartbeat_at FROM runs WHERE id = %s", (run_id,)).fetchone()
-        assert row["status"] == "running"  # confirms the row is genuinely stuck, not auto-healed
-
-        # Backdate the heartbeat to simulate real elapsed time (a fresh
-        # heartbeat and a stale one must be distinguishable to whatever
-        # mechanism is supposed to catch this).
         conn.execute(
             "UPDATE runs SET heartbeat_at = now() - interval '2 hours' WHERE id = %s",
             (run_id,),
         )
         conn.commit()
 
-        stale_cutoff = timedelta(minutes=30)
-        stale_row = conn.execute(
-            "SELECT id FROM runs WHERE status = 'running' AND heartbeat_at < now() - (%s || ' seconds')::interval",
-            (stale_cutoff.total_seconds(),),
-        ).fetchone()
-        # The QUERY above proves the DATA supports detection (idx_runs_status_running
-        # + heartbeat_at are enough to write this). The assertion below is
-        # about whether the APPLICATION actually does -- it doesn't: no
-        # caller anywhere in app/ ever runs an equivalent query, so this
-        # row will never actually be surfaced to anyone. Asserting
-        # `stale_row is None` here would be testing the wrong thing (the
-        # SQL clearly finds it); the real assertion is that no consumer
-        # exists to act on it, which the reason string above documents
-        # and this next check pins structurally.
-        assert stale_row is not None  # the data CAN answer the question...
+        # (1) Visible as stale via the admin read path, same threshold
+        # the reaper itself uses -- not just detectable by hand-writing
+        # SQL, but by the actual application code.
+        assert DEFAULT_STALE_AFTER == timedelta(minutes=30)
+        rows = admin_module.health_runs(conn, limit=10)
+        this_row = next(r for r in rows if r["id"] == run_id)
+        assert this_row["status"] == "running"
+        assert this_row["heartbeat_stale"] is True, "a 2-hour-stale heartbeat must be flagged stale"
 
-        import inspect
+        # (2) Self-heals: the next batch run reaps it before touching
+        # the runs table again (this IS what app.batch.run_daily.main()
+        # does at its own top, exercised directly here at the function
+        # reaper.py itself provides).
+        reaped_ids = reap_stale_runs(conn)
+        assert run_id in reaped_ids
+        row = conn.execute("SELECT status, finished_at FROM runs WHERE id = %s", (run_id,)).fetchone()
+        assert row["status"] == "error"
+        assert row["finished_at"] is not None
 
-        from app.services import admin as admin_module
+        # Re-checking health_runs after the reap: no longer flagged
+        # stale (it's not 'running' anymore, it's a finalized 'error').
+        rows_after = admin_module.health_runs(conn, limit=10)
+        this_row_after = next(r for r in rows_after if r["id"] == run_id)
+        assert this_row_after["heartbeat_stale"] is False
 
-        health_runs_source = inspect.getsource(admin_module.health_runs)
-        health_overview_source = inspect.getsource(admin_module.health_overview)
-        # ...but ADMIN-API's own read path over `runs` -- the only place
-        # in this codebase that reads the `runs` table back out for a
-        # human to look at -- never mentions heartbeat_at at all, so a
-        # stuck row like this one is reported with whatever `status` it
-        # was last left at ('running'), forever, indistinguishable from
-        # a run that started 30 seconds ago.
-        assert "heartbeat_at" in health_runs_source or "heartbeat_at" in health_overview_source, (
-            "expected the admin health/runs read path to compare heartbeat_at against now() "
-            "somewhere so a stale 'running' row is surfaced as such, not reported as live"
-        )
+
+@pg_gated
+def test_healthy_running_run_is_not_flagged_stale_or_reaped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Control: a run that started seconds ago with a fresh heartbeat
+    must NOT be flagged stale or reaped -- the threshold must not be so
+    aggressive it kills a live, in-progress run out from under itself.
+    """
+    from app.db.reaper import reap_stale_runs
+    from app.services import admin as admin_module
+
+    with migrated_schema() as conn:
+        run_id = collector_module._start_run(conn, trigger="scheduled")
+        collector_module._touch_heartbeat(conn, run_id)
+
+        rows = admin_module.health_runs(conn, limit=10)
+        this_row = next(r for r in rows if r["id"] == run_id)
+        assert this_row["heartbeat_stale"] is False
+
+        reaped_ids = reap_stale_runs(conn)
+        assert run_id not in reaped_ids
+        row = conn.execute("SELECT status FROM runs WHERE id = %s", (run_id,)).fetchone()
+        assert row["status"] == "running"
