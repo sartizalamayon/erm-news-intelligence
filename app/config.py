@@ -138,6 +138,16 @@ class Settings(BaseSettings):
     resend_from_email: str = Field(
         default="", description="Verified Resend sender address OTP emails are sent from. See app.services.email."
     )
+    otp_console_fallback_enabled: bool = Field(
+        default=True,
+        description="When True AND app_env is NOT production/staging, an "
+        "unconfigured Resend falls back to logging the OTP code to the "
+        "server console (WARNING level) instead of failing the request -- "
+        "lets local/dev/CI login work with no mail provider set up. ALWAYS "
+        "forced off in production/staging regardless of this value -- see "
+        "app.services.email.send_otp_email(). Set to False to disable the "
+        "fallback even in dev (e.g. to test the real failure path).",
+    )
 
     # ── Frontend / CORS ───────────────────────────────────────────────
     cors_allow_origins: str = Field(

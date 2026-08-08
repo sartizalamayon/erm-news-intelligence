@@ -30,8 +30,8 @@ from __future__ import annotations
 
 import requests
 
-from app.config import get_settings
-from app.errors import ConfigurationError, ProviderPermanentError, ProviderRateLimitedError
+from app.config import Settings, get_settings
+from app.errors import ProviderPermanentError, ProviderRateLimitedError
 from app.logging import get_logger, mask
 
 logger = get_logger(__name__)
@@ -39,6 +39,17 @@ logger = get_logger(__name__)
 RESEND_API_URL = "https://api.resend.com/emails"
 REQUEST_TIMEOUT_SECONDS = 10
 PROVIDER_NAME = "resend"
+
+
+def _console_fallback_allowed(settings: Settings) -> bool:
+    """HARD GATE: production/staging can NEVER use the console fallback,
+    regardless of otp_console_fallback_enabled -- an unconfigured
+    provider must fail loudly there, not quietly print a login code.
+    Outside those two environments, the (default-True) flag decides.
+    """
+    if settings.app_env in ("production", "staging"):
+        return False
+    return settings.otp_console_fallback_enabled
 
 
 def _subject_and_body(code: str, ttl_minutes: int) -> tuple[str, str]:
@@ -73,9 +84,28 @@ def send_otp_email(*, to_email: str, code: str, ttl_minutes: int) -> None:
     api_key = settings.resend_api_key
     from_email = settings.resend_from_email
     if not api_key or not from_email:
-        raise ConfigurationError(
-            "Resend is not configured -- RESEND_API_KEY and RESEND_FROM_EMAIL "
-            "(the verified From address) must both be set."
+        if _console_fallback_allowed(settings):
+            # DEV-ONLY: the code is deliberately in the MESSAGE text, not
+            # an `extra=` field -- app.logging redacts extra keys matching
+            # "otp" (SENSITIVE_KEY_SUBSTRINGS), which would hide it here
+            # too. This is the one intentional exception to "never log an
+            # OTP code," gated by _console_fallback_allowed() to be
+            # impossible outside development/test.
+            logger.warning(
+                f"DEV_OTP_FALLBACK: no email provider configured (app_env={settings.app_env}) -- "
+                f"code={code} for {mask(to_email)} (expires in {ttl_minutes}m)"
+            )
+            return
+        # Not falling back (production/staging, or the flag is off): this
+        # is an operator problem, not the caller's fault. The message
+        # below is what reaches the client via ProviderError's existing
+        # handler (app/api/error_handlers.py, unmodified) -- deliberately
+        # generic, no env var names, no paths. Full detail stays here,
+        # server-side only.
+        logger.error("email_provider_not_configured", extra={"app_env": settings.app_env})
+        raise ProviderPermanentError(
+            "Email delivery is not configured. Please contact an administrator.",
+            provider=PROVIDER_NAME,
         )
 
     subject, text = _subject_and_body(code, ttl_minutes)
