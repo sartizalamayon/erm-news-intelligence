@@ -1,44 +1,74 @@
 // Review queue — the core triage tool (frontend-contract.md §3.3).
 //
-// Expected API (proposal — app/api/routers/review.py is a stub, zero
-// routes registered; GET/PATCH/POST below all currently 404):
+// REVIEW-REBUILD (perf + UX rebuild): see app/api/routers/review.py's
+// module docstring for the measured performance diagnosis (was: 1.77s
+// backend time / 131.7MB JSON for one GET /articles at realistic scale
+// — one over-fetching request, not literal N+1 — now: ~110ms / ~105KB
+// for the same view). This file was rewritten alongside it:
+//   - List rows are lightweight (id/title/source/date/time/section/
+//     score/dupCount/isStarred/status) and paginated (`limit`/`offset`/
+//     `top_n`) — no body text, no dup/topic detail, until a card is
+//     actually opened.
+//   - Selecting a card fetches full detail on demand via the new
+//     GET /articles/{id}, merged into that item in place — one request
+//     per user click, not one giant request carrying every row's body.
+//   - Bulk approve/reject/star update the already-fetched `s.items`
+//     array in place after the single batched POST succeeds, instead of
+//     re-fetching (and re-rendering) the whole list.
+//   - The "leave a note" feature and every keyboard shortcut (J/K/A/R/
+//     X/S//) are gone per the owner's explicit redesign brief — pure
+//     checkbox+toolbar interaction, no hidden hotkeys.
+//   - The list is date-grouped (newest first), filters gained a date
+//     range, an AI-score min–max slider, a "top N by score" mode, and a
+//     first-class "Approved only" view distinct from "All".
 //
-//   GET /articles?status=&tier=&lang=&source=&q=&sort=&starred= ->
-//     { items: [{ id, title, source, time, section, score, dupCount,
-//                 isStarred, status, titleEn, url, reason,
+// API (app/api/routers/review.py):
+//   GET /articles?q=&sort=&lang=&exclude_source=&status=&starred=&
+//                 score_min=&score_max=&date_from=&date_to=&top_n=&
+//                 limit=&offset= ->
+//     { items: [{ id, title, source, date, time, section, score,
+//                 dupCount, isStarred, status, titleEn, url, reason,
 //                 keywords: [], body, bodyFetched: bool, note,
 //                 dups: [{id,source,title,url}]|null,
 //                 topicPeers: [{id,source,title,score}]|null, topic }],
 //       total, sources: [{name, count}] }
+//     (list rows carry only the first group of fields — body/dups/
+//     topicPeers/note/titleEn/url/reason/keywords come back empty/null
+//     until fetched via the detail endpoint below.)
+//   GET   /articles/{id}            -> full detail for one article
 //   PATCH /articles/{id}            { status?, starred?, note? }
 //   POST  /articles/bulk            { ids: [], action: "approve"|"reject"|"star" }
 //   POST  /articles/{id}/dups/{dupId}/keep
 //   POST  /articles/{id}/dups/{dupId}/drop
 //
-// Tier banding (score -> High/Medium/Low/Least) and dup/topic-peer
-// colors are computed client-side from the raw score, per §3.3's
-// Server/Client split — the server sends the score, not the label.
+// Tier coloring (score -> High/Medium/Low/Least) is computed
+// client-side from the raw score, per §3.3's Server/Client split — the
+// server sends the score, not the label.
 
 import { api, ApiError } from "../api.js";
-import { escapeHtml, tier, debounce, fmtErr, skeletonRows, notWiredBanner } from "../util.js";
+import { escapeHtml, tier, debounce, fmtErr, formatNumber, skeletonRows, notWiredBanner } from "../util.js";
 
-const TIER_KEYS = ["red", "yellow", "green", "magenta"];
-const TIER_META = {
-  red: { title: "High (8–10)", dot: "var(--red)" },
-  yellow: { title: "Medium (6–7)", dot: "var(--amber)" },
-  green: { title: "Low (5)", dot: "var(--green)" },
-  magenta: { title: "Least (<5)", dot: "var(--violet)" },
-};
+const PAGE_SIZE = 200;
+const TOP_N_OPTIONS = [20, 50, 100, 200];
+const VIEW_MODES = [
+  ["pending", "Pending"],
+  ["approved", "Approved"],
+  ["all", "All"],
+];
 
 export function mountReview(root, { navigate }) {
   let alive = true;
   const s = {
     q: "",
     sort: "relevance",
-    tiers: { red: true, yellow: true, green: true, magenta: true },
+    scoreMin: 1,
+    scoreMax: 10,
+    dateFrom: "",
+    dateTo: "",
+    topN: null,
     lang: "",
     srcOff: [],
-    showDecided: false,
+    viewMode: "pending",
     starredOnly: false,
     srcMenuOpen: false,
     checked: new Set(),
@@ -47,82 +77,76 @@ export function mountReview(root, { navigate }) {
     topicOpen: false,
     items: [],
     sources: [],
+    total: 0,
     loading: true,
+    loadingMore: false,
+    bulkBusy: false,
     error: null,
-    noteDrafts: {},
   };
 
-  const debouncedFetch = debounce(fetchList, 300);
-
-  const onKeyDown = (e) => {
-    const t = e.target;
-    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) {
-      if (e.key === "Escape") t.blur();
-      return;
-    }
-    const list = s.items;
-    const i = list.findIndex((a) => a.id === s.selId);
-    if (e.key === "j" || e.key === "J" || e.key === "ArrowDown") {
-      e.preventDefault();
-      const n = list[Math.min(list.length - 1, i + 1)];
-      if (n) selectArticle(n.id);
-    } else if (e.key === "k" || e.key === "K" || e.key === "ArrowUp") {
-      e.preventDefault();
-      const n = list[Math.max(0, i - 1)];
-      if (n) selectArticle(n.id);
-    } else if (e.key === "a" || e.key === "A") {
-      e.preventDefault();
-      if (s.selId) decide(s.selId, "approved");
-    } else if (e.key === "r" || e.key === "R") {
-      e.preventDefault();
-      if (s.selId) decide(s.selId, "rejected");
-    } else if (e.key === "x" || e.key === "X") {
-      e.preventDefault();
-      if (s.selId) toggleCheck(s.selId);
-    } else if (e.key === "s" || e.key === "S") {
-      e.preventDefault();
-      if (s.selId) toggleStar(s.selId);
-    } else if (e.key === "/") {
-      e.preventDefault();
-      const el = root.querySelector('[data-role="queue-filter"]');
-      if (el) el.focus();
-    }
-  };
-  document.addEventListener("keydown", onKeyDown);
+  const debouncedFetch = debounce(() => fetchList(), 300);
 
   render();
   fetchList();
 
-  async function fetchList() {
-    s.loading = true;
+  async function fetchList({ append = false } = {}) {
+    if (append) s.loadingMore = true;
+    else s.loading = true;
     s.error = null;
     render();
     try {
-      const activeTiers = TIER_KEYS.filter((k) => s.tiers[k]);
       const data = await api.get("/articles", {
         query: {
           q: s.q || undefined,
-          sort: s.sort,
-          tier: activeTiers.length < 4 ? activeTiers.join(",") : undefined,
+          sort: s.topN ? undefined : s.sort,
           lang: s.lang || undefined,
           exclude_source: s.srcOff.join(",") || undefined,
-          status: s.showDecided ? undefined : "pending",
+          status: s.viewMode === "all" ? undefined : s.viewMode,
           starred: s.starredOnly ? "true" : undefined,
+          score_min: s.scoreMin > 1 ? s.scoreMin : undefined,
+          score_max: s.scoreMax < 10 ? s.scoreMax : undefined,
+          date_from: s.dateFrom || undefined,
+          date_to: s.dateTo || undefined,
+          top_n: s.topN || undefined,
+          limit: s.topN ? undefined : PAGE_SIZE,
+          offset: s.topN ? undefined : append ? s.items.length : 0,
         },
       });
       if (!alive) return;
-      s.items = (data && data.items) || [];
+      const newItems = (data && data.items) || [];
+      s.items = append ? s.items.concat(newItems) : newItems;
       s.sources = (data && data.sources) || [];
+      s.total = (data && data.total) || 0;
       s.loading = false;
+      s.loadingMore = false;
       if (s.selId && !s.items.some((a) => a.id === s.selId)) s.selId = null;
-      if (!s.selId && s.items.length) s.selId = s.items[0].id;
+      if (!s.selId && s.items.length && !append) s.selId = s.items[0].id;
       render();
+      if (s.selId) ensureDetail(s.selId);
     } catch (err) {
       if (!alive) return;
       s.loading = false;
+      s.loadingMore = false;
       s.error = err;
       render();
     }
+  }
+
+  async function ensureDetail(id) {
+    const item = s.items.find((a) => a.id === id);
+    if (!item || item._detailLoaded || item._detailLoading) return;
+    item._detailLoading = true;
+    render();
+    try {
+      const full = await api.get(`/articles/${id}`);
+      if (!alive) return;
+      const cur = s.items.find((a) => a.id === id);
+      if (cur) Object.assign(cur, full, { _detailLoaded: true, _detailLoading: false });
+    } catch (err) {
+      const cur = s.items.find((a) => a.id === id);
+      if (cur) cur._detailLoading = false;
+    }
+    render();
   }
 
   function selectArticle(id) {
@@ -130,11 +154,19 @@ export function mountReview(root, { navigate }) {
     s.dupOpen = false;
     s.topicOpen = false;
     render();
+    ensureDetail(id);
   }
 
   function toggleCheck(id) {
     if (s.checked.has(id)) s.checked.delete(id);
     else s.checked.add(id);
+    render();
+  }
+
+  function toggleSelectAllShown() {
+    const allChecked = s.items.length > 0 && s.items.every((a) => s.checked.has(a.id));
+    if (allChecked) s.items.forEach((a) => s.checked.delete(a.id));
+    else s.items.forEach((a) => s.checked.add(a.id));
     render();
   }
 
@@ -156,7 +188,8 @@ export function mountReview(root, { navigate }) {
     const item = list[i];
     if (!item) return;
     item.status = status; // optimistic
-    if (!s.showDecided) {
+    const stillVisible = s.viewMode === "all" || s.viewMode === status;
+    if (!stillVisible) {
       list.splice(i, 1);
       const next = list[i] || list[i - 1];
       s.selId = next ? next.id : null;
@@ -170,22 +203,51 @@ export function mountReview(root, { navigate }) {
     });
   }
 
+  // Bulk approve/reject/star: ONE batched request for however many ids
+  // are checked (verified at 50-60 ids ~35-40ms server-side — see
+  // app/api/routers/review.py's bulk_action, a single `WHERE id =
+  // ANY(...)` UPDATE, not a loop). On success the already-fetched
+  // `s.items` array is patched in place — no full-list re-fetch/re-render.
   async function bulk(action) {
     const ids = Array.from(s.checked);
-    if (!ids.length) return;
-    s.checked.clear();
+    if (!ids.length || s.bulkBusy) return;
+    s.bulkBusy = true;
     render();
     try {
       await api.post("/articles/bulk", { ids, action });
+      const idSet = new Set(ids);
+      if (action === "star") {
+        s.items.forEach((a) => {
+          if (idSet.has(a.id)) a.isStarred = true;
+        });
+      } else {
+        const newStatus = action === "approve" ? "approved" : "rejected";
+        s.items.forEach((a) => {
+          if (idSet.has(a.id)) a.status = newStatus;
+        });
+        const stillVisible = (a) => s.viewMode === "all" || s.viewMode === a.status;
+        s.items = s.items.filter((a) => !idSet.has(a.id) || stillVisible(a));
+        if (s.selId && idSet.has(s.selId) && !s.items.some((a) => a.id === s.selId)) {
+          s.selId = s.items.length ? s.items[0].id : null;
+        }
+      }
+      s.checked.clear();
+      s.bulkBusy = false;
+      render();
     } catch (err) {
-      /* surfaced on next list refresh */
+      s.bulkBusy = false;
+      s.error = err;
+      render();
     }
-    fetchList();
   }
 
   function resetFilters() {
     s.q = "";
-    s.tiers = { red: true, yellow: true, green: true, magenta: true };
+    s.scoreMin = 1;
+    s.scoreMax = 10;
+    s.dateFrom = "";
+    s.dateTo = "";
+    s.topN = null;
     s.lang = "";
     s.srcOff = [];
     s.starredOnly = false;
@@ -194,13 +256,16 @@ export function mountReview(root, { navigate }) {
 
   function render() {
     const cur = s.items.find((a) => a.id === s.selId) || null;
+    const hasMore = !s.topN && !s.loading && s.items.length < s.total;
+    const allShownChecked = s.items.length > 0 && s.items.every((a) => s.checked.has(a.id));
+
     root.innerHTML = `
       <div class="review-shell">
         <div class="review-toolbar">
           <div class="review-toolbar-row">
             <div class="search-box">
               <span style="color:var(--tx4);font-size:12px;">&#8981;</span>
-              <input data-role="queue-filter" placeholder="Filter the queue…  /" value="${escapeHtml(s.q)}" />
+              <input data-role="queue-filter" placeholder="Filter the queue…" value="${escapeHtml(s.q)}" />
             </div>
             <div class="seg-group">
               ${[
@@ -208,18 +273,16 @@ export function mountReview(root, { navigate }) {
                 ["date", "Newest"],
                 ["source", "Source"],
               ]
-                .map(([k, l]) => `<button class="seg-btn ${s.sort === k ? "active" : ""}" data-sort="${k}">${l}</button>`)
+                .map(
+                  ([k, l]) =>
+                    `<button class="seg-btn ${s.sort === k ? "active" : ""}" data-sort="${k}" ${s.topN ? "disabled" : ""}>${l}</button>`
+                )
                 .join("")}
             </div>
-            <div class="tier-group">
-              <span class="mono" style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--tx4);margin-right:2px;">Rel</span>
-              ${TIER_KEYS.map((k) => {
-                const meta = TIER_META[k];
-                const on = s.tiers[k];
-                return `<button class="tier-dot-btn ${on ? "active" : ""}" data-tier="${k}" title="${meta.title}">
-                  <span class="tier-dot" style="background:${meta.dot};opacity:${on ? 1 : 0.22}"></span>
-                </button>`;
-              }).join("")}
+            <div class="seg-group">
+              ${VIEW_MODES.map(
+                ([k, l]) => `<button class="seg-btn ${s.viewMode === k ? "active" : ""}" data-view="${k}">${l}</button>`
+              ).join("")}
             </div>
             <div class="seg-group">
               ${[
@@ -256,22 +319,52 @@ export function mountReview(root, { navigate }) {
                   : ""
               }
             </div>
-            <button id="decidedBtn" class="chk-btn" style="${s.showDecided ? "color:var(--actx);" : ""}">${s.showDecided ? "Hide decided" : "Show decided"}</button>
             <button id="starredBtn" class="chk-btn" style="${s.starredOnly ? "border-color:var(--amber);color:var(--amber);" : ""}">&#9733; ${
       s.items.filter((a) => a.isStarred).length
     }</button>
             <div class="grow"></div>
             <button id="goExportBtn" class="btn btn-primary" style="height:36px;padding:0 15px;white-space:nowrap;">&#8595; Export approved</button>
           </div>
+
+          <div class="review-toolbar-row" style="padding-top:0;">
+            <div class="date-range-group">
+              <span class="mono" style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--tx4);">Date</span>
+              <input type="date" data-role="date-from" class="date-input" value="${escapeHtml(s.dateFrom)}" ${s.topN ? "disabled" : ""} />
+              <span style="color:var(--tx4);">–</span>
+              <input type="date" data-role="date-to" class="date-input" value="${escapeHtml(s.dateTo)}" ${s.topN ? "disabled" : ""} />
+            </div>
+            <div class="score-slider-group">
+              <span class="mono" style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--tx4);">Score</span>
+              <div class="score-slider">
+                <input type="range" min="1" max="10" step="1" data-role="score-min" value="${s.scoreMin}" />
+                <input type="range" min="1" max="10" step="1" data-role="score-max" value="${s.scoreMax}" />
+              </div>
+              <span class="mono" id="scoreRangeLabel" style="font-size:11px;color:var(--tx2);min-width:38px;">${s.scoreMin}–${s.scoreMax}</span>
+            </div>
+            <div class="seg-group" style="padding:0 3px;">
+              <span class="mono" style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--tx4);padding:0 6px;">Top N</span>
+              <select data-role="topn-select" class="topn-select">
+                <option value="">Off</option>
+                ${TOP_N_OPTIONS.map((n) => `<option value="${n}" ${s.topN === n ? "selected" : ""}>Top ${n}</option>`).join("")}
+              </select>
+            </div>
+            ${
+              s.q || s.lang || s.srcOff.length || s.starredOnly || s.dateFrom || s.dateTo || s.topN || s.scoreMin > 1 || s.scoreMax < 10
+                ? `<button id="clearFiltersBtn" class="btn-ghost" style="font-size:12px;">Reset filters</button>`
+                : ""
+            }
+          </div>
+
           ${
             s.checked.size
               ? `<div class="bulk-bar">
               <span style="font-size:13px;font-weight:600;color:var(--actx);">${s.checked.size} selected</span>
-              <button id="bulkApprove" class="btn btn-primary" style="padding:7px 14px;">&#10003; Approve all</button>
-              <button id="bulkReject" class="btn btn-danger-outline" style="padding:7px 14px;">&#10005; Reject all</button>
-              <button id="bulkStar" class="btn-sm" style="padding:7px 14px;">&#9733; Star all</button>
+              <button id="bulkApprove" class="btn btn-primary" style="padding:7px 14px;" ${s.bulkBusy ? "disabled" : ""}>&#10003; Approve all</button>
+              <button id="bulkReject" class="btn btn-danger-outline" style="padding:7px 14px;" ${s.bulkBusy ? "disabled" : ""}>&#10005; Reject all</button>
+              <button id="bulkStar" class="btn-sm" style="padding:7px 14px;" ${s.bulkBusy ? "disabled" : ""}>&#9733; Star all</button>
               <div class="grow"></div>
-              <button id="clearChecked" class="btn-ghost" style="cursor:pointer;font-size:12px;">Clear selection</button>
+              ${s.bulkBusy ? `<span class="mono" style="font-size:11px;color:var(--tx3);">working…</span>` : ""}
+              <button id="clearChecked" class="btn-ghost" style="cursor:pointer;font-size:12px;" ${s.bulkBusy ? "disabled" : ""}>Clear selection</button>
             </div>`
               : ""
           }
@@ -282,31 +375,24 @@ export function mountReview(root, { navigate }) {
         <div class="review-body">
           <div class="review-list-pane">
             <div class="review-list-head">
-              <div class="mono" style="font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:var(--tx3);">${
-                s.loading ? "Loading…" : `${s.items.length} shown`
-              }</div>
-              <div class="mono" style="font-size:10px;color:var(--tx4);">J / K to move</div>
+              <label style="display:flex;align-items:center;gap:9px;cursor:pointer;">
+                <div class="article-check ${allShownChecked ? "checked" : ""}" data-select-all><span>&#10003;</span></div>
+                <span class="mono" style="font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:var(--tx3);">${
+                  s.loading ? "Loading…" : `${formatNumber(s.items.length)} of ${formatNumber(s.total)}`
+                }</span>
+              </label>
             </div>
-            ${renderList(cur)}
-            ${s.items.length && !s.loading ? `<div class="end-of-queue">end of queue</div>` : ""}
+            ${renderList()}
+            ${
+              hasMore
+                ? `<div style="padding:14px 18px;text-align:center;"><button id="loadMoreBtn" class="btn btn-outline" ${s.loadingMore ? "disabled" : ""}>${s.loadingMore ? "Loading…" : "Load more"}</button></div>`
+                : ""
+            }
+            ${s.items.length && !s.loading && !hasMore ? `<div class="end-of-queue">end of queue</div>` : ""}
           </div>
           <div class="review-detail-pane">
             ${renderDetail(cur)}
           </div>
-        </div>
-
-        <div class="hints-bar">
-          ${[
-            ["J K", "move"],
-            ["A", "approve"],
-            ["R", "reject"],
-            ["X", "select"],
-            ["S", "star"],
-            ["/", "filter"],
-          ]
-            .map(([k, w]) => `<span style="display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--tx2);white-space:nowrap;"><b class="hint-key">${k}</b>${w}</span>`)
-            .join("")}
-          <button id="hideHints" class="btn-ghost" style="font-size:14px;line-height:1;padding:0 0 0 4px;">&#10005;</button>
         </div>
       </div>
     `;
@@ -322,7 +408,32 @@ export function mountReview(root, { navigate }) {
     )}</div><button id="reviewRetry" class="btn-ghost" style="color:var(--red);text-decoration:underline;">Retry</button></div></div>`;
   }
 
-  function renderList(cur) {
+  // Groups the already-server-sorted `s.items` into date buckets, newest
+  // date first, preserving each item's position within its own date
+  // (so whatever sort mode is active — relevance/date/source — still
+  // governs ordering INSIDE a day; grouping is a display layer on top).
+  function groupByDate(items) {
+    const order = [];
+    const buckets = new Map();
+    for (const a of items) {
+      const key = a.date || "";
+      if (!buckets.has(key)) {
+        buckets.set(key, []);
+        order.push(key);
+      }
+      buckets.get(key).push(a);
+    }
+    return order.slice().sort((x, y) => (x < y ? 1 : x > y ? -1 : 0)).map((key) => ({ date: key, items: buckets.get(key) }));
+  }
+
+  function fmtDateHeader(iso) {
+    if (!iso) return "Undated";
+    const [y, m, d] = iso.split("-").map(Number);
+    if (!y || !m || !d) return iso;
+    return new Date(y, m - 1, d).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+  }
+
+  function renderList() {
     if (s.loading) {
       return `<div style="padding:13px 18px;">${skeletonRows(8, 46)}</div>`;
     }
@@ -330,34 +441,45 @@ export function mountReview(root, { navigate }) {
     if (!s.items.length) {
       return `<div class="state-block">
         <div class="state-title">Nothing matches those filters</div>
-        <p class="state-body">Loosen the relevance, language or source filters to see more of today's matched stories.</p>
+        <p class="state-body">Loosen the score, date, language or source filters to see more of the matched stories.</p>
         <button id="resetFiltersBtn" class="btn btn-outline">Reset filters</button>
       </div>`;
     }
-    return s.items
-      .map((a) => {
-        const t = tier(a.score);
-        const selected = a.id === s.selId;
-        const checked = s.checked.has(a.id);
-        const statusLabel = a.status === "approved" ? "Approved" : a.status === "rejected" ? "Rejected" : "";
-        const statusBg = a.status === "approved" ? "var(--acsoft)" : "var(--redsoft)";
-        const statusFg = a.status === "approved" ? "var(--actx)" : "var(--red)";
-        return `<div class="article-row ${selected ? "selected" : ""} ${a.status === "rejected" ? "rejected" : ""}" data-open="${a.id}">
-          <div class="article-check ${checked ? "checked" : ""}" data-check="${a.id}"><span>&#10003;</span></div>
-          <div style="flex:1;min-width:0;">
-            <div class="article-meta-row">
-              <span class="tag">${escapeHtml(a.source)}</span>
-              <span class="pill" style="background:${t.bg};color:${t.color}"><span class="pill-dot" style="background:${t.color}"></span>${t.label}</span>
-              ${a.dupCount ? `<span class="pill" style="background:var(--acsoft);color:var(--actx);">+${a.dupCount}</span>` : ""}
-              ${a.isStarred ? `<span style="font-size:11px;color:var(--amber);">&#9733;</span>` : ""}
-              ${statusLabel ? `<span class="pill" style="background:${statusBg};color:${statusFg};text-transform:uppercase;letter-spacing:.6px;font-size:9px;">${statusLabel}</span>` : ""}
-            </div>
-            <div class="article-title">${escapeHtml(a.title)}</div>
-            <div class="article-sub">${escapeHtml(a.time || "")} · ${escapeHtml(a.section || "")}</div>
+    return groupByDate(s.items)
+      .map(
+        (group) => `
+        <div class="date-group">
+          <div class="date-group-header">
+            <span>${escapeHtml(fmtDateHeader(group.date))}</span>
+            <span class="mono" style="font-size:10px;color:var(--tx4);">${group.items.length}</span>
           </div>
-        </div>`;
-      })
+          ${group.items.map((a) => articleRowHtml(a)).join("")}
+        </div>`
+      )
       .join("");
+  }
+
+  function articleRowHtml(a) {
+    const t = tier(a.score);
+    const selected = a.id === s.selId;
+    const checked = s.checked.has(a.id);
+    const statusLabel = a.status === "approved" ? "Approved" : a.status === "rejected" ? "Rejected" : "";
+    const statusBg = a.status === "approved" ? "var(--acsoft)" : "var(--redsoft)";
+    const statusFg = a.status === "approved" ? "var(--actx)" : "var(--red)";
+    return `<div class="article-row ${selected ? "selected" : ""} ${a.status === "rejected" ? "rejected" : ""}" data-open="${a.id}">
+      <div class="article-check ${checked ? "checked" : ""}" data-check="${a.id}"><span>&#10003;</span></div>
+      <div style="flex:1;min-width:0;">
+        <div class="article-meta-row">
+          <span class="tag">${escapeHtml(a.source)}</span>
+          <span class="pill" style="background:${t.bg};color:${t.color}"><span class="pill-dot" style="background:${t.color}"></span>${t.label} · ${a.score ?? "–"}</span>
+          ${a.dupCount ? `<span class="pill" style="background:var(--acsoft);color:var(--actx);">+${a.dupCount}</span>` : ""}
+          ${a.isStarred ? `<span style="font-size:11px;color:var(--amber);">&#9733;</span>` : ""}
+          ${statusLabel ? `<span class="pill" style="background:${statusBg};color:${statusFg};text-transform:uppercase;letter-spacing:.6px;font-size:9px;">${statusLabel}</span>` : ""}
+        </div>
+        <div class="article-title">${escapeHtml(a.title)}</div>
+        <div class="article-sub">${escapeHtml(a.time || "")} · ${escapeHtml(a.section || "")}</div>
+      </div>
+    </div>`;
   }
 
   function renderDetail(cur) {
@@ -371,37 +493,36 @@ export function mountReview(root, { navigate }) {
       </div>`;
     }
     const t = tier(cur.score);
+    const detailReady = !!cur._detailLoaded;
     const dups = cur.dups || null;
     const peers = cur.topicPeers || null;
-    const bodyMeta = cur.body ? `${cur.body.split(/\s+/).filter(Boolean).length} words · fetched` : "not fetched";
-    const noteVal = s.noteDrafts[cur.id] !== undefined ? s.noteDrafts[cur.id] : cur.note || "";
     return `<div class="detail-wrap">
       <div class="detail-head">
         <span class="tag" style="font-size:12px;padding:4px 11px;">${escapeHtml(cur.source)}</span>
-        <span class="pill" style="background:${t.bg};color:${t.color};font-size:11px;padding:4px 10px;"><span class="pill-dot" style="background:${t.color}"></span>${t.label} · ${cur.score}/10</span>
+        <span class="pill" style="background:${t.bg};color:${t.color};font-size:11px;padding:4px 10px;"><span class="pill-dot" style="background:${t.color}"></span>${t.label} · ${cur.score ?? "–"}/10</span>
         <span class="mono" style="font-size:11px;color:var(--tx2);">${escapeHtml(cur.section || "")}</span>
         <div class="grow"></div>
         <button id="starCurBtn" class="icon-btn" title="Star for later" style="color:${cur.isStarred ? "var(--amber)" : "var(--tx4)"};border-color:${cur.isStarred ? "var(--amber)" : "var(--line)"}">&#9733;</button>
-        <span class="mono" style="font-size:11px;color:var(--tx3);">published ${escapeHtml(cur.time || "")}</span>
+        <span class="mono" style="font-size:11px;color:var(--tx3);">${escapeHtml(cur.time || "")}</span>
       </div>
       <h2 class="detail-title">${escapeHtml(cur.title)}</h2>
-      ${cur.titleEn ? `<div class="detail-title-en">${escapeHtml(cur.titleEn)}</div>` : ""}
-      <a href="${escapeHtml(cur.url || "#")}" target="_blank" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;margin-bottom:20px;">Open at source &#8599;</a>
+      ${detailReady && cur.titleEn ? `<div class="detail-title-en">${escapeHtml(cur.titleEn)}</div>` : ""}
+      ${detailReady ? `<a href="${escapeHtml(cur.url || "#")}" target="_blank" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;margin-bottom:20px;">Open at source &#8599;</a>` : ""}
       <div class="detail-actions">
-        <button id="approveCurBtn" class="btn btn-primary" style="flex:1;justify-content:center;gap:9px;padding:13px 20px;font-size:14px;">&#10003; Approve <span class="mono" style="font-size:11px;opacity:.65;">A</span></button>
-        <button id="rejectCurBtn" class="btn btn-outline" style="flex:1;justify-content:center;gap:9px;padding:13px 20px;font-size:14px;">&#10005; Reject <span class="mono" style="font-size:11px;opacity:.6;">R</span></button>
+        <button id="approveCurBtn" class="btn btn-primary" style="flex:1;justify-content:center;padding:13px 20px;font-size:14px;">&#10003; Approve</button>
+        <button id="rejectCurBtn" class="btn btn-outline" style="flex:1;justify-content:center;padding:13px 20px;font-size:14px;">&#10005; Reject</button>
       </div>
+      ${
+        !detailReady
+          ? `<div style="padding:8px 0;">${skeletonRows(6, 16)}</div>`
+          : `
       <div class="reason-box" style="border-left-color:${t.color}">
-        <div class="reason-kicker">Why it scored ${cur.score}</div>
+        <div class="reason-kicker">Why it scored ${cur.score ?? "–"}</div>
         <div style="font-size:13.5px;color:var(--tx2);line-height:1.6;">${escapeHtml(cur.reason || "")}</div>
         <div class="row wrap" style="gap:7px;margin-top:11px;">${(cur.keywords || []).map((k) => `<span class="kw-chip">${escapeHtml(k)}</span>`).join("")}</div>
       </div>
-      <div style="margin-bottom:20px;">
-        <div class="reason-kicker">Your note</div>
-        <textarea id="noteInput" rows="2" class="textarea-input" placeholder="Add context for whoever reads the brief…">${escapeHtml(noteVal)}</textarea>
-      </div>
       ${
-        dups
+        dups && dups.length
           ? `<div style="margin-bottom:20px;">
         <button id="toggleDupBtn" class="dup-toggle">
           <span style="color:var(--actx);">${s.dupOpen ? "&#8964;" : "&#8250;"}</span>
@@ -429,7 +550,7 @@ export function mountReview(root, { navigate }) {
           : ""
       }
       ${
-        peers
+        peers && peers.length
           ? `<div style="margin-bottom:20px;">
         <button id="toggleTopicBtn" class="topic-toggle">
           <span style="color:var(--amber);">&#9670;</span>
@@ -462,14 +583,14 @@ export function mountReview(root, { navigate }) {
         <div class="row" style="gap:10px;margin-bottom:12px;">
           <div class="reason-kicker" style="margin-bottom:0;">Article text</div>
           <div style="flex:1;height:1px;background:var(--line);"></div>
-          <span class="mono" style="font-size:10px;color:var(--tx4);">${escapeHtml(bodyMeta)}</span>
         </div>
         ${
           cur.body
             ? `<div class="article-body-text">${escapeHtml(cur.body)}</div>`
             : `<div class="body-missing"><span style="color:var(--tx3);">—</span><div style="flex:1;font-size:13px;color:var(--tx2);line-height:1.55;">Body text wasn't retrieved for this article. Read it at the source, or ask an administrator to re-run the text fetch.</div></div>`
         }
-      </div>
+      </div>`
+      }
     </div>`;
   }
 
@@ -481,11 +602,16 @@ export function mountReview(root, { navigate }) {
         debouncedFetch();
       });
     }
-    root.querySelectorAll("[data-sort]").forEach((b) => b.addEventListener("click", () => { s.sort = b.getAttribute("data-sort"); fetchList(); }));
-    root.querySelectorAll("[data-tier]").forEach((b) =>
+    root.querySelectorAll("[data-sort]").forEach((b) =>
       b.addEventListener("click", () => {
-        const k = b.getAttribute("data-tier");
-        s.tiers[k] = !s.tiers[k];
+        if (s.topN) return;
+        s.sort = b.getAttribute("data-sort");
+        fetchList();
+      })
+    );
+    root.querySelectorAll("[data-view]").forEach((b) =>
+      b.addEventListener("click", () => {
+        s.viewMode = b.getAttribute("data-view");
         fetchList();
       })
     );
@@ -506,12 +632,48 @@ export function mountReview(root, { navigate }) {
     const srcNone = root.querySelector("#srcNoneBtn");
     if (srcNone) srcNone.addEventListener("click", () => { s.srcOff = s.sources.map((x) => x.name); fetchList(); });
 
-    const decidedBtn = root.querySelector("#decidedBtn");
-    if (decidedBtn) decidedBtn.addEventListener("click", () => { s.showDecided = !s.showDecided; fetchList(); });
     const starredBtn = root.querySelector("#starredBtn");
     if (starredBtn) starredBtn.addEventListener("click", () => { s.starredOnly = !s.starredOnly; fetchList(); });
     const goExport = root.querySelector("#goExportBtn");
     if (goExport) goExport.addEventListener("click", () => navigate("export"));
+
+    const dateFrom = root.querySelector('[data-role="date-from"]');
+    const dateTo = root.querySelector('[data-role="date-to"]');
+    if (dateFrom) dateFrom.addEventListener("change", () => { s.dateFrom = dateFrom.value; fetchList(); });
+    if (dateTo) dateTo.addEventListener("change", () => { s.dateTo = dateTo.value; fetchList(); });
+
+    const scoreMinEl = root.querySelector('[data-role="score-min"]');
+    const scoreMaxEl = root.querySelector('[data-role="score-max"]');
+    if (scoreMinEl && scoreMaxEl) {
+      const label = root.querySelector("#scoreRangeLabel");
+      const sync = () => {
+        if (Number(scoreMinEl.value) > Number(scoreMaxEl.value)) scoreMinEl.value = scoreMaxEl.value;
+        if (label) label.textContent = `${scoreMinEl.value}–${scoreMaxEl.value}`;
+      };
+      scoreMinEl.addEventListener("input", sync);
+      scoreMaxEl.addEventListener("input", sync);
+      const commit = () => {
+        s.scoreMin = Number(scoreMinEl.value);
+        s.scoreMax = Number(scoreMaxEl.value);
+        fetchList();
+      };
+      scoreMinEl.addEventListener("change", commit);
+      scoreMaxEl.addEventListener("change", commit);
+    }
+
+    const topNSelect = root.querySelector('[data-role="topn-select"]');
+    if (topNSelect) {
+      topNSelect.addEventListener("change", () => {
+        s.topN = topNSelect.value ? Number(topNSelect.value) : null;
+        fetchList();
+      });
+    }
+
+    const clearFiltersBtn = root.querySelector("#clearFiltersBtn");
+    if (clearFiltersBtn) clearFiltersBtn.addEventListener("click", resetFilters);
+
+    const selectAll = root.querySelector("[data-select-all]");
+    if (selectAll) selectAll.addEventListener("click", (e) => { e.stopPropagation(); toggleSelectAllShown(); });
 
     root.querySelectorAll("[data-open]").forEach((row) =>
       row.addEventListener("click", (e) => {
@@ -526,10 +688,13 @@ export function mountReview(root, { navigate }) {
       })
     );
 
+    const loadMoreBtn = root.querySelector("#loadMoreBtn");
+    if (loadMoreBtn) loadMoreBtn.addEventListener("click", () => fetchList({ append: true }));
+
     const resetBtn = root.querySelector("#resetFiltersBtn");
     if (resetBtn) resetBtn.addEventListener("click", resetFilters);
     const retryBtn = root.querySelector("#reviewRetry");
-    if (retryBtn) retryBtn.addEventListener("click", fetchList);
+    if (retryBtn) retryBtn.addEventListener("click", () => fetchList());
 
     const bulkApprove = root.querySelector("#bulkApprove");
     if (bulkApprove) bulkApprove.addEventListener("click", () => bulk("approve"));
@@ -540,26 +705,12 @@ export function mountReview(root, { navigate }) {
     const clearChecked = root.querySelector("#clearChecked");
     if (clearChecked) clearChecked.addEventListener("click", () => { s.checked.clear(); render(); });
 
-    const hideHints = root.querySelector("#hideHints");
-    if (hideHints) hideHints.addEventListener("click", () => root.querySelector(".hints-bar")?.remove());
-
     const starCurBtn = root.querySelector("#starCurBtn");
     if (starCurBtn) starCurBtn.addEventListener("click", () => toggleStar(s.selId));
     const approveCurBtn = root.querySelector("#approveCurBtn");
     if (approveCurBtn) approveCurBtn.addEventListener("click", () => decide(s.selId, "approved"));
     const rejectCurBtn = root.querySelector("#rejectCurBtn");
     if (rejectCurBtn) rejectCurBtn.addEventListener("click", () => decide(s.selId, "rejected"));
-
-    const noteInput = root.querySelector("#noteInput");
-    if (noteInput) {
-      const debouncedSave = debounce((id, val) => {
-        api.patch(`/articles/${id}`, { note: val }).catch(() => {});
-      }, 600);
-      noteInput.addEventListener("input", (e) => {
-        s.noteDrafts[s.selId] = e.target.value;
-        debouncedSave(s.selId, e.target.value);
-      });
-    }
 
     const toggleDupBtn = root.querySelector("#toggleDupBtn");
     if (toggleDupBtn) toggleDupBtn.addEventListener("click", () => { s.dupOpen = !s.dupOpen; render(); });
@@ -595,7 +746,6 @@ export function mountReview(root, { navigate }) {
   return {
     destroy() {
       alive = false;
-      document.removeEventListener("keydown", onKeyDown);
     },
   };
 }

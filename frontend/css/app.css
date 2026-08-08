@@ -289,9 +289,31 @@ button { font-family: inherit; }
 .src-menu-item:hover { background: var(--raise); }
 .bulk-bar { display: flex; align-items: center; gap: 12px; padding: 10px 26px; background: var(--acsoft); border-top: 1px solid var(--acline); animation: flashIn .16s ease; }
 
+/* REVIEW-REBUILD: richer combinable filters (date range / score slider / top-N mode) */
+.date-range-group { display: flex; align-items: center; gap: 7px; background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 0 10px; height: 36px; }
+.date-input { background: transparent; border: 0; outline: none; color: var(--tx); font-size: 12px; font-family: inherit; }
+.score-slider-group { display: flex; align-items: center; gap: 9px; background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 0 10px; height: 36px; }
+.score-slider { position: relative; width: 130px; height: 20px; display: flex; align-items: center; }
+.score-slider input[type="range"] {
+  position: absolute; left: 0; right: 0; width: 100%; margin: 0; background: transparent;
+  pointer-events: none; -webkit-appearance: none; appearance: none;
+}
+.score-slider input[type="range"]::-webkit-slider-runnable-track { height: 4px; background: var(--line2); border-radius: 2px; }
+.score-slider input[type="range"]::-webkit-slider-thumb {
+  pointer-events: auto; -webkit-appearance: none; appearance: none;
+  width: 14px; height: 14px; border-radius: 50%; background: var(--ac2); cursor: pointer; margin-top: -5px;
+}
+.score-slider input[type="range"]::-moz-range-track { height: 4px; background: var(--line2); border-radius: 2px; }
+.score-slider input[type="range"]::-moz-range-thumb { pointer-events: auto; width: 14px; height: 14px; border-radius: 50%; background: var(--ac2); cursor: pointer; border: none; }
+.topn-select { height: 36px; border: 0; background: transparent; color: var(--tx); font-size: 12px; font-family: inherit; cursor: pointer; outline: none; padding-right: 8px; }
+
 .review-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(300px, 40%) minmax(0, 1fr); }
 .review-list-pane { border-right: 1px solid var(--line); overflow-y: auto; background: var(--bg); }
 .review-list-head { display: flex; align-items: center; justify-content: space-between; padding: 11px 18px 9px; position: sticky; top: 0; background: var(--bg); border-bottom: 1px solid var(--line); z-index: 5; }
+/* Date-group headers: clearly separated (not stacked-sticky, to avoid
+   fighting .review-list-head's own sticky top:0) per owner's date-grouped
+   queue requirement — newest date first (JS sorts groups descending). */
+.date-group-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 18px; background: var(--panel2); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); font-family: 'JetBrains Mono', monospace; font-size: 10.5px; letter-spacing: 1.1px; text-transform: uppercase; color: var(--tx3); }
 .article-row { display: flex; gap: 11px; padding: 13px 18px; border-bottom: 1px solid var(--line); cursor: pointer; background: transparent; border-left: 3px solid transparent; transition: background .12s ease; }
 .article-row:hover { background: var(--hover); }
 .article-row.selected { background: var(--hover); border-left-color: var(--ac2); }

@@ -145,6 +145,8 @@ class ArticleOut(BaseModel):
     id: int
     title: str
     source: str
+    date: str = ""  # ISO yyyy-mm-dd (articles.day) — REVIEW-PERF: added so the queue can
+    # date-group client-side without re-deriving a date from `time` (which is HH:MM only).
     time: str = ""
     section: str = ""
     score: float | None = None
