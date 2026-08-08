@@ -22,14 +22,18 @@ import { logout } from "./auth.js";
 import { escapeHtml } from "./util.js";
 import { mountScreen } from "./router.js";
 import { api } from "./api.js";
+import { mountAccountPanel } from "./components/accountPanel.js";
 
 let shellRoot = null;
 let railEl = null;
 let topbarEl = null;
 let screenRootEl = null;
+let accountModalEl = null;
 let currentMount = null;
 let currentScreenKey = null;
 let currentDashMode = null;
+let accountMount = null;
+let accountOpenState = false;
 
 export function mountShell(root, { onSignOut }) {
   shellRoot = root;
@@ -41,19 +45,35 @@ export function mountShell(root, { onSignOut }) {
         <div id="screenRoot"></div>
       </main>
     </div>
+    <div id="accountModalEl"></div>
   `;
   railEl = shellRoot.querySelector("#railEl");
   topbarEl = shellRoot.querySelector("#topbarEl");
   screenRootEl = shellRoot.querySelector("#screenRoot");
+  accountModalEl = shellRoot.querySelector("#accountModalEl");
 
   renderChrome();
   syncScreen();
+  syncAccountPanel();
   subscribe(() => {
     renderChrome();
     syncScreen();
+    syncAccountPanel();
   });
   refreshShellCounts();
   return { navigate };
+}
+
+function syncAccountPanel() {
+  if (state.accountPanelOpen === accountOpenState) return;
+  accountOpenState = state.accountPanelOpen;
+  if (accountOpenState) {
+    accountMount = mountAccountPanel(accountModalEl, { onClose: () => setState({ accountPanelOpen: false }) });
+  } else {
+    if (accountMount && accountMount.destroy) accountMount.destroy();
+    accountMount = null;
+    accountModalEl.innerHTML = "";
+  }
 }
 
 export function navigate(screenKey, opts = {}) {
@@ -114,6 +134,7 @@ function renderChrome() {
                 <div class="rail-user-name">${escapeHtml((state.user && state.user.display_name) || "")}</div>
                 <div class="rail-user-email">${escapeHtml((state.user && state.user.email) || "")}</div>
               </div>
+              <button id="accountBtn" class="rail-signout" title="Account & security">&#9881;</button>
               <button id="signOutBtn" class="rail-signout" title="Sign out">&#9211;</button>`
             : ""
         }
@@ -185,6 +206,9 @@ function bind() {
   });
   const toggle = railEl.querySelector("#railToggleBtn");
   if (toggle) toggle.addEventListener("click", () => setState({ railOpen: !state.railOpen }));
+
+  const accountBtn = railEl.querySelector("#accountBtn");
+  if (accountBtn) accountBtn.addEventListener("click", () => setState({ accountPanelOpen: true }));
 
   const signOutBtn = railEl.querySelector("#signOutBtn");
   if (signOutBtn)

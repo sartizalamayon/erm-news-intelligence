@@ -18,6 +18,8 @@ export const state = {
   dashMode: "short",
 
   progress: "", // active job/run status text, shell header (§2)
+
+  accountPanelOpen: false, // change-password modal (AUTH-V2), toggled from the rail
 };
 
 export function setState(patch) {

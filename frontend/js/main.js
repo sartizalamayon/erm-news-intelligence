@@ -23,7 +23,11 @@ function showLogin() {
   currentMount = mountLogin(appRoot, { onAuthenticated: onAuthenticated });
 }
 
-function onAuthenticated(me) {
+// login()/setPassword() return { email, role, display_name } — enough
+// to know auth succeeded, but not the full shell profile (initials,
+// is_admin). Fetch GET /me once to get that, same as a normal boot.
+async function onAuthenticated() {
+  const me = await fetchMe();
   setState({
     user: me,
     screen: "dash",
