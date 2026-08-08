@@ -139,27 +139,50 @@ class Settings(BaseSettings):
         default="", description="Verified Resend sender address OTP emails are sent from. See app.services.email."
     )
 
-    # ── Brevo (verified email provider, additive alternative to Resend) ─
-    # 300 emails/day free tier, verified sender noshinarthi9@gmail.com /
-    # display name "ERM". Resend stays supported; email_provider selects
-    # which one app.services.email actually calls.
-    email_provider: str = Field(
-        default="resend", description="Active email transport: 'resend' or 'brevo'. See app.services.email."
-    )
-    brevo_api_key: str = Field(default="", repr=False, description="Brevo API key, sent as a Bearer/api-key header.")
-    brevo_from_email: str = Field(default="", description="Verified Brevo sender address.")
-    brevo_from_name: str = Field(default="", description="Brevo sender display name, e.g. 'ERM'.")
-
     otp_console_fallback_enabled: bool = Field(
         default=True,
         description="When True AND app_env is NOT production/staging, an "
-        "unconfigured Resend falls back to logging the OTP code to the "
+        "unconfigured provider falls back to logging the OTP code to the "
         "server console (WARNING level) instead of failing the request -- "
         "lets local/dev/CI login work with no mail provider set up. ALWAYS "
         "forced off in production/staging regardless of this value -- see "
         "app.services.email.send_otp_email(). Set to False to disable the "
         "fallback even in dev (e.g. to test the real failure path).",
     )
+
+    # ── Brevo (ADDITIVE -- AUTH-OTP's owner-ruled provider switch. See
+    # app/services/email.py's module docstring for the full story: Resend
+    # needs a verified sending domain grameenphone.com does not have and
+    # the owner has ruled out obtaining; Brevo was live-verified instead
+    # -- two real emails delivered to a @grameenphone.com inbox (landed
+    # in Junk, an accepted/known risk given the sender is a freemail
+    # address, not something to "fix" here). `email_provider` is the
+    # single switch app.services.email reads; Resend stays fully working
+    # as the non-default alternative, nothing above this section is
+    # touched.) ─────────────────────────────────────────────────────────
+    email_provider: Literal["resend", "brevo"] = Field(
+        default="brevo",
+        description="Which transport app.services.email.send_otp_email "
+        "calls. 'brevo' is the default -- see this field group's header "
+        "comment for why. Set to 'resend' to switch back (e.g. once a "
+        "verified sending domain exists).",
+    )
+    brevo_api_key: str = Field(
+        default="",
+        repr=False,
+        description="Brevo API key, sent as the 'api-key' header (NOT an "
+        "Authorization: Bearer token -- Brevo's own convention, verified "
+        "live). See app.services.email.",
+    )
+    brevo_from_email: str = Field(
+        default="",
+        description="Brevo sender address OTP emails are sent from. A "
+        "freemail address is expected here (Brevo's dashboard itself "
+        "flags this as non-compliant with Google/Yahoo/Microsoft sender "
+        "rules) -- deliverability risk is accepted, not solved; see "
+        "app.services.email's module docstring.",
+    )
+    brevo_from_name: str = Field(default="ERM", description="Brevo sender display name. See app.services.email.")
 
     # ── Frontend / CORS ───────────────────────────────────────────────
     cors_allow_origins: str = Field(

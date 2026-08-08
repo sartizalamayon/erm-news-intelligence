@@ -2,26 +2,26 @@
 
 Two tiers, deliberately separated:
 
-1. Exception-to-HTTP-status mapping and route-layer role enforcement
-   (DoD #7) -- tested with `app.services.auth.request_otp`/`verify_otp`
-   monkeypatched and `get_connection` replaced with a no-op context
-   manager, so these run with NO real database at all. The actual
-   security *logic* (rate limiting, OTP correctness, enumeration, ...)
-   is exhaustively covered at the service layer in
-   tests/test_auth_service.py -- duplicating that here would just be
-   slower, flakier versions of the same assertions. What's genuinely
-   router-specific and worth testing in isolation is: does a
-   `ValidationError` really come back as 422, does `OtpRateLimited`
-   really come back as 429, does `require_admin` really block a
-   non-admin at the route layer before the handler body ever runs.
+1. Exception-to-HTTP-status mapping and route-layer role/auth enforcement
+   (DoD #7) -- tested with app.services.auth's functions monkeypatched
+   and `get_connection` replaced with a no-op context manager, so these
+   run with NO real database at all. The actual security *logic* (rate
+   limiting, OTP correctness, password strength, enumeration, ...) is
+   exhaustively covered at the service layer in tests/test_auth_service.py
+   -- duplicating that here would just be slower, flakier versions of
+   the same assertions. What's genuinely router-specific and worth
+   testing in isolation is: does a `ValidationError` really come back as
+   422, does a rate-limit exception really come back as 429, does
+   `require_admin`/`get_current_user` really block an unauthenticated or
+   non-admin caller at the route layer before the handler body ever runs.
 
 2. A handful of real end-to-end tests (pg_available-gated) that drive
    the actual HTTP routes against a real, migrated schema (via
    app.db.testing.migrated_schema, monkeypatched in place of
    app.db.connection.get_connection) with app.services.email.send_otp_email
-   mocked -- proving the whole stack (request -> verify -> session
-   cookie -> GET /me -> logout) actually wires together, not just each
-   piece in isolation.
+   mocked -- proving the whole stack (signup -> session cookie -> GET
+   /me -> logout, and login, and change-password) actually wires
+   together, not just each piece in isolation.
 """
 
 from __future__ import annotations
@@ -43,6 +43,11 @@ from app.main import create_app
 
 ALLOWED_EMAIL = "person@grameenphone.com"
 
+# Meets PASSWORD_MIN_LENGTH (12), not in the weak-value blocklist, and
+# does not contain ALLOWED_EMAIL's local part ("person").
+STRONG_PASSWORD = "Zx9!Qwerty42Lmn"
+STRONG_PASSWORD_2 = "Bq7#Falcon88Rvw"
+
 
 @pytest.fixture(autouse=True)
 def _secret_key(monkeypatch: pytest.MonkeyPatch):
@@ -60,7 +65,7 @@ def _secret_key(monkeypatch: pytest.MonkeyPatch):
     get_settings.cache_clear()
 
 
-# ── Tier 1: router mapping + route-layer role enforcement, no DB ─────────
+# ── Tier 1: router mapping + route-layer role/auth enforcement, no DB ────
 
 
 @pytest.fixture
@@ -81,8 +86,15 @@ def test_otp_request_malformed_email_returns_422(client) -> None:
     assert resp.status_code == 422
 
 
-def test_otp_verify_malformed_code_returns_422(client) -> None:
-    resp = client.post("/auth/otp/verify", json={"email": ALLOWED_EMAIL, "code": "12"})
+def test_password_set_malformed_code_returns_422(client) -> None:
+    resp = client.post(
+        "/auth/password/set", json={"email": ALLOWED_EMAIL, "code": "12", "new_password": STRONG_PASSWORD}
+    )
+    assert resp.status_code == 422
+
+
+def test_login_malformed_email_returns_422(client) -> None:
+    resp = client.post("/auth/login", json={"email": "not-an-email", "password": "whatever"})
     assert resp.status_code == 422
 
 
@@ -93,6 +105,27 @@ def test_otp_request_success_returns_202_with_generic_message(
     resp = no_db_client.post("/auth/otp/request", json={"email": ALLOWED_EMAIL})
     assert resp.status_code == 202
     assert resp.json() == {"message": "If that address is eligible, a verification code has been sent."}
+
+
+def test_otp_request_default_purpose_is_signup(no_db_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = Mock(return_value=None)
+    monkeypatch.setattr(auth_service, "request_otp", fake)
+    no_db_client.post("/auth/otp/request", json={"email": ALLOWED_EMAIL})
+    assert fake.call_args.kwargs["purpose"] == "signup"
+
+
+def test_otp_request_accepts_password_reset_purpose(no_db_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = Mock(return_value=None)
+    monkeypatch.setattr(auth_service, "request_otp", fake)
+    resp = no_db_client.post("/auth/otp/request", json={"email": ALLOWED_EMAIL, "purpose": "password_reset"})
+    assert resp.status_code == 202
+    assert fake.call_args.kwargs["purpose"] == "password_reset"
+
+
+def test_otp_request_rejects_invalid_purpose(no_db_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(auth_service, "request_otp", Mock(return_value=None))
+    resp = no_db_client.post("/auth/otp/request", json={"email": ALLOWED_EMAIL, "purpose": "reset-my-whole-account"})
+    assert resp.status_code == 422
 
 
 def test_otp_request_rate_limited_returns_429(no_db_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -118,31 +151,59 @@ def test_otp_request_disallowed_domain_returns_422_with_domain_message(
 
 def test_otp_request_quota_exhausted_returns_503(no_db_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        auth_service, "request_otp", Mock(side_effect=ProviderRateLimitedError("quota", provider="resend"))
+        auth_service, "request_otp", Mock(side_effect=ProviderRateLimitedError("quota", provider="brevo"))
     )
     resp = no_db_client.post("/auth/otp/request", json={"email": ALLOWED_EMAIL})
     assert resp.status_code == 503
     body = resp.json()
     assert body["retryable"] is True
-    assert body["provider"] == "resend"
+    assert body["provider"] == "brevo"
 
 
 def test_otp_request_permanent_send_failure_returns_502(
     no_db_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        auth_service, "request_otp", Mock(side_effect=ProviderPermanentError("rejected", provider="resend"))
+        auth_service, "request_otp", Mock(side_effect=ProviderPermanentError("rejected", provider="brevo"))
     )
     resp = no_db_client.post("/auth/otp/request", json={"email": ALLOWED_EMAIL})
     assert resp.status_code == 502
 
 
-def test_otp_verify_invalid_code_returns_422(no_db_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_password_set_invalid_code_returns_422(no_db_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        auth_service, "verify_otp", Mock(side_effect=ValidationError("Invalid or expired verification code."))
+        auth_service, "set_password", Mock(side_effect=ValidationError("Invalid or expired verification code."))
     )
-    resp = no_db_client.post("/auth/otp/verify", json={"email": ALLOWED_EMAIL, "code": "123456"})
+    resp = no_db_client.post(
+        "/auth/password/set", json={"email": ALLOWED_EMAIL, "code": "123456", "new_password": STRONG_PASSWORD}
+    )
     assert resp.status_code == 422
+
+
+def test_password_set_weak_password_returns_422(no_db_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        auth_service, "set_password", Mock(side_effect=ValidationError("Password must be at least 12 characters."))
+    )
+    resp = no_db_client.post(
+        "/auth/password/set", json={"email": ALLOWED_EMAIL, "code": "123456", "new_password": "short1!"}
+    )
+    assert resp.status_code == 422
+
+
+def test_login_wrong_credentials_returns_422(no_db_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        auth_service, "login", Mock(side_effect=ValidationError("Invalid email or password."))
+    )
+    resp = no_db_client.post("/auth/login", json={"email": ALLOWED_EMAIL, "password": "wrong-one"})
+    assert resp.status_code == 422
+
+
+def test_login_rate_limited_returns_429(no_db_client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        auth_service, "login", Mock(side_effect=auth_service.LoginRateLimited("slow down"))
+    )
+    resp = no_db_client.post("/auth/login", json={"email": ALLOWED_EMAIL, "password": "whatever12345"})
+    assert resp.status_code == 429
 
 
 def test_me_without_session_cookie_returns_401(client) -> None:
@@ -153,6 +214,45 @@ def test_me_without_session_cookie_returns_401(client) -> None:
 def test_otp_failures_without_session_returns_401(client) -> None:
     resp = client.get("/auth/otp-failures")
     assert resp.status_code == 401
+
+
+def test_change_password_without_session_returns_401(client) -> None:
+    resp = client.post(
+        "/auth/password/change", json={"current_password": STRONG_PASSWORD, "new_password": STRONG_PASSWORD_2}
+    )
+    assert resp.status_code == 401
+
+
+def test_change_password_wrong_current_password_returns_422(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = create_app()
+    user = AuthenticatedUser(id=7, email=ALLOWED_EMAIL, role="analyst", display_name="P", session_id=9)
+    app.dependency_overrides[get_current_user] = lambda: user
+    monkeypatch.setattr(auth_router_module, "get_connection", lambda: contextlib.nullcontext(None))
+    monkeypatch.setattr(
+        auth_service, "change_password", Mock(side_effect=ValidationError("Current password is incorrect."))
+    )
+    with TestClient(app) as client:
+        resp = client.post(
+            "/auth/password/change",
+            json={"current_password": "wrong", "new_password": STRONG_PASSWORD_2},
+        )
+    assert resp.status_code == 422
+
+
+def test_change_password_rate_limited_returns_429(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = create_app()
+    user = AuthenticatedUser(id=7, email=ALLOWED_EMAIL, role="analyst", display_name="P", session_id=9)
+    app.dependency_overrides[get_current_user] = lambda: user
+    monkeypatch.setattr(auth_router_module, "get_connection", lambda: contextlib.nullcontext(None))
+    monkeypatch.setattr(
+        auth_service, "change_password", Mock(side_effect=auth_service.PasswordChangeRateLimited("slow down"))
+    )
+    with TestClient(app) as client:
+        resp = client.post(
+            "/auth/password/change",
+            json={"current_password": STRONG_PASSWORD, "new_password": STRONG_PASSWORD_2},
+        )
+    assert resp.status_code == 429
 
 
 def test_otp_failures_as_analyst_is_forbidden_at_route_layer() -> None:
@@ -291,7 +391,7 @@ def test_spoofed_forwarded_header_no_longer_bypasses_per_ip_rate_limit_over_http
     """
     seen_ips: list[str] = []
 
-    def _capture(conn, *, email, ip_address):  # noqa: ANN001 -- matches auth_service.request_otp's signature loosely for this fake
+    def _capture(conn, *, email, ip_address, purpose="signup"):  # noqa: ANN001 -- matches auth_service.request_otp's signature loosely for this fake
         seen_ips.append(ip_address)
 
     monkeypatch.setattr(auth_service, "request_otp", _capture)
@@ -319,7 +419,7 @@ pg_gated = pytest.mark.skipif(not pg_available(), reason="no reachable Postgres 
 
 
 @pg_gated
-def test_full_otp_flow_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_full_signup_flow_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
     with migrated_schema() as conn:
         monkeypatch.setattr(auth_router_module, "get_connection", lambda: contextlib.nullcontext(conn))
         monkeypatch.setattr(deps_module, "get_connection", lambda: contextlib.nullcontext(conn))
@@ -334,10 +434,16 @@ def test_full_otp_flow_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
             code = fake_send.call_args.kwargs["code"]
 
             # A wrong code first -- must not lock anyone out or leak state.
-            wrong = client.post("/auth/otp/verify", json={"email": ALLOWED_EMAIL, "code": "000000"})
+            wrong = client.post(
+                "/auth/password/set",
+                json={"email": ALLOWED_EMAIL, "code": "000000", "new_password": STRONG_PASSWORD},
+            )
             assert wrong.status_code == 422
 
-            resp = client.post("/auth/otp/verify", json={"email": ALLOWED_EMAIL, "code": code})
+            resp = client.post(
+                "/auth/password/set",
+                json={"email": ALLOWED_EMAIL, "code": code, "new_password": STRONG_PASSWORD},
+            )
             assert resp.status_code == 200
             body = resp.json()
             assert body["email"] == ALLOWED_EMAIL
@@ -353,7 +459,10 @@ def test_full_otp_flow_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
             assert me.json()["is_admin"] is False
 
             # Reusing the same (now-consumed) code must fail.
-            replay = client.post("/auth/otp/verify", json={"email": ALLOWED_EMAIL, "code": code})
+            replay = client.post(
+                "/auth/password/set",
+                json={"email": ALLOWED_EMAIL, "code": code, "new_password": STRONG_PASSWORD_2},
+            )
             assert replay.status_code == 422
 
             logout_resp = client.post("/auth/logout")
@@ -361,6 +470,61 @@ def test_full_otp_flow_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
 
             after_logout = client.get("/me")
             assert after_logout.status_code == 401
+
+            # And the password set during signup now works via /auth/login.
+            login_resp = client.post("/auth/login", json={"email": ALLOWED_EMAIL, "password": STRONG_PASSWORD})
+            assert login_resp.status_code == 200
+            assert login_resp.json()["email"] == ALLOWED_EMAIL
+
+
+@pg_gated
+def test_login_wrong_password_returns_422_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    with migrated_schema() as conn:
+        conn.execute("INSERT INTO users (email, role) VALUES (%s, 'analyst')", (ALLOWED_EMAIL,))
+        conn.execute(
+            "UPDATE users SET password_hash = %s WHERE email = %s",
+            (auth_service.hash_password(STRONG_PASSWORD), ALLOWED_EMAIL),
+        )
+        monkeypatch.setattr(auth_router_module, "get_connection", lambda: contextlib.nullcontext(conn))
+
+        with TestClient(create_app()) as client:
+            resp = client.post("/auth/login", json={"email": ALLOWED_EMAIL, "password": "not-the-password"})
+        assert resp.status_code == 422
+        assert "set-cookie" not in resp.headers  # no session issued on a failed login
+
+
+@pg_gated
+def test_change_password_end_to_end_evicts_other_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    with migrated_schema() as conn:
+        conn.execute("INSERT INTO users (email, role) VALUES (%s, 'analyst')", (ALLOWED_EMAIL,))
+        conn.execute(
+            "UPDATE users SET password_hash = %s WHERE email = %s",
+            (auth_service.hash_password(STRONG_PASSWORD), ALLOWED_EMAIL),
+        )
+        user_row = conn.execute("SELECT id FROM users WHERE email = %s", (ALLOWED_EMAIL,)).fetchone()
+        other_token = auth_service.create_session(
+            conn, user_id=user_row["id"], user_agent="attacker-device", ip_address="203.0.113.66"
+        )
+
+        monkeypatch.setattr(auth_router_module, "get_connection", lambda: contextlib.nullcontext(conn))
+        monkeypatch.setattr(deps_module, "get_connection", lambda: contextlib.nullcontext(conn))
+
+        with TestClient(create_app()) as client:
+            login_resp = client.post("/auth/login", json={"email": ALLOWED_EMAIL, "password": STRONG_PASSWORD})
+            assert login_resp.status_code == 200
+
+            change_resp = client.post(
+                "/auth/password/change",
+                json={"current_password": STRONG_PASSWORD, "new_password": STRONG_PASSWORD_2},
+            )
+            assert change_resp.status_code == 204
+
+            # Current (browser) session still authenticated.
+            me = client.get("/me")
+            assert me.status_code == 200
+
+        # The OTHER session (simulating an attacker's stolen token) is dead.
+        assert auth_service.get_session_user(conn, other_token) is None
 
 
 @pg_gated
@@ -375,7 +539,7 @@ def test_admin_can_list_otp_failures_end_to_end(monkeypatch: pytest.MonkeyPatch)
         )
         conn.execute(
             "INSERT INTO otp_codes (email, code_hash, expires_at, requested_ip, send_status, send_error) "
-            "VALUES (%s, 'x', now() + interval '10 minutes', '203.0.113.6', 'failed', 'Resend rejected it')",
+            "VALUES (%s, 'x', now() + interval '10 minutes', '203.0.113.6', 'failed', 'Provider rejected it')",
             ("someone.else@grameenphone.com",),
         )
 

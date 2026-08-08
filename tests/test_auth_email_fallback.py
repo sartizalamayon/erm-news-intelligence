@@ -1,7 +1,11 @@
-"""Dev-mode console fallback when the Resend provider is unconfigured
-(coordinator-reported P0: "Internal Server Error" on login with no
-RESEND_API_KEY set), plus the client-facing error shape when the
-fallback does NOT apply.
+"""Dev-mode console fallback when the active email provider (Brevo by
+default, Resend as the alternative -- app.config.Settings.email_provider)
+is unconfigured (coordinator-reported P0: "Internal Server Error" on
+login with no provider credentials set), plus the client-facing error
+shape when the fallback does NOT apply. Provider-agnostic on purpose --
+see app.services.email's module docstring for the Resend->Brevo
+provider story; Brevo-specific payload/header/messageId behavior is
+covered separately in tests/test_auth_email_providers.py.
 
 Two behaviors:
 1. app_env not in (production, staging) AND otp_console_fallback_enabled
@@ -37,7 +41,24 @@ def _restore_settings_cache():
 
 
 def _unconfigured(**overrides) -> Settings:
-    base = {"resend_api_key": "", "resend_from_email": ""}
+    """Blanks BOTH providers' credentials -- app.config.Settings.email_provider
+    defaults to "brevo" (app/config.py), and this repo's real .env (never
+    committed) has real values for both RESEND_API_KEY/RESEND_FROM_EMAIL
+    and BREVO_API_KEY/BREVO_FROM_EMAIL for live-verification purposes.
+    pydantic-settings' precedence puts explicit kwargs above the .env
+    file, so blanking every provider field here -- regardless of which
+    one `email_provider` ends up selecting -- is the only way this
+    helper reliably produces a genuinely "unconfigured" Settings object
+    in this environment; blanking only one provider's fields would leave
+    the OTHER one silently configured from the real .env whenever it's
+    the active provider, defeating the whole point of this fixture.
+    """
+    base = {
+        "resend_api_key": "",
+        "resend_from_email": "",
+        "brevo_api_key": "",
+        "brevo_from_email": "",
+    }
     base.update(overrides)
     return Settings(**base)
 
@@ -101,7 +122,17 @@ def test_provider_permanent_error_message_has_no_leaked_config_names() -> None:
         email_module.get_settings = original  # type: ignore[assignment]
 
     message = str(exc_info.value)
-    for forbidden in ("RESEND_API_KEY", "resend_api_key", "RESEND_FROM_EMAIL", "resend_from_email", "SECRET_KEY"):
+    for forbidden in (
+        "RESEND_API_KEY",
+        "resend_api_key",
+        "RESEND_FROM_EMAIL",
+        "resend_from_email",
+        "BREVO_API_KEY",
+        "brevo_api_key",
+        "BREVO_FROM_EMAIL",
+        "brevo_from_email",
+        "SECRET_KEY",
+    ):
         assert forbidden not in message
     assert "administrator" in message.lower()
 
@@ -121,8 +152,8 @@ def test_configuration_error_at_request_time_is_not_a_bare_500(monkeypatch: pyte
     monkeypatch.setattr(auth_router_module, "get_connection", lambda: contextlib.nullcontext(None))
     monkeypatch.setattr("app.services.email.get_settings", lambda: _unconfigured(app_env="production"))
 
-    def _fake_request_otp(conn, *, email, ip_address):
-        send_otp_email(to_email=email, code="333333", ttl_minutes=10)
+    def _fake_request_otp(conn, *, email, ip_address, purpose="signup"):
+        send_otp_email(to_email=email, code="333333", ttl_minutes=10, purpose=purpose)
 
     monkeypatch.setattr(auth_service, "request_otp", _fake_request_otp)
 
@@ -133,7 +164,16 @@ def test_configuration_error_at_request_time_is_not_a_bare_500(monkeypatch: pyte
     body = resp.json()
     assert body["error"] == "provider_error"
     assert "administrator" in body["detail"].lower()
-    for forbidden in ("RESEND_API_KEY", "resend_api_key", "Traceback", "/Users/", "site-packages"):
+    forbidden_strings = (
+        "RESEND_API_KEY",
+        "resend_api_key",
+        "BREVO_API_KEY",
+        "brevo_api_key",
+        "Traceback",
+        "/Users/",
+        "site-packages",
+    )
+    for forbidden in forbidden_strings:
         assert forbidden not in resp.text
 
 

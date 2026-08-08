@@ -51,10 +51,13 @@ def test_malformed_json_does_not_echo_the_submitted_body(client):
 
 
 def test_wrong_field_type_returns_uniform_422_envelope(client):
-    # code must be a string per app.api.schemas.auth.OtpVerifyBody --
+    # code must be a string per app.api.schemas.auth.SetPasswordBody --
     # sending an int fails pydantic validation (RequestValidationError),
     # not app.errors.ValidationError.
-    response = client.post("/auth/otp/verify", json={"email": "a@grameenphone.com", "code": 123456})
+    response = client.post(
+        "/auth/password/set",
+        json={"email": "a@grameenphone.com", "code": 123456, "new_password": "Zx9!Qwerty42Lmn"},
+    )
     assert response.status_code == 422
     assert response.json() == {"error": "validation_error", "detail": "The request body failed validation."}
 

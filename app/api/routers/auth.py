@@ -1,37 +1,59 @@
-"""Auth endpoints -- OTP request, OTP verify, logout, and an admin-only
-view of email-send failures.
+"""Auth endpoints -- OTP request, set-password (signup + password
+reset), login, change-password, logout, and an admin-only view of
+email-send failures.
 
-Implements ADR §9.3 (OTP-only auth, custom transport mandatory) and
-frontend-contract.md §3.0 / §2, per the AUTH-OTP mission brief. The
-design mock ships a password field with no OTP anywhere (ADR §5) --
-this is the *ruled* OTP flow, not the mock's password flow, and there is
-no user-selectable role anywhere below (ADR §5 flags that as a security
-defect in the mock, not a requirement).
+Owner-ruled model change (supersedes ADR §9.3's "OTP only"; see
+app.services.auth's module docstring for the full reasoning): OTP is
+sent once per account, at signup and at password reset, to prove
+mailbox ownership; every subsequent sign-in is email + password. The
+design mock's password field (ADR §5) is now closer to the real flow
+than the OTP-only ruling was, EXCEPT the mock's user-selectable role
+picker -- still absent here on purpose (ADR §5 flags it as a security
+defect, not a requirement; role always comes from the authenticated
+account).
 
-Two endpoints instead of the frontend-contract.md §9 proposal's single
-`POST /auth/login`: that proposal predates the OTP ruling (§9 is
-explicitly "a design proposal... kept separate from the observed-fact
-sections", written against the mock's single-step password submit).
-OTP is inherently two round trips -- request a code, then verify it --
-so `POST /auth/otp/request` and `POST /auth/otp/verify` replace it.
-`POST /auth/logout` is unchanged from that proposal.
+Three endpoints replace the frontend-contract.md §9 proposal's single
+`POST /auth/login`:
+  * `POST /auth/otp/request`   -- unchanged path; now takes an optional
+    `purpose` ("signup" | "password_reset") that only changes the email
+    copy. Same response/body shape and enumeration properties either way.
+  * `POST /auth/password/set`  -- replaces the old `POST /auth/otp/verify`.
+    Consumes the OTP and sets `users.password_hash` in one call (proves
+    ownership and sets the password atomically -- see
+    app.services.auth.set_password's docstring), then signs the caller
+    in immediately, exactly like the old verify-OTP endpoint did.
+  * `POST /auth/login`         -- NEW. Email + password, no OTP. This is
+    the endpoint frontend-contract.md §3.0's `pw` field was always
+    reaching for, now with a real server-side implementation instead of
+    the mock's client-only checks.
+`POST /auth/logout` is unchanged from the original proposal.
+
+AUTH-V2 addendum: `POST /auth/password/change` -- an already-
+authenticated user rotating their own password (no OTP/email involved).
+Still requires the CURRENT password and is rate-limited per user AND
+per IP -- see app.services.auth.change_password's docstring for why a
+valid session alone is deliberately not sufficient.
 
 See app.services.auth's module docstring for the full reasoning behind
 every security-relevant choice made here (session mechanism, OTP
-parameters, rate limits, enumeration handling, Resend quota handling).
+parameters, rate limits, enumeration handling, password rules, email
+provider quota handling).
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
-from app.api.deps import AuthenticatedUser, require_admin
+from app.api.deps import AuthenticatedUser, get_current_user, require_admin
 from app.api.schemas.auth import (
+    ChangePasswordBody,
+    LoginBody,
+    LoginResponse,
     OtpFailureRow,
     OtpRequestBody,
     OtpRequestResponse,
-    OtpVerifyBody,
-    OtpVerifyResponse,
+    SetPasswordBody,
+    SetPasswordResponse,
 )
 from app.config import Settings
 from app.db.connection import get_connection
@@ -120,24 +142,32 @@ def request_otp(body: OtpRequestBody, request: Request) -> OtpRequestResponse:
     ip_address = _client_ip(request)
     try:
         with get_connection() as conn:
-            auth_service.request_otp(conn, email=body.email, ip_address=ip_address)
+            auth_service.request_otp(conn, email=body.email, ip_address=ip_address, purpose=body.purpose)
     except auth_service.OtpRateLimited as exc:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
     # app.errors.ValidationError -> 422 and app.errors.ProviderError ->
     # 503/502 are handled by the handlers app.main already registers
     # (app.api.error_handlers) -- nothing router-specific needed for
-    # either. A ProviderError here means Resend's quota is exhausted or
-    # the send genuinely failed (DoD #5): the caller gets an honest
-    # "unavailable" response rather than the success message below, on
-    # purpose -- claiming success while quietly not sending is exactly
-    # the silent-non-delivery DoD #5 rules out.
+    # either. A ProviderError here means the email provider's quota is
+    # exhausted or the send genuinely failed (DoD #5): the caller gets an
+    # honest "unavailable" response rather than the success message
+    # below, on purpose -- claiming success while quietly not sending is
+    # exactly the silent-non-delivery DoD #5 rules out.
     return OtpRequestResponse(message=_OTP_SENT_MESSAGE)
 
 
-@router.post("/otp/verify", response_model=OtpVerifyResponse)
-def verify_otp(body: OtpVerifyBody, request: Request, response: Response) -> OtpVerifyResponse:
+@router.post("/password/set", response_model=SetPasswordResponse)
+def set_password(body: SetPasswordBody, request: Request, response: Response) -> SetPasswordResponse:
+    """Signup (first-ever password) AND password reset (overwrite an
+    existing one) -- the same call (app.services.auth.set_password's
+    docstring). Consumes the OTP and writes `users.password_hash` in one
+    transaction, then signs the caller in immediately (same session
+    mechanism as login()), so the client goes straight from "I just
+    proved I own this mailbox and picked a password" to an authenticated
+    session without a second round trip.
+    """
     with get_connection() as conn:
-        user = auth_service.verify_otp(conn, email=body.email, code=body.code)
+        user = auth_service.set_password(conn, email=body.email, code=body.code, new_password=body.new_password)
         token = auth_service.create_session(
             conn,
             user_id=user.id,
@@ -145,8 +175,68 @@ def verify_otp(body: OtpVerifyBody, request: Request, response: Response) -> Otp
             ip_address=_client_ip(request),
         )
     response.set_cookie(value=token, **auth_service.cookie_kwargs())  # type: ignore[arg-type]
+    logger.info("password_set_session_created", extra={"email_masked": mask(user.email), "role": user.role})
+    return SetPasswordResponse(email=user.email, role=user.role, display_name=user.display_name)
+
+
+@router.post("/login", response_model=LoginResponse)
+def login(body: LoginBody, request: Request, response: Response) -> LoginResponse:
+    """Password sign-in -- the primary auth path under the new model.
+    Rate-limited per email AND per IP (auth_service.login /
+    login_attempts) -- brute force is a new attack surface password auth
+    introduces that OTP-only never had. Same no-enumeration contract as
+    set_password()/request_otp(): a nonexistent account, an account that
+    exists but never set a password, and a genuinely wrong password all
+    come back as the identical 422.
+    """
+    ip_address = _client_ip(request)
+    try:
+        with get_connection() as conn:
+            user = auth_service.login(conn, email=body.email, password=body.password, ip_address=ip_address)
+            token = auth_service.create_session(
+                conn,
+                user_id=user.id,
+                user_agent=request.headers.get("user-agent", "")[:500],
+                ip_address=ip_address,
+            )
+    except auth_service.LoginRateLimited as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
+    response.set_cookie(value=token, **auth_service.cookie_kwargs())  # type: ignore[arg-type]
     logger.info("session_created", extra={"email_masked": mask(user.email), "role": user.role})
-    return OtpVerifyResponse(email=user.email, role=user.role, display_name=user.display_name)
+    return LoginResponse(email=user.email, role=user.role, display_name=user.display_name)
+
+
+@router.post("/password/change", status_code=status.HTTP_204_NO_CONTENT)
+def change_password(
+    body: ChangePasswordBody, request: Request, user: AuthenticatedUser = Depends(get_current_user)
+) -> None:
+    """AUTH-V2 addendum: an already-authenticated user rotating their
+    own password. No OTP/email involved -- the caller's session cookie
+    (via `get_current_user`) is what identifies the account, but
+    `current_password` is still required (see
+    app.services.auth.change_password's docstring for why a valid
+    session alone must not be enough). Rate-limited per user AND per IP
+    -- otherwise this is a password-guessing oracle, since a wrong
+    current password necessarily gets a different response from a
+    correct one. On success, every OTHER session for this user is
+    revoked; the caller's own (just-used) session is deliberately kept
+    alive.
+    """
+    ip_address = _client_ip(request)
+    try:
+        with get_connection() as conn:
+            auth_service.change_password(
+                conn,
+                user_id=user.id,
+                email=user.email,
+                current_password=body.current_password,
+                new_password=body.new_password,
+                ip_address=ip_address,
+                keep_session_id=user.session_id,
+            )
+    except auth_service.PasswordChangeRateLimited as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
+    logger.info("password_changed_via_api", extra={"email_masked": mask(user.email)})
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
