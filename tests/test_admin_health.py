@@ -87,12 +87,14 @@ def test_health_sources_maps_run_details_to_status_and_note() -> None:
         admin_service.create_source(conn, name="Quiet Outlet", methods=["rss"], enabled=True)
         admin_service.create_source(conn, name="Broken Outlet", methods=["api"], enabled=True)
         admin_service.create_source(conn, name="Off Outlet", methods=["rss"], enabled=False)
+        admin_service.create_source(conn, name="Zero Fetch Outlet", methods=["id_enum"], enabled=True)
         _insert_run(
             conn,
             details={
                 "Healthy Outlet": {"status": "ok", "fetched": 40, "inserted": 12, "error": None},
                 "Quiet Outlet": {"status": "ok", "fetched": 10, "inserted": 0, "error": None},
                 "Broken Outlet": {"status": "failed", "fetched": 0, "inserted": 0, "error": "timeout"},
+                "Zero Fetch Outlet": {"status": "ok", "fetched": 0, "inserted": 0, "error": None},
             },
         )
         conn.commit()
@@ -104,6 +106,13 @@ def test_health_sources_maps_run_details_to_status_and_note() -> None:
         assert rows["Broken Outlet"]["status"] == "error"
         assert "timeout" in rows["Broken Outlet"]["note"]
         assert rows["Off Outlet"]["status"] == "disabled"
+        # status="ok" with fetched=0 (real observed case: Deshpatrika, Kalbela)
+        # must NOT be mislabeled "healthy" with an empty note -- that's
+        # visually identical to a fully successful run and defeats the
+        # screen's purpose of distinguishing a quiet day from a broken parser.
+        assert rows["Zero Fetch Outlet"]["status"] != "healthy"
+        assert rows["Zero Fetch Outlet"]["status"] == "quiet"
+        assert rows["Zero Fetch Outlet"]["note"]
 
 
 def test_health_overview_computes_real_kpis_not_hardcoded() -> None:

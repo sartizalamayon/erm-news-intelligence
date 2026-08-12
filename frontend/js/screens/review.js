@@ -197,6 +197,7 @@ export function mountReview(root, { navigate }) {
     s.dupOpen = false;
     s.topicOpen = false;
     render();
+    if (s.selId) ensureDetail(s.selId);
     api.patch(`/articles/${id}`, { status }).catch((err) => {
       s.error = err;
       fetchList();
@@ -234,6 +235,7 @@ export function mountReview(root, { navigate }) {
       s.checked.clear();
       s.bulkBusy = false;
       render();
+      if (s.selId) ensureDetail(s.selId);
     } catch (err) {
       s.bulkBusy = false;
       s.error = err;

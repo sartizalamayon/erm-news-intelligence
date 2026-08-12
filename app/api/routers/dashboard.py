@@ -204,7 +204,7 @@ def dashboard_today(user: AuthenticatedUser = Depends(get_current_user)) -> Dash
         matched_today = matched_by_day.get(today, 0)
         matched_yesterday = matched_by_day.get(yesterday, 0)
         approved_today = approved_by_day.get(today, 0)
-        pending_count = _count(conn, "review_status = 'pending'", ())
+        pending_count = _count(conn, "review_status = 'pending' AND COALESCE(is_primary, TRUE) = TRUE", ())
         scored_today = _count(conn, "day = %s AND llm_score IS NOT NULL", (today,))
 
         fetched_vals14 = [fetched_by_day.get(d, 0) for d in day_range14]

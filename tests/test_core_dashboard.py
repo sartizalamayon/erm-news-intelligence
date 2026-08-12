@@ -114,6 +114,30 @@ def test_today_counts_reflect_real_rows(dash_client) -> None:
     assert {s["label"] for s in data["topSources"]} == {"Prothom Alo", "Daily Star"}
 
 
+def test_pending_count_excludes_hidden_duplicate_rows(dash_client) -> None:
+    """`pending_count` (KPI "Awaiting review" / `pendingCount`) must apply
+    the same `COALESCE(is_primary, TRUE) = TRUE` filter the review queue's
+    own list endpoint (app.api.routers.review) uses -- otherwise the
+    badge/KPI counts non-primary duplicate-outlet rows a user can never
+    see or act on individually in the queue, overcounting vs. what the
+    queue actually shows.
+    """
+    client, conn = dash_client
+    today = date.today()
+    _insert_article(conn, day=today, review_status="pending", dup_group=1, is_primary=True)
+    _insert_article(conn, day=today, review_status="pending", dup_group=1, is_primary=False)
+    _insert_article(conn, day=today, review_status="pending", dup_group=1, is_primary=False)
+    _insert_article(conn, day=today, review_status="pending")  # is_primary NULL -> counted (COALESCE TRUE)
+    conn.commit()
+
+    resp = client.get("/dashboard/today")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["pendingCount"] == 2
+    awaiting = next(k for k in data["kpis"] if k["label"] == "Awaiting review")
+    assert awaiting["value"] == "2"
+
+
 def test_today_relmix_bands_by_score(dash_client) -> None:
     client, conn = dash_client
     today = date.today()

@@ -1470,6 +1470,8 @@ def health_sources(conn: DictConnection) -> list[dict[str, Any]]:
             status, note = "error", f"error: {d.get('error', '')}"
         elif status_raw == "ok" and fetched > 0 and inserted == 0:
             status, note = "quiet", f"fetched {fetched} · {fetched} already stored"
+        elif status_raw == "ok" and fetched == 0:
+            status, note = "quiet", "0 fetched this run"
         elif status_raw == "ok":
             status, note = "healthy", ""
         elif status_raw == "empty":
