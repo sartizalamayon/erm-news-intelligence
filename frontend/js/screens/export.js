@@ -12,11 +12,13 @@
 //     explicit call ("export should have .xlsx mainly, not csv") — csv
 //     stays available as an explicit second choice.
 //
-// Known backend gap: `do_export`/`export_preview` take no `columns`
-// param — the server always writes its own fixed CSV column set. The
-// "4 · Columns" picker below is therefore preview-only (drives
-// `exColPreview`) and does not yet change what the download contains;
-// flagged in this task's report, not silently hidden.
+// Column selection AND ordering is real end to end: `columns` (a
+// comma-separated, order-preserved list of COLUMNS[].k) is sent on both
+// GET /export/preview and POST /export, resolved server-side by
+// app.services.export.resolve_columns, and honored by both writers
+// (tests/test_core_export.py: test_export_columns_selection_and_order_
+// honored_in_{csv,xlsx}). The "4 · Columns" picker drives the actual
+// download, not just the local preview chip list.
 //
 // The prototype's two custom-date-range inputs are inert (no handler at
 // all) per §3.4/§5.2 #6-7 — wired for real here since a real export
@@ -97,6 +99,7 @@ export function mountExport(root) {
       from: s.scope === "range" ? s.rangeFrom : undefined,
       to: s.scope === "range" ? s.rangeTo : undefined,
       sections: s.sections.join(","),
+      columns: COLUMNS.filter((c) => s.cols[c.k]).map((c) => c.k).join(","),
       sort: s.sort,
       format: s.format,
     };
@@ -191,6 +194,12 @@ export function mountExport(root) {
     s.topN = p.topN || s.topN;
     s.scope = p.scope || s.scope;
     s.sections = p.sections ? (Array.isArray(p.sections) ? p.sections : String(p.sections).split(",")) : s.sections;
+    if (p.columns) {
+      const cols = Array.isArray(p.columns) ? p.columns : String(p.columns).split(",");
+      const next = {};
+      for (const c of COLUMNS) next[c.k] = cols.includes(c.k) ? 1 : 0;
+      s.cols = next;
+    }
     s.sort = p.sort || s.sort;
     s.format = p.format || s.format;
     s.note = "✓ Loaded “" + p.name + "”";

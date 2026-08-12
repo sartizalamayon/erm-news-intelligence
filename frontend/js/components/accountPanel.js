@@ -89,7 +89,13 @@ export function mountAccountPanel(root, { onClose }) {
 
   function describeError(err) {
     if (err instanceof ApiError) {
-      if (err.kind === "unauthorized") return "Current password is incorrect.";
+      // Wrong current password comes back as a 422 (app.errors.ValidationError
+      // -> kind "validation" in api.js's classify()), not a 401 — the
+      // session cookie itself is still valid, only the submitted password
+      // is wrong. err.message already carries the backend's exact detail
+      // text ("Current password is incorrect."), so this branch is a
+      // belt-and-suspenders friendly fallback, not the primary path.
+      if (err.kind === "validation") return err.message || "Current password is incorrect.";
       if (err.kind === "rate_limited") return err.message || "Too many attempts — wait a few minutes and try again.";
       if (err.message) return err.message;
     }
