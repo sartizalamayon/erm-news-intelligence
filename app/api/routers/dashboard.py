@@ -30,7 +30,6 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
 
 from app.api.deps import AuthenticatedUser, get_current_user, require_admin
 from app.api.schemas.admin import (
@@ -61,7 +60,6 @@ from app.api.schemas.core import (
 from app.config import get_settings
 from app.db import queries
 from app.db.connection import DictConnection, get_connection
-from app.db.settings import get_setting, set_setting
 from app.services import admin as admin_service
 from app.services import macro as macro_service
 
@@ -342,27 +340,7 @@ _MACRO_META: dict[str, _MacroMeta] = {
     "taka_usd": _MacroMeta(label="Taka / USD", unit="BDT", decimals=1, bad=True),
     "inflation": _MacroMeta(label="Inflation", unit="%", decimals=1, bad=True),
     "brent_crude": _MacroMeta(label="Brent crude", unit="USD/bbl", decimals=0, bad=True),
-    "remittance": _MacroMeta(label="Remittance", unit="USD mn", decimals=1, bad=False),
 }
-
-# Remittance: no verified free API exists (Bangladesh Bank exposes
-# none — MACRO-DASHBOARD's report). Rather than a fragile scraper, an
-# admin types in the latest published figure periodically — same
-# `settings` KV-table pattern `relevance_guidance` uses
-# (app.services.llm.prompts.RELEVANCE_GUIDANCE_KEY / app.db.settings).
-REMITTANCE_VALUE_SETTING_KEY = "macro_remittance_manual_usd_mn"
-REMITTANCE_ASOF_SETTING_KEY = "macro_remittance_manual_as_of"
-
-
-class RemittanceUpdateBody(BaseModel):
-    """PUT /dashboard/trends/remittance body — the admin-entered manual
-    remittance figure (USD mn). `as_of` is a free-text label (e.g. a
-    month name) describing which published figure this is; defaults to
-    today's date if not given.
-    """
-
-    value: float
-    as_of: str | None = None
 
 
 def _month_start(d: date) -> date:
@@ -394,11 +372,10 @@ def dashboard_trends(
             by_month = {r["month"]: float(r["value"]) for r in rows}
             vals = [by_month.get(m, 0.0) for m in month_list]
 
-            # MACRO-DASHBOARD: layer a real live (or admin-manual, for
-            # remittance) figure onto the CURRENT month's value only —
-            # historical months keep reading whatever's in
-            # macro_indicator_values (unpopulated today, hence this
-            # section previously always showing zero). A live/manual
+            # MACRO-DASHBOARD: layer a real live figure onto the CURRENT
+            # month's value only — historical months keep reading
+            # whatever's in macro_indicator_values (unpopulated today,
+            # hence this section previously always showing zero). A live
             # source only ever REPLACES the last element of `vals`; it
             # never fabricates the other 11 months. Every fetch_* call
             # is cached + never raises (app.services.macro), so a downed
@@ -436,16 +413,6 @@ def dashboard_trends(
                         note = "Live from oilpriceapi.com."
                     else:
                         note = "Live fetch unavailable right now — showing the last known figure."
-            elif indicator == "remittance":
-                manual_raw = get_setting(conn, REMITTANCE_VALUE_SETTING_KEY, default="")
-                if manual_raw.strip():
-                    try:
-                        vals[-1] = float(manual_raw)
-                        status = "manual"
-                        as_of = get_setting(conn, REMITTANCE_ASOF_SETTING_KEY, default="") or None
-                    except ValueError:
-                        pass
-                note = "Manually maintained by an analyst (no free live remittance API exists) — not a live feed."
 
             trend_cards.append(
                 TrendCardOut(
@@ -561,23 +528,3 @@ def dashboard_trends(
         relMixTrend=rel_mix_trend,
         topSources=top_sources_12mo,
     )
-
-
-@router.put("/trends/remittance")
-def set_remittance(
-    body: RemittanceUpdateBody, admin: AuthenticatedUser = Depends(require_admin)
-) -> dict[str, object]:
-    """Admin-only: set the manually-maintained remittance figure (USD
-    mn) the "Remittance" trend card overlays onto the current month —
-    see this module's REMITTANCE_VALUE_SETTING_KEY docstring above for
-    why this is a manual entry rather than a live fetch (no verified
-    free Bangladesh remittance API exists). Gated by `require_admin`
-    like every other write route in this file (storage/purge/export
-    above), unlike the read-only `/today` and `/trends` routes which
-    only require a session.
-    """
-    as_of = body.as_of or _today_dhaka().isoformat()
-    with get_connection() as conn:
-        set_setting(conn, REMITTANCE_VALUE_SETTING_KEY, str(body.value))
-        set_setting(conn, REMITTANCE_ASOF_SETTING_KEY, as_of)
-    return {"value": body.value, "asOf": as_of}

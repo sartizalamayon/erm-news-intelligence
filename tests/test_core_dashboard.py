@@ -195,7 +195,7 @@ def test_trends_reads_rollups_not_raw_articles(dash_client) -> None:
     resp = client.get("/dashboard/trends")
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data["trendCards"]) == 4
+    assert len(data["trendCards"]) == 3
     taka_card = next(c for c in data["trendCards"] if c["label"] == "Taka / USD")
     assert taka_card["vals"][-1] == pytest.approx(123.4)
     assert len(data["months12"]) == 12
