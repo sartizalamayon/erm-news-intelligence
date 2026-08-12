@@ -196,6 +196,55 @@ def test_mine_keyword_candidates_ranks_by_approved_count_and_excludes_existing_t
         assert "spectrum" not in words  # already a configured keyword term
 
 
+def test_mine_keyword_candidates_filters_numbers_and_singleton_hits() -> None:
+    """Regression for the owner-flagged bug: a real approved headline
+    like "Gas price hits 100 taka" used to surface "100" and "hits" as
+    candidate keywords -- a pure number, and a word seen only once (weak
+    evidence). Both must now be filtered: numbers outright, and any word
+    appearing in fewer than 2 approved articles.
+    """
+    with migrated_schema() as conn:
+        insert_article(
+            conn,
+            url="https://x.test/n1",
+            url_norm="https://x.test/n1",
+            source="X",
+            title="Gas price hits 100 taka in Dhaka",
+            day="2026-01-01",
+            review_status="approved",
+        )
+        insert_article(
+            conn,
+            url="https://x.test/n2",
+            url_norm="https://x.test/n2",
+            source="X",
+            title="Telecom operators face new tariff",
+            day="2026-01-01",
+            review_status="approved",
+        )
+        conn.commit()
+
+        candidates = admin_service.mine_keyword_candidates(conn, limit=20)
+        words = [c["word"] for c in candidates]
+        assert "100" not in words  # pure number
+        assert "hits" not in words  # appears once -- below the frequency floor
+        assert "price" not in words  # also appears once
+
+
+def test_is_low_information_rejects_only_digit_majority_tokens() -> None:
+    """Unit-level check on the numeric filter itself: pure numbers and
+    digit-majority tokens ("100", "2026") are low-information, but a
+    genuinely meaningful mixed alphanumeric telecom term where digits
+    are NOT the majority ("4glte", one digit of five chars) is not --
+    the filter targets low-information noise, not every token
+    containing a digit.
+    """
+    assert admin_service._is_low_information("100") is True
+    assert admin_service._is_low_information("2026") is True
+    assert admin_service._is_low_information("4glte") is False
+    assert admin_service._is_low_information("btrc") is False
+
+
 # ── suggest_refinement (mocked LLM) ─────────────────────────────────────
 
 

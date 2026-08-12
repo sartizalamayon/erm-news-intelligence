@@ -845,12 +845,28 @@ _STOPWORDS = {
 }
 
 
+def _is_low_information(word: str) -> bool:
+    """Reject tokens that carry no real editorial signal as a keyword:
+    pure numbers ("100", "2026") and tokens where digits are the
+    majority (a stray "$100" surviving tokenization as "100"). Strictly
+    a MAJORITY, not merely half, so a meaningful mixed alphanumeric
+    term where letters still dominate (e.g. "4glte") is not rejected
+    just for containing a digit.
+    """
+    if not word:
+        return True
+    digits = sum(1 for ch in word if ch.isdigit())
+    return digits / len(word) > 0.5
+
+
 def _tokenize(text: str | None) -> set[str]:
     words = re.findall(r"[\w']+", (text or "").lower())
-    return {w for w in words if len(w) > 2 and w not in _STOPWORDS}
+    return {w for w in words if len(w) > 2 and w not in _STOPWORDS and not _is_low_information(w)}
 
 
-def mine_keyword_candidates(conn: DictConnection, *, limit: int = 6, sample: int = 300) -> list[dict[str, Any]]:
+def mine_keyword_candidates(
+    conn: DictConnection, *, limit: int = 6, sample: int = 300, min_count: int = 2
+) -> list[dict[str, Any]]:
     approved_rows = conn.execute(
         "SELECT title, title_en FROM articles WHERE review_status = 'approved' ORDER BY id DESC LIMIT %s",
         (sample,),
@@ -880,7 +896,10 @@ def mine_keyword_candidates(conn: DictConnection, *, limit: int = 6, sample: int
             "rejected": rejected_counts.get(word, 0),
         }
         for word, count in approved_counts.items()
-        if word not in existing_terms
+        # A word seen once is weak evidence for a keyword suggestion —
+        # require it to recur across at least `min_count` approved
+        # articles before surfacing it as a candidate.
+        if word not in existing_terms and count >= min_count
     ]
     candidates.sort(key=lambda c: (-int(c["approved"]), int(c["rejected"])))
     return candidates[:limit]

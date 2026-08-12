@@ -1,4 +1,4 @@
-// AI prompts + provider/routing/credential/quota admin console
+// AI prompts + provider/routing/credential admin console
 // (frontend-contract.md §3.9 + ADR §9.1 DoD #4, owner requirement: all
 // provider/AI config must be configurable from the website). Bundled
 // under /prompts by ADMIN-API — see app/api/routers/prompts.py.
@@ -15,7 +15,11 @@
 //   GET  /prompts/provider-definitions/{provider}/credentials -> [{provider,key_id,api_key_last4}]
 //   POST   same path { key_id, api_key } -> masked out, never echoes plaintext
 //   DELETE .../credentials/{key_id}
-//   GET  /prompts/quota | PUT /prompts/quota/{provider} { tpd, rpd }
+//
+// /prompts/quota is intentionally NOT surfaced on this screen (owner
+// request: drop the "Quota & remaining budget" section). Backend quota
+// tracking (app.services.llm.quota) stays — other things depend on it
+// for failover decisions — this file just stops rendering it.
 //
 // Provider name / model / base_url are free text everywhere on purpose
 // (provider-limits-VERIFIED.md: model IDs go dead without notice — must
@@ -53,7 +57,6 @@ export function mountPrompts(root) {
     addingProvider: false,
     expandedProvider: null,
     credentials: {},
-    quota: [],
     forbidden: false,
   };
 
@@ -62,7 +65,6 @@ export function mountPrompts(root) {
   loadCandidates();
   loadRouting();
   loadProviders();
-  loadQuota();
 
   function noteForbidden(err) {
     if (err && err.kind === "forbidden") s.forbidden = true;
@@ -137,17 +139,6 @@ export function mountPrompts(root) {
       s.providersError = err;
       noteForbidden(err);
       render();
-    }
-  }
-
-  async function loadQuota() {
-    try {
-      const data = await api.get("/prompts/quota");
-      if (!alive) return;
-      s.quota = data || [];
-      render();
-    } catch (err) {
-      /* quota panel stays empty */
     }
   }
 
@@ -309,31 +300,13 @@ export function mountPrompts(root) {
     }
   }
 
-  async function saveQuota(provider) {
-    const tpdVal = root.querySelector(`#quotaTpd-${cssId(provider)}`).value;
-    const rpdVal = root.querySelector(`#quotaRpd-${cssId(provider)}`).value;
-    const body = {};
-    if (tpdVal !== "") body.tpd = Number(tpdVal);
-    if (rpdVal !== "") body.rpd = Number(rpdVal);
-    try {
-      await api.put(`/prompts/quota/${encodeURIComponent(provider)}`, body);
-      loadQuota();
-    } catch (err) {
-      window.alert("Couldn't save quota: " + fmtErr(err));
-    }
-  }
-
-  function cssId(s) {
-    return s.replace(/[^a-zA-Z0-9]/g, "_");
-  }
-
   function render() {
     root.innerHTML = `
       <div class="page page-narrow" style="max-width:920px;">
         <p style="color:var(--tx2);font-size:13.5px;line-height:1.6;margin:0 0 22px;max-width:62ch;">${
           s.config
             ? `Everything that shapes phase 3. Based on <b style="color:var(--tx);">${s.config.approved_count}</b> approved and <b style="color:var(--tx);">${s.config.rejected_count}</b> rejected headlines so far.`
-            : "Everything that shapes phase 3, plus provider/model routing, credentials and quota."
+            : "Everything that shapes phase 3, plus provider/model routing and credentials."
         }</p>
 
         ${
@@ -346,7 +319,6 @@ export function mountPrompts(root) {
         ${renderCandidates()}
         ${renderRouting()}
         ${renderProviders()}
-        ${renderQuota()}
       </div>
     `;
     bind();
@@ -582,35 +554,6 @@ export function mountPrompts(root) {
     </div>`;
   }
 
-  function renderQuota() {
-    return `<div class="card">
-      <h3>Quota & remaining budget</h3>
-      <p class="hint">Per-provider daily ceilings. Blank = no ceiling tracked.</p>
-      <div class="stack" style="gap:9px;">
-        ${providerNames()
-          .map((provider) => {
-            const q = s.quota.find((x) => x.provider === provider);
-            return `<div style="border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:12px 14px;">
-            <div class="row-between wrap">
-              <span style="font-size:13px;font-weight:600;">${escapeHtml(provider)}</span>
-              ${
-                q
-                  ? `<span class="mono" style="font-size:10.5px;color:var(--tx3);">tokens ${q.tokens_used.toLocaleString()}${q.tpd ? " / " + q.tpd.toLocaleString() + " (" + (q.tokens_used_pct || 0).toFixed(0) + "%)" : ""} · req ${q.requests_used}${q.rpd ? " / " + q.rpd : ""}${q.exhausted ? " · EXHAUSTED" : ""}</span>`
-                  : `<span class="mono" style="font-size:10.5px;color:var(--tx4);">no usage yet</span>`
-              }
-            </div>
-            <div class="row" style="gap:8px;margin-top:8px;">
-              <input id="quotaTpd-${cssId(provider)}" class="text-input" style="padding:6px 9px;font-size:11.5px;width:110px;" placeholder="TPD ceiling" value="${q && q.tpd ? q.tpd : ""}" />
-              <input id="quotaRpd-${cssId(provider)}" class="text-input" style="padding:6px 9px;font-size:11.5px;width:110px;" placeholder="RPD ceiling" value="${q && q.rpd ? q.rpd : ""}" />
-              <button class="btn-sm" data-save-quota="${escapeHtml(provider)}">save</button>
-            </div>
-          </div>`;
-          })
-          .join("") || `<div style="font-size:12px;color:var(--tx3);">No providers defined yet.</div>`}
-      </div>
-    </div>`;
-  }
-
   function bind() {
     const guidanceInput = root.querySelector("#guidanceInput");
     if (guidanceInput) guidanceInput.addEventListener("input", (e) => (s.guidanceDraft = e.target.value));
@@ -714,9 +657,6 @@ export function mountPrompts(root) {
         deleteCredential(provider, keyId);
       })
     );
-
-    // Quota
-    root.querySelectorAll("[data-save-quota]").forEach((b) => b.addEventListener("click", () => saveQuota(b.getAttribute("data-save-quota"))));
   }
 
   function ensureRoute(feature) {
