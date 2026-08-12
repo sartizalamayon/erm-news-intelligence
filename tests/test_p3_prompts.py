@@ -1,22 +1,29 @@
-"""Byte-exact verification of `app.services.llm.prompts` against the
-LIVE legacy source, `backend/llm.py` — not against p3-contract.md's
-transcription of it (which is itself a copy one step removed). Every
-prompt-builder function is exercised with representative inputs and
-compared to the exact string legacy's own code would produce for the
-same inputs, so a transcription slip anywhere (a missing space, a
+"""Byte-exact verification of `app.services.llm.prompts` against a frozen
+copy of the legacy source, `tests/legacy_reference/llm.py` — not against
+p3-contract.md's transcription of it (which is itself a copy one step
+removed). Every prompt-builder function is exercised with representative
+inputs and compared to the exact string legacy's own code would produce
+for the same inputs, so a transcription slip anywhere (a missing space, a
 smart-quote substituted for a straight one, a dropped `\\n`) fails loudly
 here rather than only being caught by eyeballing a diff.
 
-`FIXED_GUIDE`/`DEFAULT_EXAMPLES` are compared for full equality (not
-just a hash) since these are read directly, verbatim, from
-`backend/llm.py` — a mismatch here means the READ-ONLY legacy file
-changed since this task's fixtures were generated (data drift), not a
-bug in this module, and should be investigated as such.
+The legacy `backend/` application tree was removed from the working tree
+once fully superseded by `app/` (retrievable from git history at the
+baseline commit if ever needed). `tests/legacy_reference/llm.py` is a
+byte-identical snapshot of `backend/llm.py` taken at that point, kept
+specifically so this parity test keeps working without depending on a
+live application directory that no longer exists — see
+`tests/legacy_reference/README.md`.
 
-`backend/llm.py` is loaded directly by file path (not imported as a
-package) since `backend/` has no `__init__.py`/package structure this
-suite depends on, and importing it must never require a live DB
-connection — the only imports gated behind an actual call are the
+`FIXED_GUIDE`/`DEFAULT_EXAMPLES` are compared for full equality (not
+just a hash) since these are read directly, verbatim, from that frozen
+copy — a mismatch here would mean this module drifted from the frozen
+P3 contract, not that the reference changed (it can't; it's frozen).
+
+The reference module is loaded directly by file path (not imported as a
+package) since it has no `__init__.py`/package structure this suite
+depends on, and importing it must never require a live DB connection —
+the only imports gated behind an actual call are the
 `_get_relevance_guidance`/`_get_relevance_examples` DB reads inside
 `OllamaProvider._build_system()`'s helpers, which this file never
 calls (it uses `DEFAULT_EXAMPLES` directly for every comparison,
@@ -35,7 +42,7 @@ import pytest
 
 from app.services.llm import prompts
 
-LEGACY_LLM_PATH = Path(__file__).resolve().parent.parent / "backend" / "llm.py"
+LEGACY_LLM_PATH = Path(__file__).resolve().parent / "legacy_reference" / "llm.py"
 
 
 @pytest.fixture(scope="module")

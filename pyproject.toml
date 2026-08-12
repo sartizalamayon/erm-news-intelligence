@@ -43,7 +43,11 @@ packages = ["app"]
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-extend-exclude = ["backend", "data"]
+# tests/legacy_reference/llm.py is a frozen, byte-identical snapshot of
+# the retired legacy app (see tests/legacy_reference/README.md) — it must
+# never be reformatted, since test_p3_prompts.py depends on it being
+# exactly what git history says it was.
+extend-exclude = ["tests/legacy_reference"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
@@ -53,7 +57,6 @@ python_version = "3.10"
 files = ["app"]
 ignore_missing_imports = true
 warn_unused_configs = true
-exclude = ["^backend/", "^data/"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
