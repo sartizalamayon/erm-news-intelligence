@@ -161,6 +161,19 @@ class TrendCardOut(BaseModel):
     vals: list[float]
     bad: bool
     decimals: int
+    # MACRO-DASHBOARD (additive; only app.api.routers.dashboard
+    # constructs this model, so these new defaulted fields can't break
+    # any other caller): where the CURRENT (last) value in `vals` came
+    # from this request. "live" = a real external fetch succeeded this
+    # call or from cache (asOf is that fetch's timestamp); "manual" =
+    # an admin-entered value (remittance only); "unconfigured" = a live
+    # source that needs setup (e.g. Brent's oilpriceapi_key) which
+    # isn't done yet; "rollup" = falling back to whatever historical
+    # figure is in `macro_indicator_values`, no live source layered on
+    # top this call.
+    status: str = "rollup"
+    asOf: str | None = None
+    note: str | None = None
 
 
 class MonthVolumeOut(BaseModel):

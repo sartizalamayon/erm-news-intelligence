@@ -225,6 +225,23 @@ class Settings(BaseSettings):
         "GIN-indexed search query from an unbounded free-text input.",
     )
 
+    # ── Dashboard macro indicators (MACRO-DASHBOARD, additive) ────────
+    # app.services.macro.fetch_brent / app.api.routers.dashboard's
+    # long-term "trend cards". Taka/USD (open.er-api.com) and inflation
+    # (World Bank) are both free and keyless, so they need no setting
+    # here. Brent's free tier (oilpriceapi.com, 200 req/month, no
+    # credit card) does require a per-account API key.
+    oilpriceapi_key: str = Field(
+        default="",
+        repr=False,
+        description="oilpriceapi.com API key for the dashboard's Brent "
+        "crude trend card (app.services.macro.fetch_brent). Sign up free "
+        "(no credit card) at https://www.oilpriceapi.com/auth/signup and "
+        "set this as env var OILPRICEAPI_KEY. Blank = the Brent card "
+        "shows a clear 'not configured' state rather than a fake zero — "
+        "see app.api.routers.dashboard.dashboard_trends.",
+    )
+
     @field_validator("trusted_proxy_hops", mode="before")
     @classmethod
     def _fail_safe_trusted_proxy_hops(cls, value: object) -> int:

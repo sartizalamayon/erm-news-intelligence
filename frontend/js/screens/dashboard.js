@@ -88,6 +88,44 @@ function kpiSparklineHtml(vals) {
   </svg>`;
 }
 
+// LONG-TERM macro cards: TrendCardOut.status/asOf/note
+// (app/api/schemas/core.py, wired by app/services/macro.py) make where
+// the card's CURRENT value came from this request visible instead of
+// hidden — "live" (a real external fetch, cached a few hours), "manual"
+// (admin-entered, remittance only), "unconfigured" (a live source that
+// needs setup, e.g. Brent's oilpriceapi_key), or "rollup" (no live
+// source layered on, e.g. a fetch failure — never a fabricated number).
+const MACRO_STATUS_META = {
+  live: { label: "Live", color: "var(--green)" },
+  manual: { label: "Manual", color: "var(--actx)" },
+  unconfigured: { label: "Not configured", color: "var(--amber)" },
+};
+function macroStatusHtml(t) {
+  const meta = MACRO_STATUS_META[t.status];
+  const asOfText = t.asOf
+    ? new Date(t.asOf).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+    : "";
+  const caption = [asOfText, t.note].filter(Boolean).join(" · ");
+  if (!meta && !caption) return "";
+  return `<div class="row" style="gap:6px;margin-top:9px;align-items:flex-start;">
+    ${meta ? `<span class="pill" style="flex:0 0 auto;background:color-mix(in oklab, ${meta.color} 20%, transparent);color:${meta.color};font-size:9px;padding:2px 7px;">${meta.label}</span>` : ""}
+    ${caption ? `<span style="font-size:10px;color:var(--tx4);flex:1;min-width:0;line-height:1.3;">${escapeHtml(caption)}</span>` : ""}
+  </div>`;
+}
+
+// Remittance-only, admin-only: no verified free live remittance API
+// exists (Bangladesh Bank exposes none — see app/services/macro.py's
+// module docstring), so an analyst types in the latest published
+// figure here instead. bindRemittanceForm (inside mountDashboard) wires
+// the Save button to PUT /dashboard/trends/remittance.
+function remittanceEditHtml(t) {
+  const prefill = t.status === "manual" && Number.isFinite(t.rawValue) ? t.rawValue : "";
+  return `<div class="row" style="gap:6px;margin-top:9px;" data-remit-form>
+    <input type="number" step="0.1" class="remit-input" value="${escapeHtml(String(prefill))}" placeholder="USD mn" style="flex:1;min-width:0;font-size:11.5px;padding:5px 7px;border-radius:6px;border:1px solid var(--line);background:var(--bg2);color:var(--tx);" />
+    <button type="button" class="btn btn-soft remit-save" style="font-size:10.5px;padding:5px 10px;white-space:nowrap;">Save</button>
+  </div>`;
+}
+
 export function mountDashboard(root, { navigate }) {
   let alive = true;
   const mode = state.dashMode || "short";
@@ -481,6 +519,13 @@ export function mountDashboard(root, { navigate }) {
   // ── Long term ───────────────────────────────────────────────────
   function renderLong(data) {
     const isAdmin = !!(state.user && state.user.is_admin);
+    // MACRO-DASHBOARD: each card now also carries where its CURRENT
+    // value came from this request -- TrendCardOut.status
+    // ("live"/"manual"/"unconfigured"/"rollup", app/api/schemas/core.py)
+    // plus an optional asOf timestamp and a human note. Surfaced as a
+    // small badge + caption under the sparkline so staleness/"not real
+    // data yet" is visible rather than hidden behind a plain number.
+    const isRemittanceLabel = (label) => label === "Remittance";
     const trendCards = (data.trendCards || []).map((t) => {
       const vals = t.vals || [];
       const first = vals[0] ?? 0;
@@ -494,11 +539,15 @@ export function mountDashboard(root, { navigate }) {
         label: t.label,
         unit: t.unit,
         value: last.toFixed(decimals),
+        rawValue: last,
         delta: (rising ? "▲ " : "▼ ") + Math.abs(pc).toFixed(1) + "%",
         color: badDirection ? "var(--red)" : "var(--green)",
         fillColor: badDirection ? "var(--redsoft)" : "var(--greensoft)",
         points: poly(vals, 240, 56, false),
         area: poly(vals, 240, 56, true),
+        status: t.status || "rollup",
+        asOf: t.asOf || "",
+        note: t.note || "",
       };
     });
     const trendHtml = trendCards.length
@@ -517,6 +566,8 @@ export function mountDashboard(root, { navigate }) {
           <polyline points="${t.area}" fill="${t.fillColor}" stroke="none"></polyline>
           <polyline points="${t.points}" fill="none" stroke="${t.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></polyline>
         </svg>
+        ${macroStatusHtml(t)}
+        ${isRemittanceLabel(t.label) && isAdmin ? remittanceEditHtml(t) : ""}
       </div>`
           )
           .join("")
@@ -664,6 +715,47 @@ export function mountDashboard(root, { navigate }) {
         </div>
       </div>
     `);
+    bindRemittanceForm();
+  }
+
+  // MACRO-DASHBOARD: remittance has no verified free live-data source
+  // (Bangladesh Bank exposes none), so its trend card instead shows an
+  // admin-only inline editor (remittanceEditHtml, rendered only for the
+  // "Remittance" card when isAdmin) that PUTs the manually-maintained
+  // figure to /dashboard/trends/remittance (app/api/routers/dashboard.py)
+  // and reloads. A no-op for non-admins / the short-term tab, where the
+  // markup this queries for is never rendered.
+  function bindRemittanceForm() {
+    const form = root.querySelector("[data-remit-form]");
+    if (!form) return;
+    const input = form.querySelector(".remit-input");
+    const btn = form.querySelector(".remit-save");
+    if (!input || !btn) return;
+    btn.addEventListener("click", async () => {
+      const raw = input.value;
+      const value = Number(raw);
+      if (raw === "" || Number.isNaN(value)) {
+        input.style.borderColor = "var(--red)";
+        return;
+      }
+      input.style.borderColor = "";
+      btn.disabled = true;
+      const original = btn.textContent;
+      btn.textContent = "Saving…";
+      try {
+        await api.put("/dashboard/trends/remittance", { value });
+        if (!alive) return;
+        await load();
+      } catch (err) {
+        if (!alive) return;
+        btn.textContent = "Failed";
+        setTimeout(() => {
+          if (!alive) return;
+          btn.textContent = original;
+          btn.disabled = false;
+        }, 1500);
+      }
+    });
   }
 
   function sameDay(a, b) {

@@ -30,6 +30,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query
+from pydantic import BaseModel
 
 from app.api.deps import AuthenticatedUser, get_current_user, require_admin
 from app.api.schemas.admin import (
@@ -57,9 +58,12 @@ from app.api.schemas.core import (
     TrendCardOut,
     get_risk_sections,
 )
+from app.config import get_settings
 from app.db import queries
 from app.db.connection import DictConnection, get_connection
+from app.db.settings import get_setting, set_setting
 from app.services import admin as admin_service
+from app.services import macro as macro_service
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard", "admin", "storage"])
 
@@ -341,6 +345,25 @@ _MACRO_META: dict[str, _MacroMeta] = {
     "remittance": _MacroMeta(label="Remittance", unit="USD mn", decimals=1, bad=False),
 }
 
+# Remittance: no verified free API exists (Bangladesh Bank exposes
+# none — MACRO-DASHBOARD's report). Rather than a fragile scraper, an
+# admin types in the latest published figure periodically — same
+# `settings` KV-table pattern `relevance_guidance` uses
+# (app.services.llm.prompts.RELEVANCE_GUIDANCE_KEY / app.db.settings).
+REMITTANCE_VALUE_SETTING_KEY = "macro_remittance_manual_usd_mn"
+REMITTANCE_ASOF_SETTING_KEY = "macro_remittance_manual_as_of"
+
+
+class RemittanceUpdateBody(BaseModel):
+    """PUT /dashboard/trends/remittance body — the admin-entered manual
+    remittance figure (USD mn). `as_of` is a free-text label (e.g. a
+    month name) describing which published figure this is; defaults to
+    today's date if not given.
+    """
+
+    value: float
+    as_of: str | None = None
+
 
 def _month_start(d: date) -> date:
     return d.replace(day=1)
@@ -359,6 +382,8 @@ def dashboard_trends(
     since_month = _add_months(_month_start(today), -11)
     month_list = [_add_months(since_month, i) for i in range(12)]
 
+    settings = get_settings()
+
     with get_connection() as conn:
         trend_cards = []
         for indicator, meta in _MACRO_META.items():
@@ -368,8 +393,71 @@ def dashboard_trends(
             ).fetchall()
             by_month = {r["month"]: float(r["value"]) for r in rows}
             vals = [by_month.get(m, 0.0) for m in month_list]
+
+            # MACRO-DASHBOARD: layer a real live (or admin-manual, for
+            # remittance) figure onto the CURRENT month's value only —
+            # historical months keep reading whatever's in
+            # macro_indicator_values (unpopulated today, hence this
+            # section previously always showing zero). A live/manual
+            # source only ever REPLACES the last element of `vals`; it
+            # never fabricates the other 11 months. Every fetch_* call
+            # is cached + never raises (app.services.macro), so a downed
+            # external API degrades to "rollup" (i.e. today's zero),
+            # never a 500.
+            status = "rollup"
+            as_of: str | None = None
+            note: str | None = None
+
+            if indicator == "taka_usd":
+                live = macro_service.fetch_usd_bdt()
+                if live is not None:
+                    vals[-1] = live.value
+                    status, as_of = "live", live.fetched_at.isoformat()
+                    note = "Live from open.er-api.com (USD → BDT)."
+                else:
+                    note = "Live fetch unavailable right now — showing the last known figure."
+            elif indicator == "inflation":
+                live = macro_service.fetch_inflation()
+                if live is not None:
+                    vals[-1] = live.value
+                    status, as_of = "live", live.fetched_at.isoformat()
+                    note = "Live from World Bank CPI (annual data, ~1yr publication lag)."
+                else:
+                    note = "Live fetch unavailable right now — showing the last known figure."
+            elif indicator == "brent_crude":
+                if not settings.oilpriceapi_key:
+                    status = "unconfigured"
+                    note = "Needs an oilpriceapi.com API key (Settings.oilpriceapi_key) — not yet configured."
+                else:
+                    live = macro_service.fetch_brent(settings.oilpriceapi_key)
+                    if live is not None:
+                        vals[-1] = live.value
+                        status, as_of = "live", live.fetched_at.isoformat()
+                        note = "Live from oilpriceapi.com."
+                    else:
+                        note = "Live fetch unavailable right now — showing the last known figure."
+            elif indicator == "remittance":
+                manual_raw = get_setting(conn, REMITTANCE_VALUE_SETTING_KEY, default="")
+                if manual_raw.strip():
+                    try:
+                        vals[-1] = float(manual_raw)
+                        status = "manual"
+                        as_of = get_setting(conn, REMITTANCE_ASOF_SETTING_KEY, default="") or None
+                    except ValueError:
+                        pass
+                note = "Manually maintained by an analyst (no free live remittance API exists) — not a live feed."
+
             trend_cards.append(
-                TrendCardOut(label=meta.label, unit=meta.unit, vals=vals, bad=meta.bad, decimals=meta.decimals)
+                TrendCardOut(
+                    label=meta.label,
+                    unit=meta.unit,
+                    vals=vals,
+                    bad=meta.bad,
+                    decimals=meta.decimals,
+                    status=status,
+                    asOf=as_of,
+                    note=note,
+                )
             )
 
         section_rows = conn.execute(
@@ -397,7 +485,20 @@ def dashboard_trends(
             for theme in top_themes
         ]
 
-        standing_raw = queries.standing_themes(conn, since_month, min_consecutive_months=9)
+        # MACRO-DASHBOARD: adaptive threshold. The prior hardcoded 9 could
+        # never be satisfied with under 9 months of real rollup history
+        # (e.g. 2 months into deployment, "standing" permanently empty).
+        # Instead require a theme to appear in a strict MAJORITY of the
+        # months that actually have any theme data in this 12-month
+        # window (not a fixed 12), with a floor of 2 so one single
+        # month's data can never alone qualify as "standing" and become
+        # noise on day 1. This scales up on its own as history
+        # accumulates: 2 available months -> needs 2; 9 -> needs 5;
+        # the full 12-month window -> needs 7 (still well under the old
+        # fixed 9, since a strict majority of 12 is 7, not 9).
+        available_months = len({r["month"] for r in theme_rows})
+        standing_threshold = max(2, available_months // 2 + 1)
+        standing_raw = queries.standing_themes(conn, since_month, min_consecutive_months=standing_threshold)
         standing = []
         for row in standing_raw[:6]:
             theme = row["theme"]
@@ -460,3 +561,23 @@ def dashboard_trends(
         relMixTrend=rel_mix_trend,
         topSources=top_sources_12mo,
     )
+
+
+@router.put("/trends/remittance")
+def set_remittance(
+    body: RemittanceUpdateBody, admin: AuthenticatedUser = Depends(require_admin)
+) -> dict[str, object]:
+    """Admin-only: set the manually-maintained remittance figure (USD
+    mn) the "Remittance" trend card overlays onto the current month —
+    see this module's REMITTANCE_VALUE_SETTING_KEY docstring above for
+    why this is a manual entry rather than a live fetch (no verified
+    free Bangladesh remittance API exists). Gated by `require_admin`
+    like every other write route in this file (storage/purge/export
+    above), unlike the read-only `/today` and `/trends` routes which
+    only require a session.
+    """
+    as_of = body.as_of or _today_dhaka().isoformat()
+    with get_connection() as conn:
+        set_setting(conn, REMITTANCE_VALUE_SETTING_KEY, str(body.value))
+        set_setting(conn, REMITTANCE_ASOF_SETTING_KEY, as_of)
+    return {"value": body.value, "asOf": as_of}
