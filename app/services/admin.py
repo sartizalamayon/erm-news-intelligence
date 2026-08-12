@@ -92,6 +92,12 @@ def _source_row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
         "enabled": row["enabled"],
         "config": dict(row["config"]) if row.get("config") else {},
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+        # Internal only — not part of SourceOut (app/api/schemas/admin.py),
+        # pydantic silently drops unknown kwargs (default `extra="ignore"`).
+        # Carried through so probe_source/diagnose_source below can key
+        # off the stable registry correlation without a second query.
+        # See migrations/0014_sources_registry_key.sql.
+        "registry_key": row.get("registry_key"),
     }
 
 
@@ -189,9 +195,13 @@ def toggle_source(conn: DictConnection, source_id: int) -> dict[str, Any] | None
 # ── Live probes: test / diagnose, against the app.sources plugin layer ──
 # Read-only use of app.sources.registry (P1-INGEST's territory, not
 # edited here) — the registry maps a plugin `key` to a `NewsSource`
-# class; this maps the admin `sources` table's `name` column to that
-# same class via its `display_name`, the convention every concrete
-# source module already follows (see e.g. app/sources/prothom_alo.py).
+# class. This used to match the admin `sources` table's `name` column
+# against that class's `display_name`, which broke the moment an admin
+# renamed a source (PATCH /sources/{id} lets `name` drift freely, and
+# the display-name match would then find nothing). Fixed: match on the
+# stable `sources.registry_key` column instead (backfilled and kept in
+# sync by migrations/0014_sources_registry_key.sql) — a rename no
+# longer touches this lookup at all.
 
 _registry_loaded = False
 
@@ -205,14 +215,13 @@ def _ensure_registry_loaded() -> None:
         _registry_loaded = True
 
 
-def _plugin_for_source_name(name: str) -> Any | None:
+def _plugin_for_registry_key(registry_key: str | None) -> Any | None:
+    if not registry_key:
+        return None
     from app.sources.registry import all_sources
 
     _ensure_registry_loaded()
-    for source_cls in all_sources().values():
-        if getattr(source_cls, "display_name", source_cls.key) == name:
-            return source_cls
-    return None
+    return all_sources().get(registry_key)
 
 
 def _today_dhaka() -> date:
@@ -230,7 +239,7 @@ def probe_source(conn: DictConnection, source_id: int) -> dict[str, Any] | None:
     if row is None:
         return None
     method_label = row["methods"][0] if row["methods"] else ""
-    source_cls = _plugin_for_source_name(row["name"])
+    source_cls = _plugin_for_registry_key(row["registry_key"])
     if source_cls is None:
         return {
             "source_id": source_id,
@@ -273,7 +282,7 @@ def diagnose_source(conn: DictConnection, source_id: int) -> dict[str, Any] | No
     row = get_source(conn, source_id)
     if row is None:
         return None
-    source_cls = _plugin_for_source_name(row["name"])
+    source_cls = _plugin_for_registry_key(row["registry_key"])
     if source_cls is None:
         return {
             "source_id": source_id,

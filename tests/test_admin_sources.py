@@ -6,9 +6,13 @@ flow) for a representative slice, following tests/test_auth_api.py's
 Tier-1/Tier-2 split.
 
 Probe/diagnose tests never touch the real `app.sources` plugin registry
-or the network — `app.services.admin._plugin_for_source_name` is
+or the network — `app.services.admin._plugin_for_registry_key` is
 monkeypatched to return a small fake `NewsSource` per test, exercising
-admin.py's own dispatch/aggregation logic in isolation.
+admin.py's own dispatch/aggregation logic in isolation. (Renamed from
+`_plugin_for_source_name`: probe/diagnose now correlate to the plugin
+registry via the stable `sources.registry_key` column, migrations/
+0014_sources_registry_key.sql, not the admin-editable `name` column —
+a rename in the admin UI used to silently break this lookup.)
 """
 
 from __future__ import annotations
@@ -135,7 +139,7 @@ def test_probe_source_unknown_id_returns_none() -> None:
 
 
 def test_probe_source_no_registered_plugin_reports_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(admin_service, "_plugin_for_source_name", lambda name: None)
+    monkeypatch.setattr(admin_service, "_plugin_for_registry_key", lambda key: None)
     with migrated_schema() as conn:
         created = admin_service.create_source(conn, name="Unmapped Outlet", methods=["rss"])
         result = admin_service.probe_source(conn, created["id"])
@@ -152,7 +156,7 @@ def test_probe_source_counts_fetched_and_today(monkeypatch: pytest.MonkeyPatch) 
         FeedItem(url="https://x.test/3", title="C", source_key="fake_outlet", published_at=None),
     ]
     fake_cls = lambda items=items: _FakeSource(items=items)  # noqa: E731
-    monkeypatch.setattr(admin_service, "_plugin_for_source_name", lambda name: fake_cls)
+    monkeypatch.setattr(admin_service, "_plugin_for_registry_key", lambda key: fake_cls)
     with migrated_schema() as conn:
         created = admin_service.create_source(conn, name="Sitemap Outlet", methods=["sitemap"])
         result = admin_service.probe_source(conn, created["id"])
@@ -164,7 +168,7 @@ def test_probe_source_counts_fetched_and_today(monkeypatch: pytest.MonkeyPatch) 
 
 def test_probe_source_fetch_failure_reports_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_cls = lambda: _FakeSource(feed_error=SourceError("boom", source="fake_outlet"))  # noqa: E731
-    monkeypatch.setattr(admin_service, "_plugin_for_source_name", lambda name: fake_cls)
+    monkeypatch.setattr(admin_service, "_plugin_for_registry_key", lambda key: fake_cls)
     with migrated_schema() as conn:
         created = admin_service.create_source(conn, name="Flaky Outlet", methods=["api"])
         result = admin_service.probe_source(conn, created["id"])
@@ -175,7 +179,7 @@ def test_probe_source_fetch_failure_reports_not_ok(monkeypatch: pytest.MonkeyPat
 def test_diagnose_source_reports_each_check(monkeypatch: pytest.MonkeyPatch) -> None:
     items = [FeedItem(url="https://x.test/1", title="A", source_key="fake_outlet", published_at=_now_dhaka())]
     fake_cls = lambda: _FakeSource(items=items, body_text="full article text")  # noqa: E731
-    monkeypatch.setattr(admin_service, "_plugin_for_source_name", lambda name: fake_cls)
+    monkeypatch.setattr(admin_service, "_plugin_for_registry_key", lambda key: fake_cls)
     with migrated_schema() as conn:
         created = admin_service.create_source(conn, name="Healthy Outlet", methods=["rss"])
         result = admin_service.diagnose_source(conn, created["id"])
@@ -188,12 +192,52 @@ def test_diagnose_source_reports_each_check(monkeypatch: pytest.MonkeyPatch) -> 
 def test_diagnose_source_no_publish_date_flags_date_parse_false(monkeypatch: pytest.MonkeyPatch) -> None:
     items = [FeedItem(url="https://x.test/1", title="A", source_key="fake_outlet", published_at=None)]
     fake_cls = lambda: _FakeSource(items=items)  # noqa: E731
-    monkeypatch.setattr(admin_service, "_plugin_for_source_name", lambda name: fake_cls)
+    monkeypatch.setattr(admin_service, "_plugin_for_registry_key", lambda key: fake_cls)
     with migrated_schema() as conn:
         created = admin_service.create_source(conn, name="Dateless Outlet", methods=["rss"])
         result = admin_service.diagnose_source(conn, created["id"])
         assert result["date_parse_ok"] is False
         assert "date parse" in result["detail"]
+
+
+def test_probe_source_survives_a_rename_because_it_keys_off_registry_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bug fix regression test: probe/diagnose used to match the admin
+    `sources.name` column against the registry plugin's `display_name`
+    (app.services.admin._plugin_for_source_name, now removed) — renaming
+    a source via PATCH /sources/{id} changed `name` without touching the
+    code-side registry, so the very next probe/diagnose call found no
+    match. Fixed: correlate via the stable `sources.registry_key`
+    column instead (migrations/0014_sources_registry_key.sql), set once
+    and never touched by a name edit.
+    """
+    items = [FeedItem(url="https://x.test/1", title="A", source_key="fake_outlet", published_at=_now_dhaka())]
+    fake_cls = lambda: _FakeSource(items=items)  # noqa: E731
+    seen_keys: list[str | None] = []
+
+    def _fake_lookup(registry_key: str | None):
+        seen_keys.append(registry_key)
+        return fake_cls if registry_key == "fake_registry_key" else None
+
+    monkeypatch.setattr(admin_service, "_plugin_for_registry_key", _fake_lookup)
+    with migrated_schema() as conn:
+        created = admin_service.create_source(conn, name="Old Display Name", methods=["rss"])
+        conn.execute("UPDATE sources SET registry_key = %s WHERE id = %s", ("fake_registry_key", created["id"]))
+        conn.commit()
+
+        before = admin_service.probe_source(conn, created["id"])
+        assert before is not None
+        assert before["ok"] is True
+        assert before["fetched"] == 1
+
+        renamed = admin_service.update_source(conn, created["id"], name="Totally New Display Name")
+        assert renamed is not None
+        assert renamed["name"] == "Totally New Display Name"
+
+        after = admin_service.probe_source(conn, created["id"])
+        assert after is not None
+        assert after["ok"] is True
+        assert after["fetched"] == 1
+        assert seen_keys == ["fake_registry_key", "fake_registry_key"]
 
 
 # ── Router-level: 404s and the admin-session cookie flow ─────────────────

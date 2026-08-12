@@ -239,6 +239,42 @@ def write_items(conn: DictConnection, source_result: SourceResult, items: list[F
     return source_result
 
 
+def _filter_enabled(conn: DictConnection, source_classes: dict[str, type[NewsSource]]) -> dict[str, type[NewsSource]]:
+    """Bug fix (P1-INGEST/ADMIN-API reconciliation audit): the Sources
+    admin screen's own copy says "Collection runs every enabled method
+    per source" -- until this function existed, that was false. Nothing
+    upstream of this ever consulted `sources.enabled`
+    (migrations/0002_reference_tables.sql); `run_collection` fetched
+    from the full code registry regardless of what an admin had
+    disabled via PATCH/toggle `/sources/{id}`.
+
+    Excludes any `source_classes` entry whose registry key is marked
+    `enabled = FALSE` in the DB `sources` table, correlated via the
+    stable `sources.registry_key` column (migrations/
+    0014_sources_registry_key.sql) -- never `sources.name`, which is
+    admin-editable and would silently stop matching the instant someone
+    renames a source (the companion bug this same migration fixes for
+    test/diagnose, app.services.admin._plugin_for_registry_key).
+
+    A registry key with NO corresponding `sources` row (or a `sources`
+    row whose `registry_key` is still NULL -- migrations/0014's own
+    docstring: 6 of 51 seeded rows have no ported plugin) is left
+    untouched: silence from the DB is not a disable vote. This also
+    keeps a `conn` double with an empty/unpopulated `sources` table
+    (test doubles, a freshly migrated test schema) a no-op, by
+    construction, without special-casing tests here.
+    """
+    disabled = {
+        row["registry_key"]
+        for row in conn.execute(
+            "SELECT registry_key FROM sources WHERE registry_key IS NOT NULL AND enabled = FALSE"
+        ).fetchall()
+    }
+    if not disabled:
+        return source_classes
+    return {key: cls for key, cls in source_classes.items() if key not in disabled}
+
+
 def _start_run(conn: DictConnection, *, trigger: str) -> int:
     """Insert the `runs` row for this collection run and commit
     IMMEDIATELY — RT-1's whole point is that a crash one line later must
@@ -317,6 +353,14 @@ def run_collection(
     (speed-techniques.md §4 point 6). Only the run-lifecycle rows above
     are deliberately committed early and separately, because their
     entire purpose is to survive a crash that rolls the rest back.
+
+    When `conn` is given, the set of sources actually fetched is also
+    filtered down to those the DB `sources` table marks enabled (see
+    `_filter_enabled`) — applied whether `source_classes` was passed
+    explicitly (e.g. `app.batch.run_daily.main()`, which pre-loads the
+    full registry) or left `None` (defaulting to the full registry
+    here). `conn=None` skips this — there's no `sources` table to
+    consult without a DB, so fetch-only runs stay unfiltered.
     """
     start = time.monotonic()
     run_id: int | None = None
@@ -326,7 +370,13 @@ def run_collection(
     run_result = CollectionRunResult()
     details: dict[str, Any] = {}
     try:
-        fetched = fetch_all(source_classes, max_workers=max_workers)
+        effective_source_classes = source_classes
+        if conn is not None:
+            if effective_source_classes is None:
+                load_all()
+                effective_source_classes = all_sources()
+            effective_source_classes = _filter_enabled(conn, effective_source_classes)
+        fetched = fetch_all(effective_source_classes, max_workers=max_workers)
         day = today_dhaka()
 
         for source_result, items in fetched.values():

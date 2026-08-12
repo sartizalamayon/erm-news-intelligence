@@ -3,6 +3,13 @@ isolation (GATE 2: zero unhandled exceptions), and the dedup-on-insert
 write path. Uses hand-rolled FAKE `NewsSource` subclasses (never the 21
 real, network-touching ones) and a FAKE `queries` module stand-in (never
 a real DB connection) — fully deterministic, no network, no DB.
+
+One exception, at the bottom: a `pg_available()`-gated test proving
+`_filter_enabled`'s DB `sources.enabled` exclusion against a real,
+freshly migrated Postgres schema (app.db.testing.migrated_schema), not
+just a hand-rolled conn double — still zero network (the fake
+NewsSource subclasses above never touch the network either way), just
+a real DB round trip for the one query `_filter_enabled` issues.
 """
 
 from __future__ import annotations
@@ -11,6 +18,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+from app.db.testing import migrated_schema, pg_available
 from app.errors import SourceFetchError
 from app.services import collector
 from app.sources.base import FeedItem, FetchedArticle, NewsSource
@@ -123,11 +131,23 @@ def fake_queries(monkeypatch):
 
 
 class _FakeCursor:
-    def __init__(self, row: dict | None) -> None:
+    def __init__(self, row: dict | None, rows: list[dict] | None = None) -> None:
         self._row = row
+        # Only `_filter_enabled`'s "SELECT registry_key FROM sources
+        # WHERE ... enabled = FALSE" query calls `.fetchall()` (the
+        # `runs`-table INSERT/UPDATE branches below only ever call
+        # `.fetchone()`); FakeConn's catch-all falls through to
+        # `_FakeCursor(None)`, so an empty default here means "the DB
+        # has no opinion" -- no source_classes entry gets excluded,
+        # which is exactly right for a conn double with no real
+        # `sources` table behind it.
+        self._rows = rows if rows is not None else []
 
     def fetchone(self) -> dict | None:
         return self._row
+
+    def fetchall(self) -> list[dict]:
+        return self._rows
 
 
 class FakeConn:
@@ -362,3 +382,107 @@ def _conn() -> FakeConn:
     run_collection()'s own direct `runs`-table SQL (FakeConn, RT-1).
     """
     return FakeConn()
+
+
+# ── _filter_enabled: bug fix, DB `sources.enabled` actually excludes ────
+# a source from the fetch set (previously nothing checked it at all —
+# see collector._filter_enabled's own docstring for the full writeup).
+
+
+class _StubSourcesConn:
+    """Just enough of `DictConnection` for `_filter_enabled`'s one query
+    — never touches the `runs` table, so it's deliberately NOT a
+    `FakeConn` (keeps this test from depending on run-lifecycle
+    plumbing it has nothing to do with).
+    """
+
+    def __init__(self, disabled_registry_keys: set[str]) -> None:
+        self._disabled = disabled_registry_keys
+
+    def execute(self, sql: str, params: object = None) -> _FakeCursor:
+        return _FakeCursor(None, rows=[{"registry_key": k} for k in self._disabled])
+
+
+def test_filter_enabled_excludes_only_keys_the_db_marks_disabled() -> None:
+    classes = {"ok_source": OkSource, "empty_source": EmptySource, "failing_source": FailingSource}
+    filtered = collector._filter_enabled(_StubSourcesConn({"empty_source"}), classes)
+    assert set(filtered) == {"ok_source", "failing_source"}
+
+
+def test_filter_enabled_is_a_noop_when_nothing_is_disabled() -> None:
+    classes = {"ok_source": OkSource, "empty_source": EmptySource}
+    filtered = collector._filter_enabled(_StubSourcesConn(set()), classes)
+    assert filtered == classes
+
+
+def test_filter_enabled_leaves_untracked_registry_keys_alone() -> None:
+    """A registry key with no matching `sources` row at all (e.g. a test
+    double's conn, or a real DB where that key was never seeded) is not
+    an implicit disable — silence isn't a disable vote.
+    """
+    classes = {"ok_source": OkSource}
+    filtered = collector._filter_enabled(_StubSourcesConn({"some_other_key"}), classes)
+    assert filtered == classes
+
+
+class _FakeConnWithDisabledSources(FakeConn):
+    """FakeConn plus one disabled registry key, so
+    `run_collection`'s `_filter_enabled` call sees a non-empty result —
+    everything else (the `runs`-table INSERT/UPDATE handling) is
+    inherited unchanged from `FakeConn`.
+    """
+
+    def __init__(self, disabled_registry_keys: set[str]) -> None:
+        super().__init__()
+        self._disabled = disabled_registry_keys
+
+    def execute(self, sql: str, params: object = None) -> _FakeCursor:
+        normalized = " ".join(sql.split())
+        if normalized.startswith("SELECT registry_key FROM sources"):
+            return _FakeCursor(None, rows=[{"registry_key": k} for k in self._disabled])
+        return super().execute(sql, params)
+
+
+def test_run_collection_with_conn_applies_db_enabled_filter(fake_queries):
+    """End-to-end through `run_collection` (not just `_filter_enabled`
+    directly): a conn standing in for a real `sources` table with one
+    disabled key must exclude that source from what actually gets
+    fetched and written, while an explicitly-passed sibling with no
+    opinion recorded runs as normal.
+    """
+    conn = _FakeConnWithDisabledSources({"empty_source"})
+    sources = {"ok_source": OkSource, "empty_source": EmptySource}
+    result = collector.run_collection(conn, source_classes=sources)
+    ran_keys = {s.source_key for s in result.sources}
+    assert ran_keys == {"ok_source"}
+
+
+# ── _filter_enabled against a real, migrated Postgres schema ────────────
+# (Bug 1's actual production shape: `sources.enabled = FALSE` set via
+# the admin API, correlated by `sources.registry_key` — migrations/
+# 0014_sources_registry_key.sql — must exclude that source from a real
+# `run_collection` call, not just from a hand-rolled stub conn above.)
+
+
+@pytest.mark.skipif(not pg_available(), reason="no reachable Postgres (set TEST_DATABASE_URL)")
+def test_run_collection_excludes_a_source_disabled_via_the_real_sources_table() -> None:
+    with migrated_schema() as conn:
+        conn.execute(
+            "INSERT INTO sources (name, method, registry_key, enabled) VALUES (%s, %s, %s, %s)",
+            ("Disabled Outlet", "rss", "off_source", False),
+        )
+        conn.execute(
+            "INSERT INTO sources (name, method, registry_key, enabled) VALUES (%s, %s, %s, %s)",
+            ("Enabled Outlet", "rss", "on_source", True),
+        )
+        conn.commit()
+
+        result = collector.run_collection(
+            conn,
+            source_classes={"off_source": OkSource, "on_source": EmptySource},
+            max_workers=1,
+        )
+
+        ran_keys = {s.source_key for s in result.sources}
+        assert "on_source" in ran_keys
+        assert "off_source" not in ran_keys
