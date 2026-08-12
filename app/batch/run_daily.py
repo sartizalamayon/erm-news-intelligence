@@ -42,8 +42,10 @@ from __future__ import annotations
 from app.config import get_settings, validate_production_settings
 from app.db.connection import get_connection
 from app.db.reaper import reap_stale_runs
+from app.db.rollups import compute_rollups_for_day
 from app.logging import configure_logging, get_logger
 from app.services.collector import run_collection
+from app.sources._util import today_dhaka
 from app.sources.registry import all_sources, load_all
 
 logger = get_logger(__name__)
@@ -74,6 +76,16 @@ def main() -> int:
                     extra={"run_ids": reaped, "count": len(reaped)},
                 )
             result = run_collection(conn, source_classes=sources)
+            # DASHBOARD-ROLLUPS: fold today's collection into the current
+            # month's rollup_monthly_* rows (migrations/0007_rollups.sql)
+            # so the long-term dashboard (/dashboard/trends) has data —
+            # once per real batch run, not a separate cron. Idempotent
+            # (app.db.rollups module docstring): re-running this same
+            # batch for the same day recomputes the month from scratch
+            # and overwrites, never double-counts.
+            rollup_counts = compute_rollups_for_day(conn, today_dhaka())
+            conn.commit()
+            logger.info("rollups_updated", extra=rollup_counts)
     else:
         logger.warning(
             "batch_run_no_database_configured",
