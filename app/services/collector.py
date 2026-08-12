@@ -58,6 +58,7 @@ task cannot edit.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date
@@ -105,6 +106,14 @@ class CollectionRunResult:
     # set by run_collection. 0.0 if the caller never populated it (e.g.
     # a test that only exercises fetch_all directly).
     wall_seconds: float = 0.0
+    # ADMIN-API's manual "run collection now" trigger (app.services.admin
+    # .start_fetch_run): the `runs.id` this call created, so a caller
+    # that wants to correlate this result with the runs-table row (e.g.
+    # GET /health/runs) doesn't have to re-query for "the latest run" and
+    # risk a race against a second concurrent trigger. `None` when
+    # `conn=None` (fetch-only, no runs row exists at all) — additive
+    # field, existing callers that never read it are unaffected.
+    run_id: int | None = None
 
     @property
     def total_failed_sources(self) -> int:
@@ -177,11 +186,26 @@ def fetch_all(
     source_classes: dict[str, type[NewsSource]] | None = None,
     *,
     max_workers: int = SOURCE_PARALLELISM,
+    on_result: Callable[[str, SourceResult, list[FeedItem]], None] | None = None,
 ) -> dict[str, tuple[SourceResult, list[FeedItem]]]:
     """Tier 1 of the two-tier fan-out. `source_classes=None` loads and
     uses the full registry; pass an explicit dict (including `{}`) to
     run a subset — the mechanism `tests/test_p1_collector.py` and the
     live-measurement script both use to avoid hardcoding the registry.
+
+    `on_result`, if given, is called once per source IMMEDIATELY as that
+    source's future resolves (inside the `as_completed` loop below, in
+    the calling thread — never from a worker thread, so a callback that
+    touches a single non-thread-safe `DictConnection`, as
+    `run_collection`'s does, is safe). This is what turns "45 sources
+    fetched concurrently, nothing observable until the slowest one
+    finishes" into genuine incremental progress: `results[key]` is still
+    populated for every caller that only wants the final dict (e.g.
+    tests, the live-measurement script), but a caller that ALSO wants to
+    know as-it-happens which source just finished (ADMIN-API's manual
+    "run collection now" trigger, run_collection's `progress_cb` below)
+    no longer has to wait for every one of the ~45 futures to resolve
+    before seeing the first one.
     """
     if source_classes is None:
         load_all()
@@ -195,7 +219,10 @@ def fetch_all(
         futures = {pool.submit(_run_one_source, key, cls): key for key, cls in source_classes.items()}
         for future in as_completed(futures):
             key = futures[future]
-            results[key] = future.result()
+            source_result, items = future.result()
+            results[key] = (source_result, items)
+            if on_result is not None:
+                on_result(key, source_result, items)
     return results
 
 
@@ -334,6 +361,7 @@ def run_collection(
     source_classes: dict[str, type[NewsSource]] | None = None,
     max_workers: int = SOURCE_PARALLELISM,
     trigger: str = "scheduled",
+    progress_cb: Callable[[SourceResult], None] | None = None,
 ) -> CollectionRunResult:
     """The P1 entrypoint. `conn=None` runs fetch-only (discovery, no DB
     write, no run-tracking — there's no DB to track a run in) — used
@@ -347,12 +375,28 @@ def run_collection(
     RT-1 (docs/red-team-findings.md): before this, no run left any
     trace of having happened, succeeded, or crashed.
 
-    Article writes for the whole run still share ONE transaction
-    (committed once, at the very end, by `app.db.connection.get_connection`'s
-    `with` block in the caller) — batched, not per-row commits
-    (speed-techniques.md §4 point 6). Only the run-lifecycle rows above
-    are deliberately committed early and separately, because their
-    entire purpose is to survive a crash that rolls the rest back.
+    Per-source writes are committed as each source finishes (see below),
+    not batched into one commit at the very end — `_touch_heartbeat`'s
+    own `conn.commit()`, called once per completed source, flushes
+    whatever `write_items` inserted for that source moments earlier on
+    the same connection. What stays batched is WITHIN a source (all of
+    one source's articles in a single `write_items` call), never one
+    commit per article row (speed-techniques.md §4 point 6). Only the
+    run-lifecycle rows are otherwise committed early/separately, for the
+    same crash-survival reason `_start_run`/`_touch_heartbeat`/
+    `_finalize_run` document.
+
+    `progress_cb`, if given, is called once per source with that
+    source's final `SourceResult`, in the same place/order `_record`
+    below already processes it (i.e., real-time, via `fetch_all`'s
+    `on_result` hook — see that function's docstring) — not after the
+    whole run finishes. This is the hook ADMIN-API's manual "run
+    collection now" trigger (`app.services.admin.start_fetch_run`) uses
+    to publish genuine per-source progress ("23/45 done, and which
+    ones") to a caller polling an HTTP status endpoint while a multi-
+    minute run is still in flight, instead of the run being invisible
+    until it completes. `None` (the default) preserves every existing
+    caller's behavior exactly.
 
     When `conn` is given, the set of sources actually fetched is also
     filtered down to those the DB `sources` table marks enabled (see
@@ -367,7 +411,7 @@ def run_collection(
     if conn is not None:
         run_id = _start_run(conn, trigger=trigger)
 
-    run_result = CollectionRunResult()
+    run_result = CollectionRunResult(run_id=run_id)
     details: dict[str, Any] = {}
     try:
         effective_source_classes = source_classes
@@ -376,10 +420,9 @@ def run_collection(
                 load_all()
                 effective_source_classes = all_sources()
             effective_source_classes = _filter_enabled(conn, effective_source_classes)
-        fetched = fetch_all(effective_source_classes, max_workers=max_workers)
         day = today_dhaka()
 
-        for source_result, items in fetched.values():
+        def _record(source_result: SourceResult, items: list[FeedItem]) -> None:
             if conn is not None and items:
                 source_result = write_items(conn, source_result, items, day=day)
             run_result.sources.append(source_result)
@@ -396,6 +439,14 @@ def run_collection(
             }
             if conn is not None and run_id is not None:
                 _touch_heartbeat(conn, run_id)
+            if progress_cb is not None:
+                progress_cb(source_result)
+
+        fetch_all(
+            effective_source_classes,
+            max_workers=max_workers,
+            on_result=lambda _key, source_result, items: _record(source_result, items),
+        )
     except Exception:
         if conn is not None and run_id is not None:
             try:

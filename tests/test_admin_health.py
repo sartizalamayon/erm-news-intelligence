@@ -25,6 +25,8 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import datetime as dt
+import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -403,3 +405,238 @@ def test_router_pipeline_stage_run_and_run_all(monkeypatch: pytest.MonkeyPatch) 
             run_all = client.post("/health/pipeline/run-all")
             assert run_all.status_code == 200
             assert len(run_all.json()) == 5
+
+
+# ── Fetch (P1) trigger + live progress (BUGFIX: "Run all stages" never
+# actually fetched anything -- see app.services.admin's "Fetch (P1)
+# trigger" module section and app/api/routers/health.py's own docstring
+# for the full writeup). `app.services.collector.run_collection` itself
+# is monkeypatched in every test below -- it's already covered end-to-end
+# against fake NewsSource plugins in tests/test_p1_collector.py; what
+# THESE tests prove is the NEW wiring around it: that a request to start
+# a fetch returns immediately without blocking for the real fetch
+# duration, that progress genuinely accumulates while a fetch is still
+# "running" (not just before/after), and that the background thread's
+# own connection handling and error path work. `admin_service._fetch_state`
+# is process-global, so every test resets it first -- these tests would
+# otherwise leak state into each other (and into any other test module
+# that happens to run in the same pytest-xdist worker).
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _reset_fetch_state() -> None:
+    admin_service._fetch_state.clear()
+    admin_service._fetch_state.update(status="idle")
+
+
+def test_fetch_status_is_idle_before_any_run() -> None:
+    _reset_fetch_state()
+    status = admin_service.fetch_status()
+    assert status["status"] == "idle"
+    assert status["sources"] == []
+    assert status["completed"] == 0
+    assert status["total_sources"] == 0
+
+
+def test_start_fetch_run_returns_immediately_while_the_real_run_is_still_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact bug this mission fixes, as a direct assertion: starting
+    a fetch must not hold the caller (an HTTP request, here the direct
+    service call) hostage for the full run duration -- `start_fetch_run`
+    returns a "running" snapshot while `_fake_run_collection` below is
+    still deliberately blocked on an Event, proving the real work is
+    happening on a separate thread.
+    """
+    import app.db.connection as db_connection_module
+    import app.services.collector as collector_module
+    import app.sources.registry as registry_module
+
+    _reset_fetch_state()
+    release = threading.Event()
+    calls = []
+
+    def _fake_run_collection(conn, *, source_classes, trigger, progress_cb=None):
+        calls.append(trigger)
+        release.wait(timeout=5)
+        from app.services.collector import CollectionRunResult
+
+        return CollectionRunResult(sources=[], total_fetched=0, total_inserted=0, total_duplicate=0, run_id=7)
+
+    with migrated_schema() as conn:
+        monkeypatch.setattr(collector_module, "run_collection", _fake_run_collection)
+        monkeypatch.setattr(registry_module, "all_sources", lambda: {"fake": object})
+        monkeypatch.setattr(registry_module, "load_all", lambda: None)
+        monkeypatch.setattr(db_connection_module, "get_connection", lambda *a, **kw: contextlib.nullcontext(conn))
+
+        try:
+            snapshot = admin_service.start_fetch_run(trigger="manual")
+            assert snapshot["status"] == "running"
+            assert snapshot["trigger"] == "manual"
+            assert snapshot["started_at"] is not None
+
+            # A second trigger while the first is still running must NOT
+            # start a redundant second background run.
+            again = admin_service.start_fetch_run(trigger="manual")
+            assert again["status"] == "running"
+        finally:
+            release.set()  # let the background thread finish so it doesn't leak past the test
+            for _ in range(50):
+                if admin_service.fetch_status()["status"] != "running":
+                    break
+                time.sleep(0.05)
+
+        assert calls == ["manual"]  # only one real run_collection call, not two
+        final = admin_service.fetch_status()
+        assert final["status"] == "done"
+        assert final["run_id"] == 7
+
+
+def test_fetch_progress_cb_accumulates_sources_incrementally(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The actual live-progress mechanism (progress_cb, threaded through
+    from app.services.collector.run_collection): each source's result
+    must be visible via fetch_status() as soon as it's reported, not
+    batched up and revealed only once the whole run finishes.
+    """
+    import app.db.connection as db_connection_module
+    import app.services.collector as collector_module
+    import app.sources.registry as registry_module
+    from app.services.collector import CollectionRunResult, SourceResult
+
+    _reset_fetch_state()
+    seen_after_first_source: dict = {}
+
+    def _fake_run_collection(conn, *, source_classes, trigger, progress_cb=None):
+        first = SourceResult(source_key="a", display_name="Source A", status="ok", fetched=5, inserted=3)
+        second = SourceResult(source_key="b", display_name="Source B", status="failed", fetched=0, error="boom")
+        assert progress_cb is not None
+        progress_cb(first)
+        # Snapshot mid-run, BEFORE the second source reports in -- proves
+        # fetch_status() reflects partial progress, not an all-or-nothing
+        # final state.
+        seen_after_first_source.update(admin_service.fetch_status())
+        progress_cb(second)
+        return CollectionRunResult(
+            sources=[first, second], total_fetched=5, total_inserted=3, total_duplicate=0, run_id=11
+        )
+
+    with migrated_schema() as conn:
+        monkeypatch.setattr(collector_module, "run_collection", _fake_run_collection)
+        monkeypatch.setattr(registry_module, "all_sources", lambda: {"a": object, "b": object})
+        monkeypatch.setattr(registry_module, "load_all", lambda: None)
+        monkeypatch.setattr(db_connection_module, "get_connection", lambda *a, **kw: contextlib.nullcontext(conn))
+
+        admin_service.start_fetch_run(trigger="manual")
+        for _ in range(50):
+            if admin_service.fetch_status()["status"] != "running":
+                break
+            time.sleep(0.05)
+
+    assert seen_after_first_source["completed"] == 1
+    assert seen_after_first_source["sources"][0]["name"] == "Source A"
+    assert seen_after_first_source["status"] == "running"
+
+    final = admin_service.fetch_status()
+    assert final["status"] == "done"
+    assert final["completed"] == 2
+    assert {s["name"] for s in final["sources"]} == {"Source A", "Source B"}
+    assert final["total_inserted"] == 3
+
+
+def test_fetch_run_records_error_status_on_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.db.connection as db_connection_module
+    import app.services.collector as collector_module
+    import app.sources.registry as registry_module
+
+    _reset_fetch_state()
+
+    def _boom(conn, *, source_classes, trigger, progress_cb=None):
+        raise RuntimeError("simulated collector crash")
+
+    with migrated_schema() as conn:
+        monkeypatch.setattr(collector_module, "run_collection", _boom)
+        monkeypatch.setattr(registry_module, "all_sources", lambda: {"a": object})
+        monkeypatch.setattr(registry_module, "load_all", lambda: None)
+        monkeypatch.setattr(db_connection_module, "get_connection", lambda *a, **kw: contextlib.nullcontext(conn))
+
+        admin_service.start_fetch_run(trigger="manual")
+        for _ in range(50):
+            if admin_service.fetch_status()["status"] == "running":
+                time.sleep(0.05)
+            else:
+                break
+
+    final = admin_service.fetch_status()
+    assert final["status"] == "error"
+    assert "simulated collector crash" in final["error"]
+
+
+def test_router_fetch_run_and_status_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.db.connection as db_connection_module
+    import app.services.collector as collector_module
+    import app.sources.registry as registry_module
+    from app.services.collector import CollectionRunResult
+
+    _reset_fetch_state()
+    release = threading.Event()
+
+    def _fake_run_collection(conn, *, source_classes, trigger, progress_cb=None):
+        release.wait(timeout=5)
+        return CollectionRunResult(sources=[], total_fetched=0, total_inserted=0, total_duplicate=0, run_id=42)
+
+    with migrated_schema() as conn:
+        monkeypatch.setattr(collector_module, "run_collection", _fake_run_collection)
+        monkeypatch.setattr(registry_module, "all_sources", lambda: {"a": object})
+        monkeypatch.setattr(registry_module, "load_all", lambda: None)
+        monkeypatch.setattr(db_connection_module, "get_connection", lambda *a, **kw: contextlib.nullcontext(conn))
+
+        app = create_app()
+        app.dependency_overrides[get_current_user] = lambda: ADMIN
+        try:
+            with TestClient(app) as client:
+                started = client.post("/health/pipeline/fetch/run")
+                assert started.status_code == 200
+                assert started.json()["status"] == "running"
+                assert started.json()["trigger"] == "manual"
+
+                polled = client.get("/health/pipeline/fetch/status")
+                assert polled.status_code == 200
+                assert polled.json()["status"] == "running"
+        finally:
+            release.set()
+            for _ in range(50):
+                if admin_service.fetch_status()["status"] != "running":
+                    break
+                time.sleep(0.05)
+
+        with TestClient(app) as client:
+            done = client.get("/health/pipeline/fetch/status")
+            assert done.json()["status"] == "done"
+            assert done.json()["run_id"] == 42
+
+
+def test_router_match_run_dispatches_to_rematch_today(monkeypatch: pytest.MonkeyPatch) -> None:
+    with migrated_schema() as conn:
+        import app.api.routers.health as health_router_module
+
+        admin_service.create_keyword(conn, term_en="flood")
+        insert_article(
+            conn,
+            url="https://x.test/flood-story",
+            url_norm="https://x.test/flood-story",
+            source="X",
+            title="Major flood hits the region",
+            day=dt.date.today(),
+        )
+        conn.commit()
+
+        monkeypatch.setattr(health_router_module, "get_connection", lambda: contextlib.nullcontext(conn))
+
+        app = create_app()
+        app.dependency_overrides[get_current_user] = lambda: ADMIN
+        with TestClient(app) as client:
+            resp = client.post("/health/pipeline/match/run")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["matched"] == 1
+            assert body["total"] == 1

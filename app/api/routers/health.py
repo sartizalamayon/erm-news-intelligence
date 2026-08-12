@@ -33,6 +33,26 @@ may not add one); each stage-run request blocks until that stage
 finishes, which is a real limitation for the judge/topic stages against
 a large batch. Flagged in this task's report, not solved here.
 
+BUGFIX (the "Run all stages" bug report): those 5 stages above are
+enrichment ONLY — they never fetch anything new. Before this fix, there
+was ZERO HTTP endpoint anywhere in this codebase that called
+`app.services.collector.run_collection` (the real P1 fetch layer); the
+only caller was `app.batch.run_daily.main`, itself only ever invoked by
+the daily GitHub Actions cron. `POST /health/pipeline/fetch/run` /
+`GET /health/pipeline/fetch/status` below close that gap: a real,
+admin-triggered "fetch today's news now", backgrounded (a full run
+spans ~45 sources over a few minutes — see
+`app.services.admin`'s "Fetch (P1) trigger" module section for the full
+threading/progress-tracking design) so the request returns immediately
+and progress is genuinely pollable while it runs, not a fake instant
+"done". `POST /health/pipeline/match/run` runs P2 (keyword matching,
+`app.services.matching` via `app.services.admin.run_match_phase` —
+already existed as `rematch_today`/`POST /keywords/rematch`, exposed
+here too so it's selectable as its own phase alongside fetch and the 5
+enrichment stages) — confirmed genuinely separate from P1 by reading
+`run_collection`'s own docstring, which is explicit that it never
+computes `sections`/`keywords`/`review_status`.
+
 Every route is gated by `require_admin` (app.api.deps) — EXCEPT
 `GET /health/ready` below, added by the DEPLOY mission (Render deploy
 config, docs/deployment.md): a readiness probe Render's own health
@@ -48,8 +68,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.deps import AuthenticatedUser, require_admin
 from app.api.schemas.admin import (
+    FetchRunStatusOut,
     HealthOverviewOut,
     HealthSourceRowOut,
+    RematchResult,
     RunRowOut,
     SourceDiagnoseResult,
     SourceTestResult,
@@ -155,3 +177,42 @@ def run_all(admin: AuthenticatedUser = Depends(require_admin)) -> list[StageRunR
     with get_connection() as conn:
         results = admin_service.run_pipeline_all(conn)
     return [StageRunResult(**r) for r in results]
+
+
+@router.post("/pipeline/fetch/run", response_model=FetchRunStatusOut)
+def run_fetch(admin: AuthenticatedUser = Depends(require_admin)) -> FetchRunStatusOut:
+    """Starts a real P1 collection run for today (`trigger="manual"`) in
+    a background thread and returns immediately — see
+    `app.services.admin.start_fetch_run`'s docstring. Never blocks for
+    the full multi-minute fetch duration; poll `GET
+    /pipeline/fetch/status` for live progress. Safe to call while a
+    fetch is already running — returns that run's current snapshot
+    rather than starting a redundant second one.
+    """
+    return FetchRunStatusOut(**admin_service.start_fetch_run(trigger="manual"))
+
+
+@router.get("/pipeline/fetch/status", response_model=FetchRunStatusOut)
+def fetch_status(admin: AuthenticatedUser = Depends(require_admin)) -> FetchRunStatusOut:
+    """Live snapshot of the most recent manual fetch trigger (in-process
+    state, not a DB query — see `app.services.admin.fetch_status`'s
+    docstring for why). `status="idle"` with an empty `sources` list if
+    no fetch has run yet in this process.
+    """
+    return FetchRunStatusOut(**admin_service.fetch_status())
+
+
+@router.post("/pipeline/match/run", response_model=RematchResult)
+def run_match(admin: AuthenticatedUser = Depends(require_admin)) -> RematchResult:
+    """Runs P2 (keyword matching) against today's already-fetched,
+    not-yet-decided articles — `app.services.admin.run_match_phase`,
+    which is `rematch_today` under a phase-consistent name (also reachable
+    as `POST /keywords/rematch`; this is the same operation, exposed here
+    too so it is selectable as its own phase alongside fetch and the 5
+    enrichment stages on the dashboard's "Run collection" panel).
+    Synchronous — matching is a fast, local regex pass with no network
+    call, unlike fetch.
+    """
+    with get_connection() as conn:
+        result = admin_service.run_match_phase(conn)
+    return RematchResult(**result)

@@ -31,6 +31,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import threading
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -1447,6 +1448,214 @@ def run_pipeline_all(conn: DictConnection) -> list[dict[str, str]]:
         except Exception as exc:  # noqa: BLE001 - deliberate per-stage isolation, see docstring
             results.append({"stage": stage_key, "status": "error", "detail": str(exc)})
     return results
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Fetch (P1) trigger — "run collection now" (BUGFIX: "Run all stages"
+# only ever ran the 5 LLM enrichment stages — nothing anywhere called
+# app.services.collector.run_collection except app.batch.run_daily.main,
+# itself only ever invoked by the daily GitHub Actions cron. See that
+# module's own docstring: trigger="scheduled" is "the only real
+# entrypoint... 'manual' [is] the schema's own default, meant for a
+# future admin-triggered 'run now' button this module doesn't
+# implement." This is that button's service layer.)
+#
+# Date selection is deliberately NOT exposed anywhere in this surface
+# (owner decision, not re-litigated here): `run_collection` always
+# fetches for "today" (`app.sources._util.today_dhaka()`, Dhaka-local) —
+# only 17 of 45 sources could ever honor a specific past date; the rest
+# are live current-only feeds, so a date picker would silently lie for
+# the other 28.
+#
+# A real P1 fetch takes low minutes across ~45 sources
+# (README-rebuild.md: "~2.5-minute full 45-source collection phase") —
+# far too long to hold an HTTP request open for. Runs in a background
+# `threading.Thread` instead: this is a single-worker free-tier deploy
+# (mission constraint — no new dependency, no real job queue), so a
+# plain daemon thread sharing the same process's memory is both the
+# simplest mechanism available and sufficient. The in-process
+# `_fetch_state` dict below is visible to every request handler in that
+# same single worker without needing a pubsub/queue of its own — it
+# would NOT be sufficient across multiple worker processes, which this
+# deploy does not run (flagged in this task's report as the thing that
+# would need to change first).
+#
+# `_fetch_state` is intentionally a single global slot, not a dict keyed
+# by run id: only one manual fetch makes sense in flight at a time on a
+# single-worker deploy (a second concurrent 45-source fetch would just
+# contend with the first over the same `app.sources.http.
+# GLOBAL_SEMAPHORE` and DB connection count for no benefit) —
+# `start_fetch_run` returns the existing in-progress snapshot unchanged,
+# rather than starting a second one stacked behind it, if one is already
+# running.
+#
+# Real per-source progress while the fetch is running comes from
+# `app.services.collector.run_collection`'s new `progress_cb` parameter
+# (this task's one addition to that module's internals — see its and
+# `fetch_all`'s docstrings for the full reasoning). The short version:
+# `fetch_all`'s old behavior blocked until EVERY source's discovery had
+# finished before returning anything, so even the existing
+# `runs.heartbeat_at`/`runs.details` RT-1 infrastructure had nothing to
+# report until the whole ~2.5-minute fan-out was already over —
+# "instant done" all over again, just with a multi-minute wait first
+# instead of a zero-second one. `progress_cb` fires per-source, as each
+# one's fetch+write actually completes (interleaved with the other
+# sources still in flight), in real time — the mechanism that makes
+# `fetch_status()` below genuinely live rather than "pending" then
+# instantly "done".
+
+_fetch_lock = threading.Lock()
+_fetch_state: dict[str, Any] = {"status": "idle"}
+
+
+def _fetch_source_progress_entry(source_result: Any) -> dict[str, Any]:
+    return {
+        "name": source_result.display_name,
+        "status": source_result.status,
+        "fetched": source_result.fetched,
+        "inserted": source_result.inserted,
+        "duplicate": source_result.duplicate,
+        "error": source_result.error,
+    }
+
+
+def _run_fetch_in_background(trigger: str) -> None:
+    """Runs on the background thread `start_fetch_run` spawns — never on
+    the request thread. Opens its OWN connection
+    (`app.db.connection.get_connection`): the HTTP request that
+    triggered this has already returned (that's the whole point) by the
+    time most of this executes, so it cannot reuse that request's
+    connection. Updates the module-level `_fetch_state` under
+    `_fetch_lock` as `run_collection`'s `progress_cb` fires per source,
+    then once more at the very end (or on failure).
+
+    `app.services.collector._filter_enabled` (a "private", underscore
+    module function) is called directly here rather than duplicating its
+    one-query logic — this file already reads collector.py's public
+    surface elsewhere; reusing this one existing helper for an accurate
+    "N sources will actually run today" denominator (excluding
+    admin-disabled sources up front) is simpler and less risky than a
+    second, slightly-different COUNT query that could drift out of sync
+    with it.
+    """
+    from app.db.connection import get_connection
+    from app.services.collector import _filter_enabled, run_collection
+    from app.sources.registry import all_sources, load_all
+
+    def _on_progress(source_result: Any) -> None:
+        with _fetch_lock:
+            if _fetch_state.get("status") == "running":
+                _fetch_state.setdefault("sources", []).append(_fetch_source_progress_entry(source_result))
+
+    try:
+        load_all()
+        registry = all_sources()
+        with get_connection() as conn:
+            effective = _filter_enabled(conn, registry)
+            with _fetch_lock:
+                if _fetch_state.get("status") == "running":
+                    _fetch_state["total_sources"] = len(effective)
+            result = run_collection(conn, source_classes=effective, trigger=trigger, progress_cb=_on_progress)
+        with _fetch_lock:
+            _fetch_state.update(
+                status="done",
+                run_id=result.run_id,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                total_fetched=result.total_fetched,
+                total_inserted=result.total_inserted,
+                total_duplicate=result.total_duplicate,
+            )
+    except Exception as exc:  # noqa: BLE001 - background thread: must never raise into the void, see docstring
+        with _fetch_lock:
+            _fetch_state.update(
+                status="error",
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                error=str(exc),
+            )
+
+
+def start_fetch_run(*, trigger: str = "manual") -> dict[str, Any]:
+    """`POST /health/pipeline/fetch/run`'s service function. Starts a
+    real `app.services.collector.run_collection` for TODAY
+    (Dhaka-local — see module-section docstring on why there is no date
+    parameter) in a background thread and returns immediately with a
+    "running" snapshot — never blocks the request for the full fetch
+    duration. Returns the existing in-progress snapshot unchanged,
+    without starting a second run, if one is already running.
+    """
+    with _fetch_lock:
+        already_running = _fetch_state.get("status") == "running"
+        if not already_running:
+            _fetch_state.clear()
+            _fetch_state.update(
+                status="running",
+                run_id=None,
+                trigger=trigger,
+                started_at=datetime.now(timezone.utc).isoformat(),
+                finished_at=None,
+                total_sources=0,
+                sources=[],
+                total_fetched=0,
+                total_inserted=0,
+                total_duplicate=0,
+                error=None,
+            )
+    # `fetch_status()` acquires `_fetch_lock` itself and MUST be called
+    # after the `with` block above has released it — `threading.Lock` is
+    # not reentrant, so calling it from inside that block (a real bug
+    # caught by this task's own tests) self-deadlocks the very next
+    # "fetch already running" request.
+    if not already_running:
+        thread = threading.Thread(target=_run_fetch_in_background, args=(trigger,), daemon=True)
+        thread.start()
+    return fetch_status()
+
+
+def fetch_status() -> dict[str, Any]:
+    """`GET /health/pipeline/fetch/status`'s service function — a live
+    read of the in-process `_fetch_state`, never a DB query: the whole
+    point is to surface progress the `runs` row itself cannot show until
+    `_finalize_run` writes `details` at the very end (see
+    `app.services.collector.run_collection`'s docstring). Safe to call
+    at any time, including before any fetch has ever run
+    (`status="idle"`, empty `sources`).
+    """
+    with _fetch_lock:
+        state = dict(_fetch_state)
+        sources = list(state.get("sources", []))
+    state["sources"] = sources
+    state["completed"] = len(sources)
+    state.setdefault("status", "idle")
+    state.setdefault("total_sources", 0)
+    state.setdefault("trigger", None)
+    state.setdefault("run_id", None)
+    state.setdefault("started_at", None)
+    state.setdefault("finished_at", None)
+    state.setdefault("total_fetched", 0)
+    state.setdefault("total_inserted", 0)
+    state.setdefault("total_duplicate", 0)
+    state.setdefault("error", None)
+    return state
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Match (P2) trigger — "keyword-match today's fetched articles now"
+# (BUGFIX mission, phase selection requirement). P2 is genuinely a
+# separate step from P1 in this codebase: `run_collection`
+# (app.services.collector) never calls into app.services.matching at
+# all — its own module docstring is explicit that it "deliberately does
+# NOT compute sections/keywords/review_status... that is
+# app.services.matching's job". `rematch_today` (above, in the Keywords
+# section of this file) already IS that job, already scoped to today's
+# `pending`/`filtered_out` rows, already safe to re-run repeatedly (never
+# touches an analyst's approve/reject decision) — this is a thin,
+# same-name wrapper purely so the pipeline/phase surface below has one
+# consistently-named function per phase to call, not a reimplementation.
+# ═════════════════════════════════════════════════════════════════════
+
+
+def run_match_phase(conn: DictConnection) -> dict[str, int]:
+    return rematch_today(conn)
 
 
 def health_sources(conn: DictConnection) -> list[dict[str, Any]]:

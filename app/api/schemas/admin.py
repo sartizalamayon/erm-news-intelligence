@@ -435,3 +435,49 @@ class StageRunResult(BaseModel):
     stage: str
     status: str  # "done" | "error"
     detail: str = ""
+
+
+# ── Fetch (P1) trigger + live progress (BUGFIX mission) ─────────────────
+# "Run collection" — the real fetch phase this bug report is about, plus
+# the P2 keyword-match phase, both real and separate from the 5 LLM
+# enrichment stages above. See app.services.admin's "Fetch (P1) trigger"
+# / "Match (P2) trigger" module sections for the full reasoning.
+
+
+class FetchSourceProgressOut(BaseModel):
+    """One entry per source that has ALREADY finished, in the order it
+    finished — appended live as `app.services.collector.run_collection`'s
+    `progress_cb` fires, not a fixed 45-row table rendered up front.
+    """
+
+    name: str
+    status: str  # "ok" | "empty" | "failed"
+    fetched: int
+    inserted: int
+    duplicate: int
+    error: str | None = None
+
+
+class FetchRunStatusOut(BaseModel):
+    """`POST /health/pipeline/fetch/run` and `GET
+    /health/pipeline/fetch/status` share this shape — the same live
+    snapshot, whether you just started the run or are polling it a
+    minute later. `status`: "idle" (nothing has run yet this process)
+    | "running" | "done" | "error". `total_sources`/`completed` are the
+    real denominator/numerator for a "23/45 done" progress readout;
+    `sources` is the real per-source list backing it (see
+    FetchSourceProgressOut).
+    """
+
+    status: str
+    trigger: str | None = None
+    run_id: int | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    total_sources: int = 0
+    completed: int = 0
+    sources: list[FetchSourceProgressOut] = Field(default_factory=list)
+    total_fetched: int = 0
+    total_inserted: int = 0
+    total_duplicate: int = 0
+    error: str | None = None

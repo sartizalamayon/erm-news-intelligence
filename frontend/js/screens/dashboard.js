@@ -112,12 +112,27 @@ function macroStatusHtml(t) {
   </div>`;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export function mountDashboard(root, { navigate }) {
   let alive = true;
   const mode = state.dashMode || "short";
   let lastData = null; // cached last-loaded payload, so pipeline ticks can re-render without re-fetching
-  let pipeline = null; // { active, startedAt, finishedAt, stages: [{key,name,desc,status,detail,startedAt,finishedAt}] }
+  // { active, startedAt, finishedAt,
+  //   fetch: null | { status, detail, sources: [{name,status,fetched,inserted,duplicate,error}], total, completed },
+  //   match: null | { status, detail },
+  //   stages: [{key,name,desc,status,detail,startedAt,finishedAt}] }
+  let pipeline = null;
   let tickTimer = null;
+  // Phase selection for "Run collection" (BUGFIX: this used to be a
+  // single undifferentiated button that only ever ran the 5 enrichment
+  // stages — see runCollection()'s own docstring below). All three
+  // phases start checked so one click still does the full "nothing new
+  // -> today's news, matched, scored, ready to review" pass by default;
+  // an admin can uncheck any phase to run a subset.
+  const phases = { fetch: true, match: true, enrich: true };
 
   ensureRiskSections();
   render(loadingShell(mode));
@@ -146,8 +161,13 @@ export function mountDashboard(root, { navigate }) {
     root.querySelectorAll("[data-mode]").forEach((btn) => {
       btn.addEventListener("click", () => setState({ dashMode: btn.getAttribute("data-mode") }));
     });
-    const runAllBtn = root.querySelector("#runAllBtn");
-    if (runAllBtn) runAllBtn.addEventListener("click", () => runAll());
+    const runCollectionBtn = root.querySelector("#runCollectionBtn");
+    if (runCollectionBtn) runCollectionBtn.addEventListener("click", () => runCollection());
+    root.querySelectorAll("[data-phase]").forEach((cb) => {
+      cb.addEventListener("change", () => {
+        phases[cb.getAttribute("data-phase")] = cb.checked;
+      });
+    });
     const buildExportBtn = root.querySelector("#buildExportBtn");
     if (buildExportBtn) buildExportBtn.addEventListener("click", () => navigate("export"));
   }
@@ -173,34 +193,52 @@ export function mountDashboard(root, { navigate }) {
     tickTimer = null;
   }
 
-  // Real per-stage progress for "Run all stages" (owner: "I want to see
-  // every step here, with real progress"). Previously this posted to
-  // /pipeline/run-all, a path that doesn't exist (the real one is
-  // /health/pipeline/run-all — see app/api/routers/health.py's own
-  // deviation note), so every click silently 404'd behind a spinner that
-  // vanished with nothing having run. Fixed by driving the SAME 5 stages
-  // one at a time via the real, already-working per-stage endpoint
-  // (frontend/js/screens/health.js's `runStage`), so each stage's
-  // pending → running → done/error transition and elapsed time are real
-  // events off real network responses, not a fabricated progress bar.
-  // Each stage's `detail` (once it resolves) is the real count string
-  // the backend already returns (e.g. "attempted 42, fetched 39, failed
-  // 3" for the body-fetch stage) — there is no live in-stage progress
-  // signal available for a synchronous, one-shot stage call (e.g. LLM
-  // scoring runs as one batch), so while a stage is running this shows
-  // real elapsed time and "running", not an invented percentage.
-  async function runAll() {
+  // BUGFIX: "Run all stages" used to be the single most misleading
+  // button in the app — it only ever ran the 5 LLM enrichment stages
+  // below, never a real fetch, so it reported "done, 0s elapsed" every
+  // time regardless of whether anything new had actually been
+  // collected. Nothing fetched new articles outside the daily GitHub
+  // Actions cron because no HTTP endpoint anywhere called
+  // app.services.collector.run_collection. Renamed "Run collection" and
+  // rebuilt as up to three real, independently-selectable phases (see
+  // the `phases` checkboxes in header()):
+  //   1. Fetch  — POST /health/pipeline/fetch/run, a real P1 collection
+  //      run for today, backgrounded server-side (a full ~45-source run
+  //      takes low minutes — see app.services.admin's "Fetch (P1)
+  //      trigger" module docstring) and polled via GET
+  //      /health/pipeline/fetch/status for genuine per-source progress
+  //      while it's in flight, never an instant fake "done".
+  //   2. Match  — POST /health/pipeline/match/run, P2 keyword matching
+  //      against today's articles (confirmed a genuinely separate step
+  //      from fetch by reading app.services.collector.run_collection's
+  //      own docstring — P1 never computes sections/keywords itself).
+  //   3. Enrich — the pre-existing 5 LLM stages, unchanged: driven one
+  //      at a time via the real per-stage endpoint
+  //      (frontend/js/screens/health.js's `runStage` uses the identical
+  //      pattern), each stage's pending → running → done/error
+  //      transition a real event off a real network response.
+  // Phases run in order (fetch, then match, then enrich) when more than
+  // one is selected — matching depends on fetch having landed rows to
+  // match, and enrichment depends on matching having decided which rows
+  // are even in play — but one phase failing does not block the next
+  // (same per-unit isolation philosophy app.services.collector already
+  // applies per-source and run_pipeline_all already applies per-stage).
+  async function runCollection() {
     if (pipeline && pipeline.active) return;
+    const selected = { ...phases };
+    if (!selected.fetch && !selected.match && !selected.enrich) return;
 
     let stageDefs = PIPELINE_STAGE_FALLBACK;
-    try {
-      const overview = await api.get("/health/overview");
-      if (overview && Array.isArray(overview.stages) && overview.stages.length) {
-        stageDefs = overview.stages.map((s) => ({ key: s.key, name: s.name, desc: s.desc }));
+    if (selected.enrich) {
+      try {
+        const overview = await api.get("/health/overview");
+        if (overview && Array.isArray(overview.stages) && overview.stages.length) {
+          stageDefs = overview.stages.map((s) => ({ key: s.key, name: s.name, desc: s.desc }));
+        }
+      } catch (err) {
+        // Falls back to the fixed 5-stage list above — still real stage
+        // keys/endpoints, just without live names/descriptions from the API.
       }
-    } catch (err) {
-      // Falls back to the fixed 5-stage list above — still real stage
-      // keys/endpoints, just without live names/descriptions from the API.
     }
     if (!alive) return;
 
@@ -208,18 +246,103 @@ export function mountDashboard(root, { navigate }) {
       active: true,
       startedAt: Date.now(),
       finishedAt: null,
-      stages: stageDefs.map((s) => ({ ...s, status: "pending", detail: "", startedAt: null, finishedAt: null })),
+      fetch: selected.fetch ? { status: "pending", detail: "", sources: [], total: 0, completed: 0 } : null,
+      match: selected.match ? { status: "pending", detail: "" } : null,
+      stages: selected.enrich
+        ? stageDefs.map((s) => ({ ...s, status: "pending", detail: "", startedAt: null, finishedAt: null }))
+        : [],
     };
-    setState({ progress: `Run all stages · 0/${pipeline.stages.length}` });
+    setState({ progress: "Run collection · starting…" });
     startTicking();
     rerenderCurrent();
 
+    if (pipeline.fetch) await runFetchPhase();
+    if (alive && pipeline.match) await runMatchPhase();
+    if (alive) await runEnrichPhase();
+
+    pipeline.active = false;
+    pipeline.finishedAt = Date.now();
+    stopTicking();
+    setState({ progress: "" });
+    rerenderCurrent();
+  }
+
+  // Phase 1: fetch. Starts the backgrounded server-side run, then polls
+  // GET /health/pipeline/fetch/status every ~1.5s for the genuinely-live
+  // per-source progress app.services.admin.start_fetch_run/fetch_status
+  // track (which sources have finished, how many are new) — not a
+  // client-side timer standing in for progress.
+  async function runFetchPhase() {
+    pipeline.fetch.status = "running";
+    rerenderCurrent();
+    try {
+      await api.post("/health/pipeline/fetch/run");
+      let terminal = false;
+      while (alive && !terminal) {
+        let poll;
+        try {
+          poll = await api.get("/health/pipeline/fetch/status");
+        } catch (err) {
+          pipeline.fetch.status = "error";
+          pipeline.fetch.detail = fmtErr(err);
+          break;
+        }
+        if (!alive) return;
+        pipeline.fetch.total = poll.total_sources || 0;
+        pipeline.fetch.completed = poll.completed || 0;
+        pipeline.fetch.sources = poll.sources || [];
+        setState({
+          progress: `Run collection · fetching (${pipeline.fetch.completed}/${pipeline.fetch.total || "?"} sources)`,
+        });
+        rerenderCurrent();
+        if (poll.status === "done" || poll.status === "error") {
+          terminal = true;
+          pipeline.fetch.status = poll.status;
+          pipeline.fetch.detail =
+            poll.status === "error"
+              ? poll.error || "fetch failed"
+              : `${poll.total_inserted || 0} new article(s) across ${poll.total_sources || 0} source(s)`;
+        } else {
+          await sleep(1500);
+        }
+      }
+    } catch (err) {
+      pipeline.fetch.status = "error";
+      pipeline.fetch.detail = fmtErr(err);
+    }
+    if (!alive) return;
+    rerenderCurrent();
+  }
+
+  // Phase 2: match. Synchronous — a local regex pass over today's
+  // pending/filtered_out rows, no network call, so unlike fetch there is
+  // nothing to poll; it resolves in one round trip.
+  async function runMatchPhase() {
+    pipeline.match.status = "running";
+    setState({ progress: "Run collection · matching keywords" });
+    rerenderCurrent();
+    try {
+      const result = await api.post("/health/pipeline/match/run");
+      pipeline.match.status = "done";
+      pipeline.match.detail = `${result.matched} matched, ${result.filtered_out} filtered out (of ${result.total})`;
+    } catch (err) {
+      pipeline.match.status = "error";
+      pipeline.match.detail = fmtErr(err);
+    }
+    if (!alive) return;
+    rerenderCurrent();
+  }
+
+  // Phase 3: the 5 LLM enrichment stages, unchanged from the previous
+  // "Run all stages" implementation — one at a time via the real
+  // per-stage endpoint.
+  async function runEnrichPhase() {
     for (const stage of pipeline.stages) {
       if (!alive) return;
       stage.status = "running";
       stage.startedAt = Date.now();
       const doneCount = pipeline.stages.filter((s) => s.status === "done" || s.status === "error").length;
-      setState({ progress: `Run all stages · ${stage.name} (${doneCount}/${pipeline.stages.length})` });
+      setState({ progress: `Run collection · ${stage.name} (${doneCount}/${pipeline.stages.length})` });
       rerenderCurrent();
       try {
         const result = await api.post(`/health/pipeline/stages/${stage.key}/run`);
@@ -233,19 +356,73 @@ export function mountDashboard(root, { navigate }) {
       if (!alive) return;
       rerenderCurrent();
     }
+  }
 
-    pipeline.active = false;
-    pipeline.finishedAt = Date.now();
-    stopTicking();
-    setState({ progress: "" });
-    rerenderCurrent();
+  // Fetch phase row + live per-source list. `f.sources` grows in real
+  // time as GET /health/pipeline/fetch/status is polled (backed by
+  // app.services.collector.run_collection's new progress_cb hook, fired
+  // per source AS it completes — not batched up and revealed only once
+  // the whole ~45-source run finishes). Capped to the most recent dozen
+  // in a scrollable strip so a near-complete run doesn't grow the card
+  // unbounded — the underlying data behind `f.completed`/`f.total` is
+  // still the real count of every source, not just the ones shown.
+  function fetchPhaseRowHtml(f) {
+    if (!f) return "";
+    const icon = f.status === "done" ? "&#10003;" : f.status === "error" ? "&#10005;" : f.status === "running" ? "&#8987;" : "&#183;";
+    const color =
+      f.status === "done" ? "var(--green)" : f.status === "error" ? "var(--red)" : f.status === "running" ? "var(--actx)" : "var(--tx4)";
+    const detail =
+      f.status === "pending"
+        ? "waiting…"
+        : f.status === "running"
+        ? `fetching · ${f.completed}/${f.total || "?"} sources done`
+        : f.status === "error"
+        ? f.detail || "fetch failed"
+        : `done · ${f.detail}`;
+    const sourceRows = (f.sources || [])
+      .slice(-12)
+      .map((s) => {
+        const sIcon = s.status === "ok" ? "&#10003;" : s.status === "failed" ? "&#10005;" : "&#183;";
+        const sColor = s.status === "ok" ? "var(--green)" : s.status === "failed" ? "var(--red)" : "var(--tx4)";
+        const sDetail = s.status === "failed" ? s.error || "failed" : `${s.fetched} fetched · ${s.inserted} new`;
+        return `<div class="row" style="gap:8px;padding:2px 0;">
+          <span style="width:12px;text-align:center;color:${sColor};font-size:11px;">${sIcon}</span>
+          <span style="flex:0 0 auto;max-width:170px;font-size:11px;color:var(--tx2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.name)}</span>
+          <span style="font-size:10.5px;color:var(--tx4);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(sDetail)}</span>
+        </div>`;
+      })
+      .join("");
+    return `<div style="padding:6px 0;">
+      <div class="row" style="gap:11px;">
+        <span style="width:16px;text-align:center;color:${color};font-size:13px;">${icon}</span>
+        <span style="flex:0 0 150px;font-size:12.5px;font-weight:600;">Fetch news</span>
+        <span style="flex:1;min-width:0;font-size:11.5px;color:var(--tx3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(detail)}">${escapeHtml(detail)}</span>
+      </div>
+      ${sourceRows ? `<div style="max-height:150px;overflow-y:auto;margin:4px 0 0 27px;padding-left:9px;border-left:1px solid var(--line);">${sourceRows}</div>` : ""}
+    </div>`;
+  }
+
+  function matchPhaseRowHtml(m) {
+    if (!m) return "";
+    const icon = m.status === "done" ? "&#10003;" : m.status === "error" ? "&#10005;" : m.status === "running" ? "&#8987;" : "&#183;";
+    const color =
+      m.status === "done" ? "var(--green)" : m.status === "error" ? "var(--red)" : m.status === "running" ? "var(--actx)" : "var(--tx4)";
+    const detail = m.status === "pending" ? "waiting…" : m.status === "running" ? "matching…" : m.detail || m.status;
+    return `<div class="row" style="gap:11px;padding:6px 0;">
+      <span style="width:16px;text-align:center;color:${color};font-size:13px;">${icon}</span>
+      <span style="flex:0 0 150px;font-size:12.5px;font-weight:600;">Match keywords</span>
+      <span style="flex:1;min-width:0;font-size:11.5px;color:var(--tx3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(detail)}">${escapeHtml(detail)}</span>
+    </div>`;
   }
 
   function pipelinePanelHtml() {
     if (!pipeline) return "";
     const elapsedTotal = ((pipeline.finishedAt || Date.now()) - pipeline.startedAt) / 1000;
-    const hasError = pipeline.stages.some((s) => s.status === "error");
-    const rows = pipeline.stages
+    const hasError =
+      pipeline.stages.some((s) => s.status === "error") ||
+      (pipeline.fetch && pipeline.fetch.status === "error") ||
+      (pipeline.match && pipeline.match.status === "error");
+    const stageRows = pipeline.stages
       .map((s) => {
         const icon = s.status === "done" ? "&#10003;" : s.status === "error" ? "&#10005;" : s.status === "running" ? "&#8987;" : "&#183;";
         const color =
@@ -266,15 +443,30 @@ export function mountDashboard(root, { navigate }) {
       .join("");
     return `<div class="card" style="margin-bottom:16px;border-color:${pipeline.active ? "var(--ac2)" : hasError ? "var(--red)" : "var(--line)"};">
       <div class="row-between" style="margin-bottom:4px;">
-        <h3 style="margin:0;">Run all stages ${pipeline.active ? "· running" : hasError ? "· finished with errors" : "· done"}</h3>
+        <h3 style="margin:0;">Run collection ${pipeline.active ? "· running" : hasError ? "· finished with errors" : "· done"}</h3>
         <span class="mono" style="font-size:11px;color:var(--tx3);">${elapsedTotal.toFixed(0)}s elapsed</span>
       </div>
-      <p class="hint" style="margin:0 0 10px;">Fetching new articles runs on a separate schedule — this runs the 5 enrichment stages against what's already collected.</p>
-      <div class="stack" style="gap:0;">${rows}</div>
+      <p class="hint" style="margin:0 0 10px;">Fetches today's news from every enabled source, matches it against your keyword rules, then runs enrichment — pick which phases run from the checkboxes above. Progress below is real: live per-source fetch status, not an instant "done".</p>
+      <div class="stack" style="gap:0;">
+        ${fetchPhaseRowHtml(pipeline.fetch)}
+        ${matchPhaseRowHtml(pipeline.match)}
+        ${stageRows}
+      </div>
     </div>`;
   }
 
+  // Phase checkboxes for "Run collection" — disabled while a run is
+  // active (the running set was already snapshotted when it started;
+  // toggling mid-run only affects the NEXT click).
+  function phaseCheckboxHtml(key, label, running) {
+    return `<label class="row" style="gap:5px;align-items:center;font-size:11px;color:var(--tx3);cursor:${running ? "default" : "pointer"};white-space:nowrap;">
+      <input type="checkbox" data-phase="${key}" ${phases[key] ? "checked" : ""} ${running ? "disabled" : ""} style="accent-color:var(--ac2);width:13px;height:13px;" />
+      ${label}
+    </label>`;
+  }
+
   function header(isAdmin) {
+    const running = !!(pipeline && pipeline.active);
     return `
       <div class="row wrap" style="margin-bottom:22px;">
         <div class="seg-group" style="height:auto;padding:3px;">
@@ -289,7 +481,18 @@ export function mountDashboard(root, { navigate }) {
             .join("")}
         </div>
         <div class="grow"></div>
-        ${isAdmin ? `<button id="runAllBtn" class="btn btn-soft" style="white-space:nowrap;">&#9654; Run all stages</button>` : ""}
+        ${
+          isAdmin
+            ? `<div class="row" style="gap:12px;align-items:center;flex-wrap:wrap;">
+                <div class="row" style="gap:11px;">
+                  ${phaseCheckboxHtml("fetch", "Fetch", running)}
+                  ${phaseCheckboxHtml("match", "Match", running)}
+                  ${phaseCheckboxHtml("enrich", "Enrich", running)}
+                </div>
+                <button id="runCollectionBtn" class="btn btn-soft" style="white-space:nowrap;" ${running ? "disabled" : ""}>&#9654; ${running ? "Running…" : "Run collection"}</button>
+              </div>`
+            : ""
+        }
         <button id="buildExportBtn" class="btn btn-outline" style="white-space:nowrap;">&#8595; Build an export</button>
       </div>
     `;
