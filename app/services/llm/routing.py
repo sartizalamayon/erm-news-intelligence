@@ -115,11 +115,35 @@ class RoutingConfig:
 
 
 def default_feature_route() -> FeatureRoute:
-    """ADR §9.1: "Groq primary (qwen/qwen3.6-27b), Google AI Studio
-    secondary" — applied uniformly to every feature unless the admin
-    overrides a specific one.
+    """Mistral primary, Google AI Studio secondary.
+
+    ADR §9.1 originally ruled "Groq primary (qwen/qwen3.6-27b), Google
+    AI Studio secondary". That default was changed after measuring it on
+    real batch workloads:
+
+      * `qwen/qwen3.6-27b` is a REASONING model. It spends a large,
+        unbounded share of its output budget on thinking tokens that
+        this pipeline never reads — every call here asks for a small
+        JSON verdict, not an explanation.
+      * Its verified free-tier ceiling is 8,000 tokens/MINUTE
+        (quota.py's own re-verification note). Reasoning overhead
+        against a per-minute token budget is the worst possible pairing:
+        a single scoring run measured 391% over the model's own daily
+        token budget, and a live judge stage sat in 429 backoff for
+        ~31 minutes on one day's articles.
+      * Mistral (`mistral-small-latest`) is non-reasoning, verified live
+        at 50 req/min and 50,000 tokens/min — an order of magnitude more
+        per-minute headroom for strictly less token waste per call.
+
+    Groq remains fully configured and selectable per feature; this only
+    changes what an admin gets before expressing a preference. Routing
+    is still entirely admin-settable at runtime (DoD #1) — nothing here
+    is hardcoded into a call site.
     """
-    return FeatureRoute(primary=ProviderChoice(provider="groq"), secondary=ProviderChoice(provider="gemini"))
+    return FeatureRoute(
+        primary=ProviderChoice(provider="mistral", model="mistral-small-latest"),
+        secondary=ProviderChoice(provider="gemini"),
+    )
 
 
 def default_routing_config() -> RoutingConfig:

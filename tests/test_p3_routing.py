@@ -28,15 +28,20 @@ from app.services.llm.routing import (
 pytestmark = pytest.mark.skipif(not pg_available(), reason="no reachable Postgres (set TEST_DATABASE_URL)")
 
 
-def test_default_routing_config_is_groq_primary_gemini_secondary_for_every_feature() -> None:
+def test_default_routing_config_is_mistral_primary_gemini_secondary_for_every_feature() -> None:
+    """Default moved off Groq's `qwen/qwen3.6-27b` — a REASONING model
+    metered against an 8,000 token/MINUTE ceiling, measured 391% over
+    its own daily budget on one scoring run and observed sitting in
+    429 backoff for ~31 minutes. See `default_feature_route`.
+    """
     config = default_routing_config()
     assert set(config.routes.keys()) == set(FEATURES)
     for feature in FEATURES:
         route = config.route_for(feature)
-        assert route.primary.provider == "groq"
+        assert route.primary.provider == "mistral"
+        assert route.primary.model == "mistral-small-latest"
         assert route.secondary is not None
         assert route.secondary.provider == "gemini"
-        assert route.primary.model is None  # no override — provider_configs' own model applies
         assert route.secondary.model is None
 
 

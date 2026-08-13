@@ -35,9 +35,26 @@ from tests.helpers.network_guard import block_network, restore_network
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("LOG_LEVEL", "WARNING")
 os.environ.setdefault("DATABASE_URL", "")
-os.environ.setdefault("GROQ_API_KEY", "")
-os.environ.setdefault("GEMINI_API_KEY", "")
 os.environ.setdefault("SECRET_KEY", "")
+
+# Blank EVERY provider bootstrap key, not just the two this file
+# originally listed.
+#
+# `Settings` reads `.env` (app/config.py's `SettingsConfigDict`), and
+# real environment variables outrank dotenv values in pydantic-settings'
+# precedence order — so setting a key to "" here is what actually keeps
+# a developer's real `.env` out of the test run. Any provider MISSING
+# from this list silently gets the real credential instead.
+#
+# That gap was live: `MISTRAL_API_KEY` and `NVIDIA_API_KEY` were absent,
+# and once `registry.PROVIDER_CONFIGS_PROVIDERS` grew to cover them, a
+# real Mistral key from `.env` started resolving inside unit tests —
+# tests began asserting against a provider account built from
+# production credentials, and results changed depending on whether the
+# developer had a `.env` at all. Derived from the provider registry
+# rather than hand-listed, so adding a provider cannot reopen the hole.
+for _provider in ("groq", "gemini", "mistral", "nvidia", "cerebras", "openai", "anthropic"):
+    os.environ.setdefault(f"{_provider.upper()}_API_KEY", "")
 
 
 @pytest.fixture

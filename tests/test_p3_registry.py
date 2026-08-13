@@ -104,7 +104,9 @@ def test_build_client_for_feature_raises_configuration_error_when_nothing_config
 
 
 def test_build_client_resolves_primary_only_when_secondary_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GROQ_API_KEY", "env-bootstrap-key")
+    monkeypatch.setenv("MISTRAL_API_KEY", "env-bootstrap-key")
+    # Blank, not delenv: removing the var lets `.env`'s real key through.
+    monkeypatch.setenv("GEMINI_API_KEY", "")
     from app.config import get_settings
 
     get_settings.cache_clear()
@@ -112,20 +114,22 @@ def test_build_client_resolves_primary_only_when_secondary_unconfigured(monkeypa
         client = build_client_for_feature(conn, SCORING)
         assert len(client.transport.candidates) == 1
         identity, transport = client.transport.candidates[0]
-        assert identity == "groq"
+        assert identity == "mistral"
         assert transport.__class__ is OpenAICompatibleTransport
-        assert transport.base_url == "https://api.groq.com/openai/v1"
-        assert "groq" in client.name
+        assert transport.base_url == "https://api.mistral.ai/v1"
+        assert "mistral" in client.name
     get_settings.cache_clear()
 
 
 def test_build_client_for_feature_promotes_secondary_when_primary_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Blank, not delenv: removing the var lets `.env`'s real key through.
+    monkeypatch.setenv("MISTRAL_API_KEY", "")
     monkeypatch.setenv("GEMINI_API_KEY", "env-bootstrap-gemini-key")
     from app.config import get_settings
 
     get_settings.cache_clear()
     with migrated_schema() as conn:
-        # primary (groq) has no key anywhere; secondary (gemini) does
+        # primary (mistral) has no key anywhere; secondary (gemini) does
         client = build_client_for_feature(conn, SCORING)
         assert len(client.transport.candidates) == 1
         identity, transport = client.transport.candidates[0]
@@ -135,7 +139,7 @@ def test_build_client_for_feature_promotes_secondary_when_primary_unconfigured(m
 
 
 def test_build_client_for_feature_wires_both_primary_and_secondary(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GROQ_API_KEY", "env-groq-key")
+    monkeypatch.setenv("MISTRAL_API_KEY", "env-mistral-key")
     monkeypatch.setenv("GEMINI_API_KEY", "env-gemini-key")
     from app.config import get_settings
 
@@ -144,7 +148,7 @@ def test_build_client_for_feature_wires_both_primary_and_secondary(monkeypatch: 
         client = build_client_for_feature(conn, SCORING)
         identities = [identity for identity, _ in client.transport.candidates]
         classes = [transport.__class__ for _, transport in client.transport.candidates]
-        assert identities == ["groq", "gemini"]
+        assert identities == ["mistral", "gemini"]
         assert classes == [OpenAICompatibleTransport, GeminiTransport]
     get_settings.cache_clear()
 
@@ -258,6 +262,16 @@ def test_two_groq_keys_pool_as_two_independent_candidates(monkeypatch: pytest.Mo
         # env var supplies the "default" credential; provider_registry
         # supplies a SECOND, pooled one -- exactly the "two keys exist
         # per provider" scenario.
+        # Pin scoring to Groq explicitly: this test is about Groq key
+        # POOLING mechanics, not about which provider happens to be the
+        # default route (that default is Mistral now — see
+        # routing.default_feature_route).
+        save_routing_config(
+            conn,
+            RoutingConfig(
+                routes={SCORING: FeatureRoute(primary=ProviderChoice(provider="groq"))}
+            ),
+        )
         save_provider_credential(conn, "groq", "second", "groq-key-two")
         conn.commit()
 
@@ -281,6 +295,16 @@ def test_pooled_keys_share_the_providers_configured_limits(monkeypatch: pytest.M
 
     get_settings.cache_clear()
     with migrated_schema() as conn:
+        # Pin scoring to Groq explicitly: this test is about Groq key
+        # POOLING mechanics, not about which provider happens to be the
+        # default route (that default is Mistral now — see
+        # routing.default_feature_route).
+        save_routing_config(
+            conn,
+            RoutingConfig(
+                routes={SCORING: FeatureRoute(primary=ProviderChoice(provider="groq"))}
+            ),
+        )
         save_provider_credential(conn, "groq", "second", "groq-key-two")
         conn.commit()
 

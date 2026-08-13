@@ -42,6 +42,7 @@ export const SCREEN_TITLES = {
   export: ["Export", "Build an Excel or CSV extract"],
   search: ["Search archive", "Every article ever collected"],
   manual: ["How it works", "The four phases, explained"],
+  run: ["Run collection", "Administration · fetch, match and enrich today's news"],
   sources: ["Sources", "Administration · outlets and methods"],
   keywords: ["Keywords", "Administration · bilingual search terms"],
   prompts: ["AI prompts", "Administration · scoring guidance and examples"],
@@ -62,6 +63,7 @@ export const NAV_STRUCTURE = [
     label: "Administration",
     adminOnly: true,
     items: [
+      { key: "run", label: "Run collection", icon: "▶" },
       { key: "sources", label: "Sources", icon: "⌸" },
       { key: "keywords", label: "Keywords", icon: "⌗" },
       { key: "prompts", label: "AI prompts", icon: "◈" },

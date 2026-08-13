@@ -14,6 +14,7 @@ router, so every model below types those fields `str`, not `datetime`.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -511,6 +512,32 @@ class RunStartBody(BaseModel):
     fetch: bool = True
     match: bool = True
     enrich: bool = True
+
+
+class ResetDayBody(BaseModel):
+    """`POST /health/pipeline/reset-day` body.
+
+    `keep_reviewed` defaults to True so the destructive-by-accident case
+    (an admin wanting a clean re-collect) can never take an analyst's
+    approved/rejected decisions with it. Setting it False is an explicit
+    choice to wipe the whole day.
+    """
+
+    day: date | None = None
+    keep_reviewed: bool = True
+
+
+class ResetDayResult(BaseModel):
+    """What the reset actually did. `forgotten_urls` is the number that
+    matters operationally: it is the count of dedup tombstones dropped,
+    i.e. how many URLs became re-collectable again. A reset that deleted
+    rows but forgot 0 URLs would mean the day is still un-refetchable —
+    which is exactly the silent failure this endpoint exists to prevent.
+    """
+
+    deleted: int
+    forgotten_urls: int
+    day: str
 
 
 class RunPhasesRequestedOut(BaseModel):

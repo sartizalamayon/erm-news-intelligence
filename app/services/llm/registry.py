@@ -50,6 +50,7 @@ from app.services.llm.provider import LLMClient
 from app.services.llm.provider_registry import (
     ADAPTER_GEMINI,
     ADAPTER_OPENAI_COMPATIBLE,
+    DEFAULT_PROVIDER_DEFINITIONS,
     ProviderDefinition,
     load_provider_credentials,
     load_provider_definitions,
@@ -62,7 +63,36 @@ from app.services.llm.transport import GeminiTransport, OpenAICompatibleTranspor
 # CHECK constraint enforces this same set. Any provider outside this
 # tuple is ENTIRELY provider_registry's territory (definition AND every
 # credential), since provider_configs cannot hold a row for it at all.
-PROVIDER_CONFIGS_PROVIDERS = ("groq", "gemini")
+# Providers resolvable from a bootstrap env var. This was
+# `("groq", "gemini")`, which silently made every OTHER provider
+# unusable unless an admin had stored an encrypted key in
+# `provider_configs` — including Mistral, even though
+# `Settings.mistral_api_key` has existed and been documented as a
+# "bootstrap/CI fallback" the whole time (app/config.py:108).
+#
+# The failure was invisible in exactly the way that matters: routing a
+# feature to Mistral was accepted, persisted, and reported back by
+# `GET /prompts/routing` as active, while `build_client_for_feature`
+# quietly resolved nothing for it and fell through to the SECONDARY
+# provider. Measured 2026-08-14 on the live database — `provider_configs`
+# held zero stored keys, so every provider depended on this map, and a
+# routing config reading "scoring -> mistral" was in fact scoring on
+# Gemini.
+#
+# Keys are now looked up generically as `Settings.<provider>_api_key` /
+# `<provider>_model`, so adding a provider to `provider_registry` makes
+# it env-bootstrappable without another edit here.
+PROVIDER_CONFIGS_PROVIDERS = ("groq", "gemini", "mistral", "nvidia")
+
+
+def _env_credentials(provider: str) -> tuple[str, str]:
+    """`(api_key, model)` from the bootstrap env settings for `provider`,
+    or `("", "")` when this provider has no env fields at all.
+    """
+    settings = get_settings()
+    api_key = getattr(settings, f"{provider}_api_key", "") or ""
+    model = getattr(settings, f"{provider}_model", "") or ""
+    return api_key, model
 
 
 @dataclass(frozen=True)
@@ -91,15 +121,21 @@ def load_provider_account(conn: DictConnection, provider: str) -> ProviderAccoun
         "SELECT provider, model, role, api_key_ciphertext FROM provider_configs WHERE provider = %s",
         (provider,),
     ).fetchone()
-    settings = get_settings()
-    env_keys = {"groq": settings.groq_api_key, "gemini": settings.gemini_api_key}
-    env_models = {"groq": settings.groq_model, "gemini": settings.gemini_model}
+    env_key, env_model = _env_credentials(provider)
 
     if row is None:
-        api_key = env_keys.get(provider, "")
-        if not api_key:
+        if not env_key:
             return None
-        return ProviderAccount(provider=provider, model=env_models.get(provider, ""), api_key=api_key)
+        if not env_model:
+            # No env model configured for this provider — fall back to
+            # the registry's own documented default rather than
+            # returning an account with an empty model, which would fail
+            # at call time instead of being caught here.
+            definition = DEFAULT_PROVIDER_DEFINITIONS.get(provider)
+            env_model = definition.default_model if definition else ""
+        if not env_model:
+            return None
+        return ProviderAccount(provider=provider, model=env_model, api_key=env_key)
 
     if row["role"] == "disabled":
         return None
@@ -109,11 +145,14 @@ def load_provider_account(conn: DictConnection, provider: str) -> ProviderAccoun
     if ciphertext:
         api_key = decrypt_api_key(bytes(ciphertext))
     if not api_key:
-        api_key = env_keys.get(provider, "")
+        api_key = env_key
     if not api_key:
         return None
 
-    model = row["model"] or env_models.get(provider, "")
+    model = row["model"] or env_model
+    if not model:
+        definition = DEFAULT_PROVIDER_DEFINITIONS.get(provider)
+        model = definition.default_model if definition else ""
     if not model:
         return None
     return ProviderAccount(provider=provider, model=model, api_key=api_key)

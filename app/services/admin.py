@@ -523,6 +523,50 @@ def rematch_today(conn: DictConnection) -> dict[str, int]:
     return {"matched": matched, "filtered_out": filtered_out, "total": len(rows)}
 
 
+def reset_day(conn: DictConnection, *, day: date | None = None, keep_reviewed: bool = True) -> dict[str, Any]:
+    """Make a day collectable again from scratch — the supported way to
+    re-run a collection you've already run.
+
+    This exists because "just DELETE the rows" is a trap. `seen_urls` is
+    a permanent tombstone table (migrations/0016): the
+    `articles_remember_deleted_urls` trigger records every deleted
+    url_norm precisely so a purged article can never silently reappear.
+    That is correct for the retention purge and catastrophic for a
+    deliberate re-run — the day's articles vanish, their URLs stay
+    remembered, and every later fetch reports "0 new" for sources that
+    are working perfectly. That exact failure was observed live
+    (2026-08-14: 8,931 orphaned tombstones, sources reporting "178
+    fetched · 4 new"), which is why the cleanup is done HERE, in the
+    same transaction as the delete, rather than left to each caller.
+
+    `keep_reviewed=True` (the default) refuses to discard rows an
+    analyst has already approved or rejected — re-running a collection
+    is a data-collection operation and must never destroy review work.
+    Pass False only for a genuine full wipe of the day.
+    """
+    target = day or _today_dhaka()
+    status_filter = "" if not keep_reviewed else " AND review_status IN ('pending', 'filtered_out')"
+
+    with conn.transaction():
+        deleted = conn.execute(
+            f"DELETE FROM articles WHERE day = %s{status_filter} RETURNING url_norm",
+            (target,),
+        ).fetchall()
+        norms = [row["url_norm"] for row in deleted if row["url_norm"]]
+        # The trigger above has already written a tombstone for each of
+        # these. Drop exactly those, and only those, so the URLs become
+        # re-collectable — without touching tombstones from real purges.
+        forgotten = 0
+        if norms:
+            forgotten = len(
+                conn.execute(
+                    "DELETE FROM seen_urls WHERE url_norm = ANY(%s) RETURNING url_norm",
+                    (norms,),
+                ).fetchall()
+            )
+    return {"deleted": len(deleted), "forgotten_urls": forgotten, "day": target.isoformat()}
+
+
 # ── Excel export/import (KEYWORDS-CONFIG tasks 4/5) ─────────────────────
 #
 # Both writer and reader are `openpyxl` (already a dependency —
@@ -1368,7 +1412,39 @@ def pipeline_stage_statuses(conn: DictConnection, day: date | None = None) -> li
     return out
 
 
-def _run_bodies_stage(conn: DictConnection, *, limit: int = 100) -> dict[str, int]:
+BODIES_STAGE_MAX = 2000
+BODIES_STAGE_WORKERS = 12
+
+
+def _run_bodies_stage(conn: DictConnection, *, limit: int = BODIES_STAGE_MAX) -> dict[str, int]:
+    """Fetch full article text for today's matched articles.
+
+    Two bugs fixed here, both observed on a live run (2026-08-14, 173
+    matched articles reported "attempted 100"):
+
+    1. The cap was a hardcoded `limit=100` with no caller able to raise
+       it and nothing in the UI saying a limit had been applied — so 73
+       of 173 matched articles silently never got a body, and the
+       downstream topic stage (which reads `content_text`) quietly saw a
+       truncated corpus. The ceiling is now `BODIES_STAGE_MAX`, high
+       enough to cover a real day's matched set, and the returned detail
+       reports `capped` explicitly whenever it does bind, so a truncated
+       run can never again look identical to a complete one.
+
+    2. Fetches ran strictly sequentially — one blocking HTTP round-trip
+       per article against ~45 different hosts. These are independent by
+       construction and are now issued through a bounded pool. The
+       process-wide ceiling in `app.sources.http.GLOBAL_SEMAPHORE` still
+       applies underneath, so total concurrent connections stay bounded
+       exactly as before.
+
+    Threading contract: only the network call runs on the pool. Every DB
+    write happens on the calling thread after the pool drains, because
+    `conn` is a single psycopg connection and is not thread-safe.
+    """
+    import threading as _threading
+    from concurrent.futures import ThreadPoolExecutor
+
     from app.sources.base import FeedItem
     from app.sources.registry import all_sources
 
@@ -1379,31 +1455,73 @@ def _run_bodies_stage(conn: DictConnection, *, limit: int = 100) -> dict[str, in
         "SELECT id, url, title, source FROM articles "
         "WHERE day = CURRENT_DATE AND review_status = 'pending' AND body_status = 'not_attempted' "
         "ORDER BY id LIMIT %s",
-        (limit,),
+        (limit + 1,),
     ).fetchall()
+    capped = len(rows) > limit
+    rows = rows[:limit]
 
-    fetched = failed = skipped = 0
-    for row in rows:
+    # One source instance per (thread, source) — a `requests.Session` is
+    # not documented as thread-safe, so sharing one across workers would
+    # be a real (if intermittent) hazard, while building a fresh one per
+    # ARTICLE would throw away connection reuse entirely. Thread-local
+    # instances give both safety and keep-alive.
+    local = _threading.local()
+
+    def _instance_for(source_cls: Any) -> Any:
+        cache = getattr(local, "sources", None)
+        if cache is None:
+            cache = {}
+            local.sources = cache
+        key = getattr(source_cls, "key", source_cls.__name__)
+        inst = cache.get(key)
+        if inst is None:
+            inst = source_cls()
+            cache[key] = inst
+        return inst
+
+    def _fetch_one(row: dict[str, Any]) -> tuple[dict[str, Any], str | None, bool]:
+        """Returns (row, body_text_or_None, skipped_no_plugin)."""
         source_cls = by_display_name.get(row["source"])
         if source_cls is None:
+            return row, None, True
+        try:
+            instance = _instance_for(source_cls)
+            item = FeedItem(url=row["url"], title=row["title"], source_key=getattr(source_cls, "key", ""))
+            return row, instance.fetch_article(item).body_text, False
+        except SourceError:
+            return row, None, False
+        except Exception:  # noqa: BLE001 - one bad page must never abort the stage
+            return row, None, False
+
+    results: list[tuple[dict[str, Any], str | None, bool]] = []
+    if rows:
+        with ThreadPoolExecutor(max_workers=min(BODIES_STAGE_WORKERS, len(rows))) as pool:
+            results = list(pool.map(_fetch_one, rows))
+
+    fetched = failed = skipped = 0
+    for row, body_text, no_plugin in results:
+        if no_plugin:
             skipped += 1
             continue
-        try:
-            instance = source_cls()
-            item = FeedItem(url=row["url"], title=row["title"], source_key=getattr(source_cls, "key", ""))
-            article = instance.fetch_article(item)
-            conn.execute(
-                "INSERT INTO article_bodies (article_id, content_text, fetched_at) VALUES (%s, %s, now()) "
-                "ON CONFLICT (article_id) DO UPDATE SET content_text = EXCLUDED.content_text, fetched_at = now()",
-                (row["id"], article.body_text),
-            )
-            conn.execute("UPDATE articles SET body_status = 'fetched' WHERE id = %s", (row["id"],))
-            fetched += 1
-        except SourceError:
+        if body_text is None:
             conn.execute("UPDATE articles SET body_status = 'failed' WHERE id = %s", (row["id"],))
             failed += 1
+            continue
+        conn.execute(
+            "INSERT INTO article_bodies (article_id, content_text, fetched_at) VALUES (%s, %s, now()) "
+            "ON CONFLICT (article_id) DO UPDATE SET content_text = EXCLUDED.content_text, fetched_at = now()",
+            (row["id"], body_text),
+        )
+        conn.execute("UPDATE articles SET body_status = 'fetched' WHERE id = %s", (row["id"],))
+        fetched += 1
     conn.commit()
-    return {"attempted": len(rows), "fetched": fetched, "failed": failed, "skipped_no_plugin": skipped}
+    return {
+        "attempted": len(rows),
+        "fetched": fetched,
+        "failed": failed,
+        "skipped_no_plugin": skipped,
+        "capped": 1 if capped else 0,
+    }
 
 
 def run_pipeline_stage(conn: DictConnection, stage_key: str) -> dict[str, str]:
@@ -1416,6 +1534,10 @@ def run_pipeline_stage(conn: DictConnection, stage_key: str) -> dict[str, str]:
                 f"attempted {result['attempted']}, fetched {result['fetched']}, "
                 f"failed {result['failed']}, skipped (no plugin) {result['skipped_no_plugin']}"
             )
+            if result.get("capped"):
+                # Never let a truncated run render identically to a
+                # complete one — that is what hid the old limit=100.
+                detail += f" — CAPPED at {BODIES_STAGE_MAX}, more remain"
         else:
             # Lazy import — see _build_client_for_feature's docstring for
             # why app.services.llm/.enrichment are never imported at

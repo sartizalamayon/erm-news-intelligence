@@ -59,11 +59,13 @@ from app.db.connection import DictConnection
 from app.errors import ConfigurationError
 from app.logging import get_logger
 from app.services.llm import parsing
+from app.services.llm.concurrency import limiter_for, parallel_map, provider_of
 from app.services.llm.embedding import EmbeddingBackend, default_embedding_backend
 from app.services.llm.provider import LLMClient
 from app.services.llm.registry import build_client_for_feature
 from app.services.llm.routing import DEDUP_VERIFICATION, SCORING, TOPIC_CLUSTERING, TRANSLATION
 from app.services.matching import is_bengali
+from app.services.near_duplicates import propose_duplicate_groups
 
 logger = get_logger(__name__)
 
@@ -134,60 +136,146 @@ def _try_build_client(conn: DictConnection, feature: str) -> LLMClient | None:
 def stage_translate(
     articles: list[dict[str, Any]], client: LLMClient | None, progress: ProgressCallback | None = None
 ) -> list[dict[str, Any]]:
-    """`pipeline.py:238-276` `stage_translate()`, verbatim logic.
-    Already-translated articles are skipped (cached); already-English
-    titles get `title_en = title` for free (no LLM call); everything
-    else calls `client.translate_title()` if a client is configured,
-    else falls back to the untranslated title — exactly legacy's `else`
-    branch when `provider.enabled` is False.
+    """`pipeline.py:238-276` `stage_translate()`, same per-article
+    semantics. Already-translated articles are skipped (cached);
+    already-English titles get `title_en = title` for free (no LLM
+    call); everything else calls `client.translate_title()` if a client
+    is configured, else falls back to the untranslated title — exactly
+    legacy's `else` branch when `provider.enabled` is False.
+
+    The calls that DO need the network are issued concurrently
+    (`llm.concurrency.parallel_map`, rate-limited per provider) rather
+    than one-at-a-time. This changes wall-clock time only: the prompt,
+    the one-title-per-call shape (`BATCH_SIZE_TRANSLATE = 1`), and the
+    per-article fallback are all untouched, and results are applied by
+    input index so no title can land on the wrong article. Sequentially
+    this stage was 173 serial round-trips on a real run — several
+    minutes of pure socket wait for work that has no ordering
+    constraint at all.
     """
     total = len(articles)
-    done = 0
+
+    # Partition first: everything resolvable without a network call is
+    # settled here, so only genuine work reaches the thread pool.
+    needs_call: list[dict[str, Any]] = []
     for a in articles:
         if a.get("title_en"):
-            done += 1
-            if progress:
-                progress(done, total, "Translating")
             continue
         title = a.get("title", "")
-        if _looks_english(title):
+        if _looks_english(title) or client is None:
             a["title_en"] = title
-        elif client is not None:
-            translated = client.translate_title(title)
-            a["title_en"] = translated or title
         else:
-            a["title_en"] = title
-        done += 1
+            needs_call.append(a)
+
+    already_done = total - len(needs_call)
+    if progress:
+        progress(already_done, total, "Translating")
+
+    if not needs_call:
+        return articles
+
+    assert client is not None  # guaranteed by the partition above
+
+    def _translate(article: dict[str, Any]) -> str:
+        return client.translate_title(article.get("title", ""))
+
+    def _report(done: int, _n: int) -> None:
         if progress:
-            progress(done, total, "Translating")
+            progress(already_done + done, total, "Translating")
+
+    outcomes = parallel_map(
+        needs_call,
+        _translate,
+        limiter=limiter_for(provider_of(client)),
+        label="translate",
+        on_done=_report,
+    )
+    for article, (translated, error) in zip(needs_call, outcomes, strict=True):
+        # Same neutral default as the sequential version: an empty or
+        # failed translation leaves the original title in place rather
+        # than blanking it (p3-contract.md §7 — never silently drop).
+        if error is not None:
+            article["title_en"] = article.get("title", "")
+        else:
+            article["title_en"] = translated or article.get("title", "")
     return articles
 
 
 # ── STEP 1: dedup (embedding pre-cluster + LLM verify) ──────────────────
 
 
-def stage_dedup_embeddings(articles: list[dict[str, Any]], backend: EmbeddingBackend) -> list[dict[str, Any]]:
-    """`pipeline.py:137-160` `stage_dedup()`, verbatim logic. When the
-    backend is unavailable (always true today — see
-    `app.services.llm.embedding`), every article's `dup_group`/
-    `is_primary`/`also_in` pass through UNCHANGED via `setdefault` (a
-    no-op since the SQL SELECT already populated those keys) —
-    identical to legacy's own `_dedup.is_available() == False` path.
+def _sequence_group_id_allocator(conn: DictConnection) -> Callable[[], int]:
+    """Draw `dup_group` ids from `articles_dup_group_seq`
+    (migrations/0017) so cluster ids are unique across every day and
+    every concurrent run — see that migration's header for the
+    cross-day sibling-mixing bug this prevents.
+    """
+
+    def allocate() -> int:
+        row = conn.execute("SELECT nextval('articles_dup_group_seq') AS id").fetchone()
+        assert row is not None
+        return int(row["id"])
+
+    return allocate
+
+
+def counting_group_id_allocator(start: int = 1) -> Callable[[], int]:
+    """In-memory allocator for tests and any caller without a DB
+    connection. NOT for production use — it restarts at `start` on every
+    call site, which is precisely the per-run numbering migrations/0017
+    exists to eliminate.
+    """
+    counter = {"next": start}
+
+    def allocate() -> int:
+        value = counter["next"]
+        counter["next"] += 1
+        return value
+
+    return allocate
+
+
+def stage_dedup_embeddings(
+    articles: list[dict[str, Any]],
+    backend: EmbeddingBackend,
+    *,
+    allocate_id: Callable[[], int] | None = None,
+) -> list[dict[str, Any]]:
+    """Propose candidate duplicate groups — the first half of P3's
+    two-pass dedup, whose second half is `stage_llm_verify_groups`.
+
+    Originally this delegated entirely to an embedding backend and,
+    when none was available, passed every article through with
+    `dup_group = None`. Since `UnavailableEmbeddingBackend` is the only
+    backend that has ever existed, that "fallback" was the ONLY path
+    ever taken, and because the LLM verify pass skips `None` groups, the
+    whole dedup stage has always been a no-op that still reported
+    success. See `app.services.near_duplicates` for the full write-up.
+
+    A real embedding backend, if one is ever added, still takes
+    precedence — this lexical pass is the floor, not a replacement for
+    it.
     """
     if not articles:
         return articles
-    if not backend.is_available():
-        for a in articles:
-            a.setdefault("dup_group", None)
-            a.setdefault("is_primary", True)
-            a.setdefault("also_in", "")
-        return articles
-    # Unreachable with `UnavailableEmbeddingBackend` — the integration
-    # seam for a future embedding backend (see app.services.llm.embedding).
-    raise NotImplementedError("embedding backend reported available but no implementation exists")
+    if backend.is_available():
+        # Integration seam preserved for a future embedding backend
+        # (see app.services.llm.embedding). Not reachable today.
+        raise NotImplementedError("embedding backend reported available but no implementation exists")
+
+    propose_duplicate_groups(articles, allocate_id=allocate_id or counting_group_id_allocator())
+    for a in articles:
+        a.setdefault("is_primary", True)
+        a.setdefault("also_in", "")
+    return articles
 
 
-def stage_llm_verify_groups(articles: list[dict[str, Any]], client: LLMClient | None) -> list[dict[str, Any]]:
+def stage_llm_verify_groups(
+    articles: list[dict[str, Any]],
+    client: LLMClient | None,
+    *,
+    allocate_id: Callable[[], int] | None = None,
+) -> list[dict[str, Any]]:
     """`pipeline.py:164-225` `stage_llm_verify_groups()`, verbatim logic:
     for every embedding-proposed group with 2+ members, ask the LLM to
     SPLIT it (never merge across groups it wasn't given together),
@@ -202,7 +290,12 @@ def stage_llm_verify_groups(articles: list[dict[str, Any]], client: LLMClient | 
     for a in articles:
         groups[a.get("dup_group")].append(a)
 
-    next_group_id = max((g for g in groups if isinstance(g, int)), default=0) + 1
+    # Split-off subgroups must also draw from the global id space —
+    # `max(existing) + 1` was per-run numbering with the same cross-day
+    # collision hazard migrations/0017 documents.
+    allocate = allocate_id or counting_group_id_allocator(
+        max((g for g in groups if isinstance(g, int)), default=0) + 1
+    )
 
     chunk_size = parsing.BATCH_SIZE_DEDUP_VERIFY
     for gid, members in groups.items():
@@ -217,8 +310,7 @@ def stage_llm_verify_groups(articles: list[dict[str, Any]], client: LLMClient | 
             subgroup_to_gid: dict[int, int] = {}
             for m, s in zip(chunk, sub, strict=False):
                 if s not in subgroup_to_gid:
-                    subgroup_to_gid[s] = next_group_id
-                    next_group_id += 1
+                    subgroup_to_gid[s] = allocate()
                 m["dup_group"] = subgroup_to_gid[s]
 
     regrouped: dict[Any, list[dict[str, Any]]] = defaultdict(list)
@@ -381,8 +473,9 @@ def run_llm_enrichment(
 
         if progress:
             progress(0, total, "Grouping duplicates")
-        articles = stage_dedup_embeddings(articles, embedding_backend)
-        articles = stage_llm_verify_groups(articles, dedup_verify_client)
+        allocate_group_id = _sequence_group_id_allocator(conn)
+        articles = stage_dedup_embeddings(articles, embedding_backend, allocate_id=allocate_group_id)
+        articles = stage_llm_verify_groups(articles, dedup_verify_client, allocate_id=allocate_group_id)
         for a in articles:
             conn.execute(
                 "UPDATE articles SET dup_group=%s, is_primary=%s, also_in=%s WHERE id=%s",
@@ -399,12 +492,41 @@ def run_llm_enrichment(
             skipped_stages.append(STAGE_JUDGE)
         else:
             batch_size = int(os.environ.get("LLM_BATCH", str(parsing.BATCH_SIZE_JUDGE_DEFAULT)))
+            chunks = [articles[s : s + batch_size] for s in range(0, len(articles), batch_size)]
+
+            # Batches are issued concurrently; DB writes stay on THIS
+            # thread. `conn` is a single psycopg connection and is not
+            # thread-safe, so the split is deliberate: parallelise the
+            # network wait, never the cursor. Batch composition and the
+            # per-batch prompt are unchanged from the sequential
+            # version, and `strict=True` below pins each judgment set to
+            # the batch that produced it.
             scored = 0
-            for start in range(0, len(articles), batch_size):
+
+            def _report(done: int, n: int) -> None:
+                if progress:
+                    # Report in articles, not batches, so the UI number
+                    # means the same thing it did before.
+                    progress(min(done * batch_size, len(articles)), len(articles), "Scoring relevance")
+
+            outcomes = parallel_map(
+                chunks,
+                judge_client.judge_batch,
+                limiter=limiter_for(provider_of(judge_client)),
+                label="judge",
+                on_done=_report,
+            )
+            for chunk, (judgments, error) in zip(chunks, outcomes, strict=True):
                 if should_stop and should_stop():
                     break
-                chunk = articles[start : start + batch_size]
-                judgments = judge_client.judge_batch(chunk)
+                if error is not None or judgments is None:
+                    # `judge_batch` already converts provider errors into
+                    # neutral per-item fallbacks internally; reaching here
+                    # means something outside that contract failed. Leave
+                    # the batch unscored rather than writing a wrong score
+                    # — an unscored row stays visible as pending.
+                    logger.warning("judge_batch_failed_leaving_unscored", extra={"batch_size": len(chunk)})
+                    continue
                 for a, j in zip(chunk, judgments, strict=False):
                     a["llm_score"] = j.score
                     a["llm_reason"] = j.reason
@@ -413,8 +535,8 @@ def run_llm_enrichment(
                     )
                 conn.commit()
                 scored += len(chunk)
-                if progress:
-                    progress(scored, len(articles), "Scoring relevance")
+            if progress:
+                progress(scored, len(articles), "Scoring relevance")
 
     # ── STEP 3: topic clustering ──
     if do_topic and not (should_stop and should_stop()):

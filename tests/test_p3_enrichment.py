@@ -32,6 +32,7 @@ from app.services.enrichment import (
     _looks_english,
     _norm_label,
     _select_where,
+    counting_group_id_allocator,
     embed_prefold,
     run_llm_enrichment,
     stage_dedup_embeddings,
@@ -124,23 +125,79 @@ def test_stage_translate_non_english_no_client_falls_back_to_original() -> None:
     assert result[0]["title_en"] == "বাংলা শিরোনাম"
 
 
-def test_stage_translate_progress_callback_fires_per_article() -> None:
+def test_stage_translate_reports_final_progress_for_no_call_articles() -> None:
+    """Articles needing no network call (already English, already
+    translated, or no client configured) are settled in one partition
+    pass and reported once, rather than ticking the callback per item.
+    What the UI needs is `done == total` when the stage finishes, which
+    this asserts; the intermediate tick count is not a contract.
+    """
     calls = []
     articles = [{"title": "English one"}, {"title": "English two"}]
     stage_translate(articles, client=None, progress=lambda done, total, step: calls.append((done, total, step)))
-    assert calls == [(1, 2, "Translating"), (2, 2, "Translating")]
+    assert calls[-1] == (2, 2, "Translating")
+    assert all(a["title_en"] == a["title"] for a in articles)
 
 
-def test_stage_dedup_embeddings_unavailable_backend_passes_through_unchanged() -> None:
-    articles = [{"id": 1, "title": "A"}, {"id": 2, "dup_group": 7, "is_primary": False, "also_in": "x"}]
-    result = stage_dedup_embeddings(articles, UnavailableEmbeddingBackend())
-    assert result[0]["dup_group"] is None
-    assert result[0]["is_primary"] is True
-    assert result[0]["also_in"] == ""
-    # article 2 already had explicit values — setdefault must NOT overwrite them
-    assert result[1]["dup_group"] == 7
-    assert result[1]["is_primary"] is False
-    assert result[1]["also_in"] == "x"
+def test_stage_translate_progress_reaches_total_with_a_client() -> None:
+    """With a client, the per-article calls run concurrently, so the
+    callback fires once per completed call in nondeterministic order.
+    The invariants that matter: every article ends translated, and the
+    final report equals the total.
+    """
+
+    class _Client:
+        name = "test · model"
+
+        def translate_title(self, title: str) -> str:
+            return f"EN:{title}"
+
+    calls = []
+    articles = [{"title": "বাংলা এক"}, {"title": "বাংলা দুই"}, {"title": "বাংলা তিন"}]
+    stage_translate(
+        articles, client=_Client(), progress=lambda done, total, step: calls.append((done, total, step))
+    )
+    assert [a["title_en"] for a in articles] == ["EN:বাংলা এক", "EN:বাংলা দুই", "EN:বাংলা তিন"]
+    assert max(done for done, _t, _s in calls) == 3
+
+
+def test_stage_dedup_embeddings_clusters_near_duplicate_headlines() -> None:
+    """The stage used to be a permanent no-op: with no embedding backend
+    it left `dup_group = None` on everything, and the LLM verify pass
+    skips `None` groups — so "Group duplicates" reported success while
+    detecting zero duplicates on every run ever. It now proposes groups
+    lexically (app.services.near_duplicates).
+    """
+    articles = [
+        {"id": 1, "title_en": "ADB sets over $1b annual pipeline under Bangladesh growth plan"},
+        {"id": 2, "title_en": "ADB, Bangladesh plan over $1b annual investments pipeline"},
+        {"id": 3, "title_en": "Cricket board announces new selection panel for home series"},
+    ]
+    result = stage_dedup_embeddings(
+        articles, UnavailableEmbeddingBackend(), allocate_id=counting_group_id_allocator()
+    )
+    assert result[0]["dup_group"] is not None
+    assert result[0]["dup_group"] == result[1]["dup_group"]
+    # An unrelated headline must NOT be pulled into the group.
+    assert result[2]["dup_group"] is None
+    assert result[2]["is_primary"] is True
+    assert result[2]["also_in"] == ""
+
+
+def test_stage_dedup_embeddings_rederives_stale_group_ids() -> None:
+    """Re-running dedup must re-derive from the current headlines rather
+    than preserving whatever `dup_group` the SELECT loaded. Cluster ids
+    come from a global sequence (migrations/0017), so a stale per-run id
+    carried over from an earlier run would alias an unrelated group.
+    """
+    articles = [
+        {"id": 1, "title_en": "Completely unrelated story about traffic"},
+        {"id": 2, "title_en": "Another unrelated story about weather", "dup_group": 7},
+    ]
+    result = stage_dedup_embeddings(
+        articles, UnavailableEmbeddingBackend(), allocate_id=counting_group_id_allocator()
+    )
+    assert result[1]["dup_group"] is None
 
 
 def test_stage_dedup_embeddings_empty_list_is_a_noop() -> None:

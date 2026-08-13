@@ -10,6 +10,7 @@ import { mountKeywords } from "./screens/keywords.js";
 import { mountPrompts } from "./screens/prompts.js";
 import { mountHealth } from "./screens/health.js";
 import { mountManual } from "./screens/manual.js";
+import { mountRun } from "./screens/run.js";
 
 const SCREENS = {
   dash: mountDashboard,
@@ -21,6 +22,7 @@ const SCREENS = {
   prompts: mountPrompts,
   health: mountHealth,
   manual: mountManual,
+  run: mountRun,
 };
 
 export function mountScreen(key, root, ctx) {

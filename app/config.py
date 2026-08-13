@@ -285,8 +285,22 @@ def validate_production_settings(settings: Settings) -> None:
         }.items()
         if not value
     ]
-    if not settings.groq_api_key and not settings.gemini_api_key:
-        missing.append("GROQ_API_KEY or GEMINI_API_KEY (at least one)")
+    # Any ONE provider bootstrap key is enough to start: routing resolves
+    # primary -> secondary and degrades per-feature rather than failing.
+    # Mistral and NVIDIA are included because they are genuinely
+    # resolvable from env now (app.services.llm.registry's
+    # PROVIDER_CONFIGS_PROVIDERS) — previously only Groq/Gemini were, so
+    # an install configured solely with MISTRAL_API_KEY would pass this
+    # check today and still have had no usable provider.
+    if not any(
+        (
+            settings.groq_api_key,
+            settings.gemini_api_key,
+            settings.mistral_api_key,
+            settings.nvidia_api_key,
+        )
+    ):
+        missing.append("one of MISTRAL_API_KEY / GEMINI_API_KEY / GROQ_API_KEY / NVIDIA_API_KEY")
 
     if missing:
         raise ConfigurationError(

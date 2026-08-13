@@ -95,6 +95,48 @@ def _backoff_seconds(attempt: int) -> float:
     return (1.5**attempt) + random.uniform(0, 0.75)
 
 
+def _repair_encoding(response: requests.Response) -> None:
+    """Guard against `requests`' ISO-8859-1 fallback mangling Bengali.
+
+    Per RFC 2616, `requests` assumes ISO-8859-1 for a `text/*` response
+    whose `Content-Type` carries no `charset`. Every byte then decodes
+    to *something* — no exception, no warning — so a UTF-8 Bengali
+    headline silently becomes mojibake, and `.text` is what almost every
+    method in this package reads (`_id_enum`, `_body`, `_daily_star`,
+    `_rss`, `_sitemap`, ...).
+
+    Measured 2026-08-14: 0 of 53,646 stored titles show mojibake and
+    29,723 hold correct Bengali, so no source we currently poll omits
+    its charset. This is therefore a guard against a change we do not
+    control — a CDN or CMS upgrade dropping the charset would otherwise
+    corrupt a source's entire history before anyone noticed, and the
+    corruption is unrecoverable once stored.
+
+    Only overrides the ISO-8859-1 fallback and the no-encoding case; an
+    explicitly declared charset is always respected.
+
+    Reads everything through `getattr`: this sits on the return path of
+    the one function every source's every HTTP call funnels through, so
+    it must tolerate any response-like object (the test doubles across
+    tests/ are plain dataclasses with only the fields their own case
+    needs) rather than being able to raise and take a whole collection
+    run down over a decoding nicety.
+    """
+    declared = (getattr(response, "encoding", None) or "").lower()
+    if declared and declared != "iso-8859-1":
+        return
+    if not hasattr(response, "encoding"):
+        return
+    # `apparent_encoding` sniffs the actual bytes (charset_normalizer).
+    # UTF-8 is the fallback-of-the-fallback: it is what every source in
+    # this registry actually serves, and it fails loudly on genuinely
+    # non-UTF-8 bytes rather than silently producing garbage.
+    try:
+        response.encoding = getattr(response, "apparent_encoding", None) or "utf-8"
+    except (AttributeError, TypeError):  # frozen/read-only double
+        return
+
+
 def get(
     session: requests.Session,
     url: str,
@@ -147,6 +189,7 @@ def get(
         if response.status_code in RETRYABLE_STATUS and attempt < max_retries:
             time.sleep(_backoff_seconds(attempt))
             continue
+        _repair_encoding(response)
         return response
     if last_exc is not None:
         logger.warning("http_get_failed", extra={"source": source, "url": url, "error": type(last_exc).__name__})

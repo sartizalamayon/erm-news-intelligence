@@ -89,6 +89,8 @@ from app.api.schemas.admin import (
     HealthOverviewOut,
     HealthSourceRowOut,
     RematchResult,
+    ResetDayBody,
+    ResetDayResult,
     RunRowOut,
     RunStartBody,
     RunStatusOut,
@@ -252,6 +254,32 @@ def start_run(body: RunStartBody, admin: AuthenticatedUser = Depends(require_adm
     """
     data = admin_service.start_run(fetch=body.fetch, match=body.match, enrich=body.enrich, trigger="manual")
     return RunStatusOut(**data)
+
+
+@router.post("/pipeline/reset-day", response_model=ResetDayResult)
+def reset_day(body: ResetDayBody, admin: AuthenticatedUser = Depends(require_admin)) -> ResetDayResult:
+    """Make a day collectable again — delete its collected articles AND
+    drop the dedup tombstones those deletions create.
+
+    This exists because doing it by hand is a trap that already bit us
+    in production-like use. `seen_urls` remembers every URL whose
+    `articles` row stops existing (migrations/0016), so a plain
+    `DELETE FROM articles` leaves the day empty but every URL still
+    "seen" — the next collection then reports "0 new" for sources that
+    are working perfectly, and looks for all the world like the
+    scrapers broke. Measured live on 2026-08-14: 8,931 orphaned
+    tombstones, sources showing "178 fetched · 4 new".
+
+    Defaults to keeping approved/rejected rows — re-collecting is a
+    data-collection operation and must not destroy review work.
+    """
+    with get_connection() as conn:
+        result = admin_service.reset_day(conn, day=body.day, keep_reviewed=body.keep_reviewed)
+    logger.info(
+        "pipeline_day_reset",
+        extra={"day": result["day"], "deleted": result["deleted"], "forgotten_urls": result["forgotten_urls"]},
+    )
+    return ResetDayResult(**result)
 
 
 @router.get("/pipeline/run/status", response_model=RunStatusOut)

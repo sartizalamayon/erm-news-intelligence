@@ -100,31 +100,10 @@ function macroStatusHtml(t) {
   </div>`;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export function mountDashboard(root, { navigate }) {
   let alive = true;
   const mode = state.dashMode || "short";
-  let lastData = null; // cached last-loaded payload, so pipeline ticks can re-render without re-fetching
-  // Render-only mirror of GET /health/pipeline/run/status, the real
-  // state of which lives entirely server-side (app.services.admin) —
-  // see runCollection()'s docstring below.
-  // { active, startedAt, finishedAt,
-  //   fetch: null | { status, detail, sources: [{name,status,fetched,inserted,duplicate,error}], total, completed },
-  //   match: null | { status, detail },
-  //   stages: [{key,name,desc,status,detail}] }
-  let pipeline = null;
-  let tickTimer = null;
-  // Phase selection for "Run collection" (BUGFIX-NAV: this used to be a
-  // single undifferentiated button that only ever ran the 5 enrichment
-  // stages — see runCollection()'s own docstring below). All three
-  // phases start checked so one click still does the full "nothing new
-  // -> today's news, matched, scored, ready to review" pass by default;
-  // an admin can uncheck any phase to run a subset.
-  const phases = { fetch: true, match: true, enrich: true };
-
+  let lastData = null; // cached last-loaded payload
   ensureRiskSections();
   render(loadingShell(mode));
   load();
@@ -152,271 +131,20 @@ export function mountDashboard(root, { navigate }) {
     root.querySelectorAll("[data-mode]").forEach((btn) => {
       btn.addEventListener("click", () => setState({ dashMode: btn.getAttribute("data-mode") }));
     });
-    const runCollectionBtn = root.querySelector("#runCollectionBtn");
-    if (runCollectionBtn) runCollectionBtn.addEventListener("click", () => runCollection());
-    root.querySelectorAll("[data-phase]").forEach((cb) => {
-      cb.addEventListener("change", () => {
-        phases[cb.getAttribute("data-phase")] = cb.checked;
-      });
-    });
+    const goRunBtn = root.querySelector("#goRunBtn");
+    if (goRunBtn) goRunBtn.addEventListener("click", () => navigate("run"));
     const buildExportBtn = root.querySelector("#buildExportBtn");
     if (buildExportBtn) buildExportBtn.addEventListener("click", () => navigate("export"));
+    const dashRetry = root.querySelector("#dashRetry");
+    if (dashRetry) dashRetry.addEventListener("click", () => load());
   }
 
-  // Re-renders whatever's currently on screen from the cached payload —
-  // used to tick the pipeline-progress panel (elapsed time, per-stage
-  // status) without a network round trip.
-  function rerenderCurrent() {
-    if (!alive || lastData === null) return;
-    if (mode === "short") renderShort(lastData);
-    else renderLong(lastData);
-  }
-
-  function startTicking() {
-    stopTicking();
-    tickTimer = setInterval(() => {
-      if (!alive) return stopTicking();
-      rerenderCurrent();
-    }, 500);
-  }
-  function stopTicking() {
-    if (tickTimer) clearInterval(tickTimer);
-    tickTimer = null;
-  }
-
-  // BUGFIX-NAV: "Run collection" used to be a CLIENT-SIDE conductor —
-  // this module awaited runFetchPhase() then checked its own `alive`
-  // closure flag before calling runMatchPhase()/runEnrichPhase(). The
-  // moment an admin navigated away mid-fetch, destroy() (bottom of this
-  // file) flipped `alive = false`; the fetch poll loop returned early
-  // (fetch itself kept running fine server-side — it was already a
-  // background thread), and back here `if (alive && pipeline.match)`
-  // now read false, so match/enrich were silently never called. Real
-  // articles landed in the DB; almost none got matched.
-  //
-  // Fixed by moving ALL sequencing server-side
-  // (app.services.admin.start_run/_run_pipeline_in_background): this
-  // function now makes exactly ONE call to start the whole requested
-  // run, then polls only to RENDER progress. If this poll loop is
-  // interrupted by navigation, the run itself is entirely unaffected —
-  // fetch/match/enrich keep proceeding in the server's background
-  // thread regardless of whether anything is still watching. See
-  // shell.js for the header pill's own independent poll, which is what
-  // lets an admin navigate away and still see accurate live status.
-  async function runCollection() {
-    if (pipeline && pipeline.active) return;
-    const selected = { ...phases };
-    if (!selected.fetch && !selected.match && !selected.enrich) return;
-
-    pipeline = {
-      active: true,
-      startedAt: Date.now(),
-      finishedAt: null,
-      fetch: selected.fetch ? { status: "pending", detail: "", sources: [], total: 0, completed: 0 } : null,
-      match: selected.match ? { status: "pending", detail: "" } : null,
-      stages: [],
-    };
-    setState({ progress: "Run collection · starting…" });
-    startTicking();
-    rerenderCurrent();
-
-    try {
-      await api.post("/health/pipeline/run", selected);
-    } catch (err) {
-      pipeline.active = false;
-      pipeline.finishedAt = Date.now();
-      if (pipeline.fetch) {
-        pipeline.fetch.status = "error";
-        pipeline.fetch.detail = fmtErr(err);
-      }
-      stopTicking();
-      setState({ progress: "" });
-      rerenderCurrent();
-      return;
-    }
-    await pollRunUntilDone();
-  }
-
-  // Purely observational: the run this polls is already proceeding
-  // server-side regardless of this loop's existence (see runCollection's
-  // docstring above). Stopping this loop (navigation -> destroy() ->
-  // `alive = false`) stops RENDERING, nothing more.
-  async function pollRunUntilDone() {
-    let terminal = false;
-    while (alive && !terminal) {
-      let poll;
-      try {
-        poll = await api.get("/health/pipeline/run/status");
-      } catch (err) {
-        if (pipeline.fetch) pipeline.fetch.detail = fmtErr(err);
-        break;
-      }
-      if (!alive) return;
-      applyRunStatusToPipeline(poll);
-      rerenderCurrent();
-      terminal = poll.status === "done" || poll.status === "error";
-      if (!terminal) await sleep(1500);
-    }
-    if (!alive) return;
-    pipeline.active = false;
-    pipeline.finishedAt = Date.now();
-    stopTicking();
-    setState({ progress: "" });
-    rerenderCurrent();
-  }
-
-  // Maps GET /health/pipeline/run/status's consolidated shape onto this
-  // screen's local render-only `pipeline` object — the same fields
-  // fetchPhaseRowHtml/matchPhaseRowHtml/pipelinePanelHtml already know
-  // how to draw, just sourced from one poll instead of three separate
-  // client-driven phases.
-  function applyRunStatusToPipeline(poll) {
-    if (poll.fetch && pipeline.fetch) {
-      pipeline.fetch.status = poll.fetch.status;
-      pipeline.fetch.detail = poll.fetch.detail;
-      pipeline.fetch.total = poll.fetch.total_sources || 0;
-      pipeline.fetch.completed = poll.fetch.completed || 0;
-      pipeline.fetch.sources = poll.fetch.sources || [];
-    }
-    if (poll.match && pipeline.match) {
-      pipeline.match.status = poll.match.status;
-      pipeline.match.detail = poll.match.detail;
-    }
-    if (poll.enrich) {
-      pipeline.stages = (poll.enrich.stages || []).map((s) => ({
-        key: s.key,
-        name: s.name,
-        desc: s.desc,
-        status: s.status,
-        detail: s.detail,
-      }));
-    }
-    setState({ progress: progressTextFor(poll) });
-  }
-
-  function progressTextFor(poll) {
-    if (poll.status !== "running") return "";
-    if (poll.phase === "fetch" && poll.fetch) {
-      return `Run collection · fetching (${poll.fetch.completed || 0}/${poll.fetch.total_sources || "?"} sources)`;
-    }
-    if (poll.phase === "match") return "Run collection · matching keywords";
-    if (poll.phase === "enrich" && poll.enrich) {
-      const stages = poll.enrich.stages || [];
-      const doneCount = stages.filter((s) => s.status === "done" || s.status === "error").length;
-      const current = stages.find((s) => s.status === "running");
-      return `Run collection · ${current ? current.name : "enrich"} (${doneCount}/${stages.length})`;
-    }
-    return "Run collection · starting…";
-  }
-
-  // Fetch phase row + live per-source list. `f.sources` grows in real
-  // time as GET /health/pipeline/fetch/status is polled (backed by
-  // app.services.collector.run_collection's new progress_cb hook, fired
-  // per source AS it completes — not batched up and revealed only once
-  // the whole ~45-source run finishes). Capped to the most recent dozen
-  // in a scrollable strip so a near-complete run doesn't grow the card
-  // unbounded — the underlying data behind `f.completed`/`f.total` is
-  // still the real count of every source, not just the ones shown.
-  function fetchPhaseRowHtml(f) {
-    if (!f) return "";
-    const icon = f.status === "done" ? "&#10003;" : f.status === "error" ? "&#10005;" : f.status === "running" ? "&#8987;" : "&#183;";
-    const color =
-      f.status === "done" ? "var(--green)" : f.status === "error" ? "var(--red)" : f.status === "running" ? "var(--actx)" : "var(--tx4)";
-    const detail =
-      f.status === "pending"
-        ? "waiting…"
-        : f.status === "running"
-        ? `fetching · ${f.completed}/${f.total || "?"} sources done`
-        : f.status === "error"
-        ? f.detail || "fetch failed"
-        : `done · ${f.detail}`;
-    const sourceRows = (f.sources || [])
-      .slice(-12)
-      .map((s) => {
-        const sIcon = s.status === "ok" ? "&#10003;" : s.status === "failed" ? "&#10005;" : "&#183;";
-        const sColor = s.status === "ok" ? "var(--green)" : s.status === "failed" ? "var(--red)" : "var(--tx4)";
-        const sDetail = s.status === "failed" ? s.error || "failed" : `${s.fetched} fetched · ${s.inserted} new`;
-        return `<div class="row" style="gap:8px;padding:2px 0;">
-          <span style="width:12px;text-align:center;color:${sColor};font-size:11px;">${sIcon}</span>
-          <span style="flex:0 0 auto;max-width:170px;font-size:11px;color:var(--tx2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(s.name)}</span>
-          <span style="font-size:10.5px;color:var(--tx4);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(sDetail)}</span>
-        </div>`;
-      })
-      .join("");
-    return `<div style="padding:6px 0;">
-      <div class="row" style="gap:11px;">
-        <span style="width:16px;text-align:center;color:${color};font-size:13px;">${icon}</span>
-        <span style="flex:0 0 150px;font-size:12.5px;font-weight:600;">Fetch news</span>
-        <span style="flex:1;min-width:0;font-size:11.5px;color:var(--tx3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(detail)}">${escapeHtml(detail)}</span>
-      </div>
-      ${sourceRows ? `<div style="max-height:150px;overflow-y:auto;margin:4px 0 0 27px;padding-left:9px;border-left:1px solid var(--line);">${sourceRows}</div>` : ""}
-    </div>`;
-  }
-
-  function matchPhaseRowHtml(m) {
-    if (!m) return "";
-    const icon = m.status === "done" ? "&#10003;" : m.status === "error" ? "&#10005;" : m.status === "running" ? "&#8987;" : "&#183;";
-    const color =
-      m.status === "done" ? "var(--green)" : m.status === "error" ? "var(--red)" : m.status === "running" ? "var(--actx)" : "var(--tx4)";
-    const detail = m.status === "pending" ? "waiting…" : m.status === "running" ? "matching…" : m.detail || m.status;
-    return `<div class="row" style="gap:11px;padding:6px 0;">
-      <span style="width:16px;text-align:center;color:${color};font-size:13px;">${icon}</span>
-      <span style="flex:0 0 150px;font-size:12.5px;font-weight:600;">Match keywords</span>
-      <span style="flex:1;min-width:0;font-size:11.5px;color:var(--tx3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(detail)}">${escapeHtml(detail)}</span>
-    </div>`;
-  }
-
-  function pipelinePanelHtml() {
-    if (!pipeline) return "";
-    const elapsedTotal = ((pipeline.finishedAt || Date.now()) - pipeline.startedAt) / 1000;
-    const hasError =
-      pipeline.stages.some((s) => s.status === "error") ||
-      (pipeline.fetch && pipeline.fetch.status === "error") ||
-      (pipeline.match && pipeline.match.status === "error");
-    const stageRows = pipeline.stages
-      .map((s) => {
-        const icon = s.status === "done" ? "&#10003;" : s.status === "error" ? "&#10005;" : s.status === "running" ? "&#8987;" : "&#183;";
-        const color =
-          s.status === "done" ? "var(--green)" : s.status === "error" ? "var(--red)" : s.status === "running" ? "var(--actx)" : "var(--tx4)";
-        const detail =
-          s.status === "pending"
-            ? "waiting…"
-            : s.status === "running"
-            ? "running…"
-            : `${s.status}${s.detail ? " · " + escapeHtml(s.detail) : ""}`;
-        return `<div class="row" style="gap:11px;padding:6px 0;">
-          <span style="width:16px;text-align:center;color:${color};font-size:13px;">${icon}</span>
-          <span style="flex:0 0 150px;font-size:12.5px;font-weight:600;">${escapeHtml(s.name)}</span>
-          <span style="flex:1;min-width:0;font-size:11.5px;color:var(--tx3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${detail}">${detail}</span>
-        </div>`;
-      })
-      .join("");
-    return `<div class="card" style="margin-bottom:16px;border-color:${pipeline.active ? "var(--ac2)" : hasError ? "var(--red)" : "var(--line)"};">
-      <div class="row-between" style="margin-bottom:4px;">
-        <h3 style="margin:0;">Run collection ${pipeline.active ? "· running" : hasError ? "· finished with errors" : "· done"}</h3>
-        <span class="mono" style="font-size:11px;color:var(--tx3);">${elapsedTotal.toFixed(0)}s elapsed</span>
-      </div>
-      <p class="hint" style="margin:0 0 10px;">Fetches today's news from every enabled source, matches it against your keyword rules, then runs enrichment — pick which phases run from the checkboxes above. Progress below is real: live per-source fetch status, not an instant "done".</p>
-      <div class="stack" style="gap:0;">
-        ${fetchPhaseRowHtml(pipeline.fetch)}
-        ${matchPhaseRowHtml(pipeline.match)}
-        ${stageRows}
-      </div>
-    </div>`;
-  }
-
-  // Phase checkboxes for "Run collection" — disabled while a run is
-  // active (the running set was already snapshotted when it started;
-  // toggling mid-run only affects the NEXT click).
-  function phaseCheckboxHtml(key, label, running) {
-    return `<label class="row" style="gap:5px;align-items:center;font-size:11px;color:var(--tx3);cursor:${running ? "default" : "pointer"};white-space:nowrap;">
-      <input type="checkbox" data-phase="${key}" ${phases[key] ? "checked" : ""} ${running ? "disabled" : ""} style="accent-color:var(--ac2);width:13px;height:13px;" />
-      ${label}
-    </label>`;
-  }
-
+  // Running a collection lives on its own admin screen now
+  // (screens/run.js), not here. It is admin-only and global, it needs
+  // room for the full ~45-source progress list, and its polling has to
+  // patch the DOM in place rather than re-render — none of which fits a
+  // per-day reading dashboard. This header just links to it.
   function header(isAdmin) {
-    const running = !!(pipeline && pipeline.active);
     return `
       <div class="row wrap" style="margin-bottom:22px;">
         <div class="seg-group" style="height:auto;padding:3px;">
@@ -433,14 +161,7 @@ export function mountDashboard(root, { navigate }) {
         <div class="grow"></div>
         ${
           isAdmin
-            ? `<div class="row" style="gap:12px;align-items:center;flex-wrap:wrap;">
-                <div class="row" style="gap:11px;">
-                  ${phaseCheckboxHtml("fetch", "Fetch", running)}
-                  ${phaseCheckboxHtml("match", "Match", running)}
-                  ${phaseCheckboxHtml("enrich", "Enrich", running)}
-                </div>
-                <button id="runCollectionBtn" class="btn btn-soft" style="white-space:nowrap;" ${running ? "disabled" : ""}>&#9654; ${running ? "Running…" : "Run collection"}</button>
-              </div>`
+            ? `<button id="goRunBtn" class="btn btn-soft" style="white-space:nowrap;">&#9654; Run collection</button>`
             : ""
         }
         <button id="buildExportBtn" class="btn btn-outline" style="white-space:nowrap;">&#8595; Build an export</button>
@@ -618,7 +339,6 @@ export function mountDashboard(root, { navigate }) {
 
     render(`
       ${header(isAdmin)}
-      ${pipelinePanelHtml()}
       <div class="grid-4" style="margin-bottom:16px;">${kpisHtml}</div>
       <div class="grid-2" style="margin-bottom:16px;">
         <div class="card">
@@ -820,7 +540,6 @@ export function mountDashboard(root, { navigate }) {
 
     render(`
       ${header(isAdmin)}
-      ${pipelinePanelHtml()}
       <div class="grid-3" style="margin-bottom:16px;">${trendHtml}</div>
       <div class="card" style="margin-bottom:16px;">
         <h3>Coverage volume by section · 12 months</h3>
@@ -867,7 +586,6 @@ export function mountDashboard(root, { navigate }) {
   return {
     destroy() {
       alive = false;
-      stopTicking();
     },
   };
 }

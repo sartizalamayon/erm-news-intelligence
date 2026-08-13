@@ -281,13 +281,45 @@ def test_write_items_dedupes_against_seen_urls(fake_queries):
     assert fake_queries.rows == []
 
 
-def test_write_items_remembers_newly_inserted_url_norm(fake_queries):
+def test_write_items_does_not_write_seen_urls_on_insert(fake_queries):
+    """Regression guard for the dedup-poisoning bug (migrations/0016).
+
+    `write_items` used to record every INSERTED url_norm in `seen_urls`.
+    Because `seen_urls` is consulted BEFORE the insert is attempted, and
+    several delete paths never cleaned it up, deleting a day's articles
+    left the URLs permanently un-refetchable — 8,931 such orphans were
+    measured live, and sources reported "178 fetched · 4 new" on a day
+    whose articles had just been deleted.
+
+    `seen_urls` is now a tombstone table populated by the
+    `articles_remember_deleted_urls` trigger when a row is DELETED, so
+    the cross-run dedup guarantee is unchanged while a delete-and-
+    re-collect stops silently poisoning every later run. Nothing on the
+    insert path may write to it.
+    """
     from app.sources._util import normalize_url
 
     result = collector.SourceResult(source_key="s", display_name="S", status="ok", fetched=1)
     items = [_item("https://new.example/story", "New")]
     collector.write_items(_conn(), result, items, day=date(2026, 8, 6))
-    assert normalize_url("https://new.example/story") in fake_queries.seen_urls
+    assert normalize_url("https://new.example/story") not in fake_queries.seen_urls
+
+
+def test_write_items_still_skips_urls_already_tombstoned(fake_queries):
+    """The other half of the guarantee: a url_norm that IS in
+    `seen_urls` (i.e. its article was purged) must still be refused, so
+    purged articles cannot silently reappear.
+    """
+    from app.sources._util import normalize_url
+
+    purged = normalize_url("https://old.example/purged")
+    fake_queries.seen_urls.add(purged)
+    result = collector.SourceResult(source_key="s", display_name="S", status="ok", fetched=1)
+    items = [_item("https://old.example/purged", "Purged")]
+    out = collector.write_items(_conn(), result, items, day=date(2026, 8, 6))
+    assert out.inserted == 0
+    assert out.duplicate == 1
+    assert fake_queries.rows == []
 
 
 def test_write_items_uses_display_name_as_source_column(fake_queries):

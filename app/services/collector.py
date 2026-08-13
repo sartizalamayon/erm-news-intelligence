@@ -230,14 +230,25 @@ def write_items(conn: DictConnection, source_result: SourceResult, items: list[F
     """Dedup-on-insert write path (legacy-behavior.md §2.6 minus P2's
     match step). Two-step dedup, per app/db/queries.py's own docstring:
 
-    1. `seen_urls` first — catches a URL whose `articles` row already
-       aged out of the retention window (storage-policy.md), which the
-       live `articles.url_norm` index alone cannot catch.
+    1. `seen_urls` first — catches a URL whose `articles` row no longer
+       exists (aged out of the retention window, or purged via the
+       manual release valve), which the live `articles.url_norm` index
+       alone cannot catch.
     2. `insert_article()`'s own `ON CONFLICT (url_norm) DO NOTHING`
        against currently-live rows — a single indexed lookup baked into
        the INSERT itself, never the legacy `WHERE url=? OR url_norm=?`
        full-table scan (ADR §2, the single worst bottleneck in the old
        system — explicitly not reintroduced here).
+
+    Note what this function no longer does: it does NOT write to
+    `seen_urls` on a successful insert. `seen_urls` is a tombstone table
+    maintained by the `articles_remember_deleted_urls` trigger
+    (migrations/0016) at the only moment its contents mean anything — a
+    row ceasing to exist. Writing it here as well used to duplicate
+    every live row into it, and, because several delete paths never
+    cleaned it up, left orphaned entries that permanently blocked a URL
+    from ever being re-collected (8,931 of them, measured live). See
+    0016's header for the full post-mortem.
     """
     inserted = 0
     duplicate = 0
@@ -259,8 +270,6 @@ def write_items(conn: DictConnection, source_result: SourceResult, items: list[F
             duplicate += 1
             continue
         inserted += 1
-        if url_norm:
-            queries.remember_seen_url(conn, url_norm, day)
     source_result.inserted = inserted
     source_result.duplicate = duplicate
     return source_result
