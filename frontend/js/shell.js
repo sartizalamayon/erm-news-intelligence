@@ -61,7 +61,68 @@ export function mountShell(root, { onSignOut }) {
     syncAccountPanel();
   });
   refreshShellCounts();
+  startRunStatusPolling();
   return { navigate };
+}
+
+// BUGFIX-NAV: the header's live-status pill used to only ever reflect
+// dashboard.js's OWN in-memory pipeline object — real status while that
+// screen happened to be mounted, nothing at all once an admin navigated
+// away (the whole point of this mission's fix: a run started from the
+// Dashboard used to look "finished" the instant you left it, even
+// though fetch/match/enrich might still genuinely be running server-
+// side). Polled here instead, at the app-shell level — mounted once for
+// the app's lifetime, independent of which screen is currently active —
+// against the same consolidated GET /health/pipeline/run/status
+// dashboard.js's own poll uses (app.services.admin.run_status). Purely
+// observational, same as that poll: this never starts or steers a run,
+// only renders whatever the server-side background thread is actually
+// doing right now.
+let runPollTimer = null;
+let runPollInFlight = false;
+
+function startRunStatusPolling() {
+  if (runPollTimer) return;
+  runPollTimer = setInterval(pollRunStatus, 2000);
+  pollRunStatus();
+}
+
+async function pollRunStatus() {
+  // Gated to admins (same as the "Run collection" control itself) so a
+  // non-admin session — or the pre-login screen, where state.user is
+  // still null — never bothers an admin-only route only to eat a
+  // guaranteed 403 every 2 seconds.
+  if (!(state.user && state.user.is_admin) || runPollInFlight) return;
+  runPollInFlight = true;
+  try {
+    const data = await api.get("/health/pipeline/run/status");
+    applyRunStatusToProgress(data);
+  } catch (err) {
+    // Silent — shell chrome, not worth a banner for a transient poll
+    // failure (session edge, brief network blip).
+  } finally {
+    runPollInFlight = false;
+  }
+}
+
+function applyRunStatusToProgress(data) {
+  const text = runStatusProgressText(data);
+  if (state.progress !== text) setState({ progress: text });
+}
+
+function runStatusProgressText(data) {
+  if (!data || data.status !== "running") return "";
+  if (data.phase === "fetch" && data.fetch) {
+    return `Run collection · fetching (${data.fetch.completed || 0}/${data.fetch.total_sources || "?"} sources)`;
+  }
+  if (data.phase === "match") return "Run collection · matching keywords";
+  if (data.phase === "enrich" && data.enrich) {
+    const stages = data.enrich.stages || [];
+    const doneCount = stages.filter((s) => s.status === "done" || s.status === "error").length;
+    const current = stages.find((s) => s.status === "running");
+    return `Run collection · ${current ? current.name : "enrich"} (${doneCount}/${stages.length})`;
+  }
+  return "Run collection · starting…";
 }
 
 function syncAccountPanel() {
@@ -154,7 +215,6 @@ function renderChrome() {
         ? `<div class="progress-pill">
             <span class="progress-dot"></span>
             <span style="font-size:12px;color:var(--actx);white-space:nowrap;">${escapeHtml(state.progress)}</span>
-            <button id="stopRunBtn" class="btn" style="border-radius:999px;background:var(--redsoft);color:var(--red);font-size:11px;font-weight:600;padding:4px 10px;">Stop</button>
           </div>`
         : ""
     }
@@ -226,12 +286,6 @@ function bind() {
 
   const goReview = topbarEl.querySelector("#goReviewBtn");
   goReview.addEventListener("click", () => navigate("review"));
-
-  const stopRun = topbarEl.querySelector("#stopRunBtn");
-  if (stopRun)
-    stopRun.addEventListener("click", () => {
-      setState({ progress: "" });
-    });
 }
 
 function todayLabel() {

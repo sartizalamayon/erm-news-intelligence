@@ -28,6 +28,7 @@ persisted through the existing generic settings key/value table").
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 import re
@@ -1756,3 +1757,245 @@ def health_runs(conn: DictConnection, limit: int = 5) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+# ═════════════════════════════════════════════════════════════════════
+# Consolidated run (BUGFIX-NAV mission): "Run collection" used to be a
+# CLIENT-SIDE conductor — frontend/js/screens/dashboard.js's
+# runCollection() called fetch, then (if the closure's `alive` flag was
+# still true) match, then (same check) enrich, sequentially, awaiting
+# each phase's own polling loop on the browser's call stack. The moment
+# an admin navigated away mid-fetch, that screen's destroy() flipped
+# `alive = false`; runFetchPhase()'s poll loop hit `if (!alive) return`
+# and bailed BEFORE fetch's status ever went terminal, so runCollection()
+# resumed with `alive` false and `if (alive && pipeline.match)` never
+# ran. Fetch itself kept running fine server-side (it was already a
+# background thread — see "Fetch (P1) trigger" above) and completed with
+# real inserted rows; match and enrich just never got triggered, because
+# the ONLY thing that decided "call match next" was JS holding a
+# reference to a screen that had already been torn down. Real-world
+# result: thousands of genuinely-fetched articles, almost none matched.
+#
+# Fix: the phase-sequencing decision moves entirely into THIS background
+# thread — the identical `threading.Thread` + module-level dict-and-lock
+# pattern `_fetch_state`/`start_fetch_run`/`fetch_status` above already
+# established (same single-worker-deploy justification, unchanged). Once
+# `start_run` returns, fetch -> match -> enrich proceeds to completion
+# with zero further involvement from any HTTP request or browser tab.
+# The frontend's job shrinks to "start it, then poll to render" — see
+# dashboard.js's rewritten runCollection().
+#
+# Each phase's failure is isolated from the next (mirrors
+# run_pipeline_all's per-stage isolation, and _run_fetch_in_background's
+# own per-run isolation): a failed fetch does not prevent match or
+# enrich from being attempted, matching the previous UI-level contract
+# ("one phase failing does not block the next").
+#
+# `_run_state` is, like `_fetch_state`, a single global slot rather than
+# a dict keyed by run id — only one manual collection run makes sense in
+# flight at a time on this single-worker deploy. `start_run` returns the
+# existing in-progress snapshot unchanged if one is already running,
+# rather than stacking a second one behind it.
+
+_run_lock = threading.Lock()
+_run_state: dict[str, Any] = {"status": "idle", "phase": "idle"}
+
+
+def _new_fetch_phase_state() -> dict[str, Any]:
+    return {
+        "status": "pending",
+        "detail": "",
+        "sources": [],
+        "total_sources": 0,
+        "completed": 0,
+        "total_fetched": 0,
+        "total_inserted": 0,
+        "total_duplicate": 0,
+        "run_id": None,
+        "error": None,
+    }
+
+
+def _new_match_phase_state() -> dict[str, Any]:
+    return {"status": "pending", "detail": "", "matched": 0, "filtered_out": 0, "total": 0, "error": None}
+
+
+def _new_enrich_phase_state() -> dict[str, Any]:
+    return {
+        "status": "pending",
+        "stages": [
+            {"key": key, "name": name, "desc": desc, "status": "pending", "detail": ""}
+            for key, name, desc in PIPELINE_STAGES
+        ],
+    }
+
+
+def _run_fetch_subphase(conn: DictConnection, *, trigger: str) -> None:
+    from app.services.collector import _filter_enabled, run_collection
+    from app.sources.registry import all_sources, load_all
+
+    def _on_progress(source_result: Any) -> None:
+        with _run_lock:
+            if _run_state.get("status") == "running" and _run_state.get("fetch") is not None:
+                _run_state["fetch"]["sources"].append(_fetch_source_progress_entry(source_result))
+                _run_state["fetch"]["completed"] = len(_run_state["fetch"]["sources"])
+
+    with _run_lock:
+        _run_state["phase"] = "fetch"
+        _run_state["fetch"]["status"] = "running"
+    try:
+        load_all()
+        registry = all_sources()
+        effective = _filter_enabled(conn, registry)
+        with _run_lock:
+            _run_state["fetch"]["total_sources"] = len(effective)
+        result = run_collection(conn, source_classes=effective, trigger=trigger, progress_cb=_on_progress)
+        with _run_lock:
+            _run_state["fetch"].update(
+                status="done",
+                run_id=result.run_id,
+                total_fetched=result.total_fetched,
+                total_inserted=result.total_inserted,
+                total_duplicate=result.total_duplicate,
+                detail=f"{result.total_inserted} new article(s) across {len(effective)} source(s)",
+            )
+    except Exception as exc:  # noqa: BLE001 - per-phase isolation, match/enrich must still get a chance to run
+        with _run_lock:
+            _run_state["fetch"].update(status="error", error=str(exc), detail=str(exc))
+
+
+def _run_match_subphase(conn: DictConnection) -> None:
+    with _run_lock:
+        _run_state["phase"] = "match"
+        _run_state["match"]["status"] = "running"
+    try:
+        result = run_match_phase(conn)
+        with _run_lock:
+            _run_state["match"].update(
+                status="done",
+                matched=result["matched"],
+                filtered_out=result["filtered_out"],
+                total=result["total"],
+                detail=f"{result['matched']} matched, {result['filtered_out']} filtered out (of {result['total']})",
+            )
+    except Exception as exc:  # noqa: BLE001 - per-phase isolation, enrich must still get a chance to run
+        with _run_lock:
+            _run_state["match"].update(status="error", error=str(exc), detail=str(exc))
+
+
+def _run_enrich_subphase(conn: DictConnection) -> None:
+    with _run_lock:
+        _run_state["phase"] = "enrich"
+    any_error = False
+    for stage_key, _, _ in PIPELINE_STAGES:
+        with _run_lock:
+            entry = next(s for s in _run_state["enrich"]["stages"] if s["key"] == stage_key)
+            entry["status"] = "running"
+        try:
+            result = run_pipeline_stage(conn, stage_key)
+            with _run_lock:
+                entry["status"] = result["status"]
+                entry["detail"] = result["detail"]
+        except Exception as exc:  # noqa: BLE001 - per-stage isolation, same as run_pipeline_all
+            any_error = True
+            with _run_lock:
+                entry["status"] = "error"
+                entry["detail"] = str(exc)
+    with _run_lock:
+        _run_state["enrich"]["status"] = "error" if any_error else "done"
+
+
+def _run_pipeline_in_background(*, fetch: bool, match: bool, enrich: bool, trigger: str) -> None:
+    """Runs on the background thread `start_run` spawns — see this
+    module section's docstring for the bug this closes. Opens its own
+    connection, same reasoning as `_run_fetch_in_background`: the HTTP
+    request that triggered this has already returned by the time most of
+    this executes.
+    """
+    from app.db.connection import get_connection
+
+    try:
+        with get_connection() as conn:
+            if fetch:
+                _run_fetch_subphase(conn, trigger=trigger)
+            if match:
+                _run_match_subphase(conn)
+            if enrich:
+                _run_enrich_subphase(conn)
+        with _run_lock:
+            _run_state["status"] = "done"
+            _run_state["phase"] = "done"
+            _run_state["finished_at"] = datetime.now(timezone.utc).isoformat()
+    except Exception as exc:  # noqa: BLE001 - background thread: must never raise into the void
+        with _run_lock:
+            _run_state["status"] = "error"
+            _run_state["phase"] = "error"
+            _run_state["finished_at"] = datetime.now(timezone.utc).isoformat()
+            _run_state["error"] = str(exc)
+
+
+def start_run(
+    *, fetch: bool = True, match: bool = True, enrich: bool = True, trigger: str = "manual"
+) -> dict[str, Any]:
+    """`POST /health/pipeline/run`'s service function — the single entry
+    point for "Run collection". Starts fetch/match/enrich (whichever are
+    requested) in ONE background thread, in that order, and returns
+    immediately with a "running" snapshot. Once this returns, nothing
+    about the rest of the run depends on the calling request, or any
+    browser, still existing — see this module section's docstring.
+    Returns the existing in-progress snapshot unchanged, without starting
+    a second run, if one is already running.
+    """
+    if not fetch and not match and not enrich:
+        raise ValidationError("at least one phase (fetch/match/enrich) must be selected")
+    with _run_lock:
+        already_running = _run_state.get("status") == "running"
+        if not already_running:
+            _run_state.clear()
+            _run_state.update(
+                status="running",
+                phase="idle",
+                trigger=trigger,
+                requested={"fetch": fetch, "match": match, "enrich": enrich},
+                started_at=datetime.now(timezone.utc).isoformat(),
+                finished_at=None,
+                fetch=_new_fetch_phase_state() if fetch else None,
+                match=_new_match_phase_state() if match else None,
+                enrich=_new_enrich_phase_state() if enrich else None,
+                error=None,
+            )
+    # `run_status()` acquires `_run_lock` itself — must be called after
+    # the `with` block above releases it, same reentrancy reasoning as
+    # `start_fetch_run`'s own docstring.
+    if not already_running:
+        thread = threading.Thread(
+            target=_run_pipeline_in_background,
+            kwargs={"fetch": fetch, "match": match, "enrich": enrich, "trigger": trigger},
+            daemon=True,
+        )
+        thread.start()
+    return run_status()
+
+
+def run_status() -> dict[str, Any]:
+    """`GET /health/pipeline/run/status`'s service function — a live read
+    of the in-process `_run_state`, the one status surface the frontend
+    polls to RENDER the whole fetch->match->enrich run. Purely
+    observational: nothing this function (or its caller) does changes
+    what the background thread does next — see this module section's
+    docstring. Safe to call at any time, including before any run has
+    ever started (`status="idle"`).
+    """
+    with _run_lock:
+        state = copy.deepcopy(_run_state)
+    state.setdefault("status", "idle")
+    state.setdefault("phase", "idle")
+    state.setdefault("trigger", None)
+    state.setdefault("requested", None)
+    state.setdefault("started_at", None)
+    state.setdefault("finished_at", None)
+    state.setdefault("fetch", None)
+    state.setdefault("match", None)
+    state.setdefault("enrich", None)
+    state.setdefault("error", None)
+    return state

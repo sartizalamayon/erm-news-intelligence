@@ -53,6 +53,23 @@ enrichment stages) — confirmed genuinely separate from P1 by reading
 `run_collection`'s own docstring, which is explicit that it never
 computes `sections`/`keywords`/`review_status`.
 
+BUGFIX-NAV (the "Run collection abandons match/enrich on navigation" bug
+report): the three endpoints above still exist unchanged, but the
+frontend no longer drives fetch -> match -> enrich sequencing by
+awaiting each of them in turn from the browser — that was the actual
+bug (frontend/js/screens/dashboard.js's old runCollection() checked a
+`destroy()`-flipped `alive` flag between phases; navigating away mid-
+fetch silently skipped match/enrich even though fetch itself kept
+running fine server-side). `POST /health/pipeline/run` /
+`GET /health/pipeline/run/status` below replace that client-side
+conductor with one server-side background thread
+(`app.services.admin.start_run`/`_run_pipeline_in_background`) that runs
+whichever of fetch/match/enrich were requested, in order, to completion,
+regardless of whether any client is still connected or polling. The
+frontend now only starts the run once and polls the status endpoint to
+RENDER progress — see `app.services.admin`'s "Consolidated run" module
+section for the full design.
+
 Every route is gated by `require_admin` (app.api.deps) — EXCEPT
 `GET /health/ready` below, added by the DEPLOY mission (Render deploy
 config, docs/deployment.md): a readiness probe Render's own health
@@ -73,6 +90,8 @@ from app.api.schemas.admin import (
     HealthSourceRowOut,
     RematchResult,
     RunRowOut,
+    RunStartBody,
+    RunStatusOut,
     SourceDiagnoseResult,
     SourceTestResult,
     StageRunResult,
@@ -216,3 +235,30 @@ def run_match(admin: AuthenticatedUser = Depends(require_admin)) -> RematchResul
     with get_connection() as conn:
         result = admin_service.run_match_phase(conn)
     return RematchResult(**result)
+
+
+@router.post("/pipeline/run", response_model=RunStatusOut)
+def start_run(body: RunStartBody, admin: AuthenticatedUser = Depends(require_admin)) -> RunStatusOut:
+    """BUGFIX-NAV: the single entry point "Run collection" now uses.
+    Starts fetch/match/enrich (whichever booleans are `true`) in ONE
+    background thread, server-side, in that order — see
+    `app.services.admin.start_run`'s docstring for the navigation-abandon
+    bug this closes. Returns immediately with a "running" snapshot; poll
+    `GET /pipeline/run/status` to render progress. The run itself
+    proceeds to completion regardless of whether anything ever polls it
+    again. Safe to call while a run is already in progress — returns
+    that run's current snapshot rather than starting a redundant second
+    one.
+    """
+    data = admin_service.start_run(fetch=body.fetch, match=body.match, enrich=body.enrich, trigger="manual")
+    return RunStatusOut(**data)
+
+
+@router.get("/pipeline/run/status", response_model=RunStatusOut)
+def run_status(admin: AuthenticatedUser = Depends(require_admin)) -> RunStatusOut:
+    """Live snapshot of the most recent consolidated run this process has
+    started — purely observational (see `app.services.admin.run_status`'s
+    docstring). `status="idle"` with every phase `null` if no run has
+    ever started yet in this process.
+    """
+    return RunStatusOut(**admin_service.run_status())

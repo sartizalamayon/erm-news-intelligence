@@ -481,3 +481,110 @@ class FetchRunStatusOut(BaseModel):
     total_inserted: int = 0
     total_duplicate: int = 0
     error: str | None = None
+
+
+# ── Consolidated run (BUGFIX-NAV mission) ────────────────────────────────
+# "Run collection" moved server-side, entirely — see
+# app.services.admin's "Consolidated run" module section for why. One
+# background thread now runs fetch -> match -> enrich in sequence with
+# zero dependency on any HTTP request or browser tab still existing;
+# these are the request/response shapes for the single start endpoint
+# (`POST /health/pipeline/run`) and the single status endpoint the
+# frontend polls purely to RENDER progress (`GET
+# /health/pipeline/run/status`) — never to drive what happens next.
+#
+# Deliberately NOT a re-invention of FetchRunStatusOut/RematchResult/
+# StageRunResult above — each phase's shape below mirrors what that
+# phase's own existing endpoint already returns, just nested under one
+# run instead of requiring three separate polls stitched together
+# client-side (which is exactly the stitching that used to live, and
+# break, in dashboard.js).
+
+
+class RunStartBody(BaseModel):
+    """`POST /health/pipeline/run` body — the same three phase booleans
+    the dashboard's "Run collection" checkboxes have always sent (fetch/
+    match/enrich), now consumed server-side to decide the whole run's
+    shape instead of only the first phase's.
+    """
+
+    fetch: bool = True
+    match: bool = True
+    enrich: bool = True
+
+
+class RunPhasesRequestedOut(BaseModel):
+    fetch: bool
+    match: bool
+    enrich: bool
+
+
+class RunFetchPhaseOut(BaseModel):
+    """Mirrors FetchRunStatusOut's per-run fields, scoped to just the
+    fetch phase of a consolidated run.
+    """
+
+    status: str  # "pending" | "running" | "done" | "error"
+    detail: str = ""
+    sources: list[FetchSourceProgressOut] = Field(default_factory=list)
+    total_sources: int = 0
+    completed: int = 0
+    total_fetched: int = 0
+    total_inserted: int = 0
+    total_duplicate: int = 0
+    run_id: int | None = None
+    error: str | None = None
+
+
+class RunMatchPhaseOut(BaseModel):
+    """Mirrors RematchResult, scoped to the match phase of a consolidated
+    run, plus a `status`/`detail` for progress rendering.
+    """
+
+    status: str  # "pending" | "running" | "done" | "error"
+    detail: str = ""
+    matched: int = 0
+    filtered_out: int = 0
+    total: int = 0
+    error: str | None = None
+
+
+class RunStageOut(BaseModel):
+    """Mirrors StageRunResult (plus the stage's own name/desc, so the
+    frontend doesn't need a second lookup) for one of the 5 enrichment
+    stages within a consolidated run.
+    """
+
+    key: str
+    name: str
+    desc: str
+    status: str  # "pending" | "running" | "done" | "error"
+    detail: str = ""
+
+
+class RunEnrichPhaseOut(BaseModel):
+    status: str  # "pending" | "running" | "done" | "error"
+    stages: list[RunStageOut] = Field(default_factory=list)
+
+
+class RunStatusOut(BaseModel):
+    """`POST /health/pipeline/run` and `GET /health/pipeline/run/status`
+    share this shape. `status`: "idle" (nothing started this process) |
+    "running" | "done" | "error" (the background thread itself crashed
+    outside all per-phase isolation — see
+    app.services.admin._run_pipeline_in_background). `phase` is which of
+    fetch/match/enrich is currently active ("idle"/"done"/"error" outside
+    of a run). Each of `fetch`/`match`/`enrich` is `null` if that phase
+    was never requested for the current/most recent run.
+    """
+
+    status: str
+    phase: str
+    trigger: str | None = None
+    requested: RunPhasesRequestedOut | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    fetch: RunFetchPhaseOut | None = None
+    match: RunMatchPhaseOut | None = None
+    enrich: RunEnrichPhaseOut | None = None
+    error: str | None = None

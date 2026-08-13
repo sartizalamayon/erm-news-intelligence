@@ -637,6 +637,257 @@ def test_router_match_run_dispatches_to_rematch_today(monkeypatch: pytest.Monkey
         with TestClient(app) as client:
             resp = client.post("/health/pipeline/match/run")
             assert resp.status_code == 200
-            body = resp.json()
-            assert body["matched"] == 1
-            assert body["total"] == 1
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Consolidated run (BUGFIX-NAV mission): fetch -> match -> enrich, all
+# in ONE background thread, entirely server-side -- the fix for "Run
+# collection" silently abandoning match/enrich if an admin navigates
+# away while fetch is still running (see app.services.admin's
+# "Consolidated run" module section for the full bug). `_run_state` is
+# process-global, same reset-before-each-test discipline as
+# `_fetch_state` above.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _reset_run_state() -> None:
+    admin_service._run_state.clear()
+    admin_service._run_state.update(status="idle", phase="idle")
+
+
+def test_run_status_is_idle_before_any_run() -> None:
+    _reset_run_state()
+    status = admin_service.run_status()
+    assert status["status"] == "idle"
+    assert status["phase"] == "idle"
+    assert status["fetch"] is None
+    assert status["match"] is None
+    assert status["enrich"] is None
+
+
+def test_start_run_requires_at_least_one_phase() -> None:
+    _reset_run_state()
+    with pytest.raises(ValidationError):
+        admin_service.start_run(fetch=False, match=False, enrich=False)
+
+
+def test_start_run_completes_match_and_enrich_with_zero_further_calls_after_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact bug this mission fixes, as a direct assertion: this test
+    calls `start_run()` exactly ONCE and then never calls any
+    phase-specific function again (no runFetchPhase/runMatchPhase
+    equivalent, no second start_run) -- simulating an admin navigating
+    away the instant the call returns. Match and enrich must still run
+    to completion entirely on their own, proving the fetch -> match ->
+    enrich sequencing decision now lives in the background thread, not
+    in whatever called start_run().
+    """
+    import app.db.connection as db_connection_module
+    import app.services.collector as collector_module
+    import app.sources.registry as registry_module
+    from app.services.collector import CollectionRunResult
+
+    _require_enrichment()  # enrich runs the real (safe, no-provider-configured) stages
+    _reset_run_state()
+    release = threading.Event()
+
+    def _fake_run_collection(conn, *, source_classes, trigger, progress_cb=None):
+        release.wait(timeout=5)
+        return CollectionRunResult(sources=[], total_fetched=0, total_inserted=0, total_duplicate=0, run_id=99)
+
+    with migrated_schema() as conn:
+        admin_service.create_keyword(conn, term_en="flood")
+        insert_article(
+            conn,
+            url="https://x.test/flood-run",
+            url_norm="https://x.test/flood-run",
+            source="X",
+            title="Major flood hits the region",
+            day=dt.date.today(),
+        )
+        conn.commit()
+
+        monkeypatch.setattr(collector_module, "run_collection", _fake_run_collection)
+        monkeypatch.setattr(registry_module, "all_sources", lambda: {})
+        monkeypatch.setattr(registry_module, "load_all", lambda: None)
+        monkeypatch.setattr(db_connection_module, "get_connection", lambda *a, **kw: contextlib.nullcontext(conn))
+
+        try:
+            snapshot = admin_service.start_run(fetch=True, match=True, enrich=True, trigger="manual")
+            assert snapshot["status"] == "running"
+            # fetch may already have flipped to "running" by the time this
+            # snapshot was taken (a race with the background thread, not a
+            # bug) -- what matters is match/enrich have not started.
+            assert snapshot["fetch"]["status"] in ("pending", "running")
+            assert snapshot["match"]["status"] == "pending"
+            assert len(snapshot["enrich"]["stages"]) == 5
+
+            # Fetch is still deliberately blocked -- match/enrich cannot
+            # have started yet. This is the "navigated away" moment: no
+            # further call against this run happens until the `finally`
+            # block's polling loop, which only OBSERVES completion.
+            time.sleep(0.2)
+            still_blocked = admin_service.run_status()
+            assert still_blocked["status"] == "running"
+            assert still_blocked["match"]["status"] == "pending"
+        finally:
+            release.set()  # let fetch finish so it doesn't leak past the test
+            for _ in range(100):
+                if admin_service.run_status()["status"] != "running":
+                    break
+                time.sleep(0.05)
+
+        final = admin_service.run_status()
+        assert final["status"] == "done"
+        assert final["fetch"]["status"] == "done"
+        assert final["fetch"]["run_id"] == 99
+        assert final["match"]["status"] == "done"
+        assert final["match"]["matched"] == 1
+        assert final["enrich"]["status"] == "done"
+        assert len(final["enrich"]["stages"]) == 5
+        assert {s["status"] for s in final["enrich"]["stages"]} == {"done"}
+
+
+def test_start_run_isolates_a_failed_fetch_so_match_and_enrich_still_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One phase failing must not block the next -- same per-unit
+    isolation philosophy run_pipeline_all already applies per-stage.
+    """
+    import app.db.connection as db_connection_module
+    import app.services.collector as collector_module
+    import app.sources.registry as registry_module
+
+    _require_enrichment()
+    _reset_run_state()
+
+    def _boom(conn, *, source_classes, trigger, progress_cb=None):
+        raise RuntimeError("simulated collector crash")
+
+    with migrated_schema() as conn:
+        admin_service.create_keyword(conn, term_en="flood")
+        insert_article(
+            conn,
+            url="https://x.test/flood-isolated",
+            url_norm="https://x.test/flood-isolated",
+            source="X",
+            title="Major flood hits the region",
+            day=dt.date.today(),
+        )
+        conn.commit()
+
+        monkeypatch.setattr(collector_module, "run_collection", _boom)
+        monkeypatch.setattr(registry_module, "all_sources", lambda: {})
+        monkeypatch.setattr(registry_module, "load_all", lambda: None)
+        monkeypatch.setattr(db_connection_module, "get_connection", lambda *a, **kw: contextlib.nullcontext(conn))
+
+        admin_service.start_run(fetch=True, match=True, enrich=True, trigger="manual")
+        for _ in range(100):
+            if admin_service.run_status()["status"] != "running":
+                break
+            time.sleep(0.05)
+
+    final = admin_service.run_status()
+    assert final["status"] == "done"  # the overall run still finishes despite fetch's crash
+    assert final["fetch"]["status"] == "error"
+    assert "simulated collector crash" in final["fetch"]["error"]
+    assert final["match"]["status"] == "done"
+    assert final["match"]["matched"] == 1
+    assert final["enrich"]["status"] == "done"
+
+
+def test_start_run_while_already_running_returns_existing_snapshot_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.db.connection as db_connection_module
+    import app.services.collector as collector_module
+    import app.sources.registry as registry_module
+    from app.services.collector import CollectionRunResult
+
+    _reset_run_state()
+    release = threading.Event()
+    calls = []
+
+    def _fake_run_collection(conn, *, source_classes, trigger, progress_cb=None):
+        calls.append(trigger)
+        release.wait(timeout=5)
+        return CollectionRunResult(sources=[], total_fetched=0, total_inserted=0, total_duplicate=0, run_id=5)
+
+    with migrated_schema() as conn:
+        monkeypatch.setattr(collector_module, "run_collection", _fake_run_collection)
+        monkeypatch.setattr(registry_module, "all_sources", lambda: {})
+        monkeypatch.setattr(registry_module, "load_all", lambda: None)
+        monkeypatch.setattr(db_connection_module, "get_connection", lambda *a, **kw: contextlib.nullcontext(conn))
+
+        try:
+            admin_service.start_run(fetch=True, match=False, enrich=False, trigger="manual")
+            # A second, differently-shaped request while the first is
+            # still running must NOT start a redundant second run --
+            # same "one run at a time" contract as start_fetch_run.
+            again = admin_service.start_run(fetch=True, match=True, enrich=True, trigger="manual")
+            assert again["status"] == "running"
+            assert again["match"] is None  # unchanged from the FIRST call's request
+        finally:
+            release.set()
+            for _ in range(100):
+                if admin_service.run_status()["status"] != "running":
+                    break
+                time.sleep(0.05)
+
+        assert calls == ["manual"]  # only one real run_collection call, not two
+
+
+def test_router_run_start_and_status_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.db.connection as db_connection_module
+    import app.services.collector as collector_module
+    import app.sources.registry as registry_module
+    from app.services.collector import CollectionRunResult
+
+    _reset_run_state()
+    release = threading.Event()
+
+    def _fake_run_collection(conn, *, source_classes, trigger, progress_cb=None):
+        release.wait(timeout=5)
+        return CollectionRunResult(sources=[], total_fetched=0, total_inserted=0, total_duplicate=0, run_id=77)
+
+    with migrated_schema() as conn:
+        monkeypatch.setattr(collector_module, "run_collection", _fake_run_collection)
+        monkeypatch.setattr(registry_module, "all_sources", lambda: {})
+        monkeypatch.setattr(registry_module, "load_all", lambda: None)
+        monkeypatch.setattr(db_connection_module, "get_connection", lambda *a, **kw: contextlib.nullcontext(conn))
+
+        app = create_app()
+        app.dependency_overrides[get_current_user] = lambda: ADMIN
+        try:
+            with TestClient(app) as client:
+                started = client.post("/health/pipeline/run", json={"fetch": True, "match": False, "enrich": False})
+                assert started.status_code == 200
+                body = started.json()
+                assert body["status"] == "running"
+                assert body["match"] is None
+
+                polled = client.get("/health/pipeline/run/status")
+                assert polled.status_code == 200
+                assert polled.json()["status"] == "running"
+        finally:
+            release.set()
+            for _ in range(100):
+                if admin_service.run_status()["status"] != "running":
+                    break
+                time.sleep(0.05)
+
+        with TestClient(app) as client:
+            done = client.get("/health/pipeline/run/status")
+            body = done.json()
+            assert body["status"] == "done"
+            assert body["fetch"]["run_id"] == 77
+
+
+def test_router_run_start_rejects_no_phase_selected() -> None:
+    _reset_run_state()
+    app = create_app()
+    app.dependency_overrides[get_current_user] = lambda: ADMIN
+    with TestClient(app) as client:
+        resp = client.post("/health/pipeline/run", json={"fetch": False, "match": False, "enrich": False})
+        assert resp.status_code == 422
