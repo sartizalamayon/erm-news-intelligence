@@ -95,6 +95,13 @@ ALL_STAGES = (STAGE_TRANSLATE, STAGE_DEDUP, STAGE_JUDGE, STAGE_TOPIC)
 
 TOPIC_PREFOLD_DEFAULT_THRESHOLD = 0.82  # p3-contract.md §6.3 — TOPIC_PREFOLD_THRESH env default
 
+# How many articles the translate stage completes before committing.
+# Small enough that progress is visible and a crash loses seconds of
+# work rather than the whole stage; large enough that the thread pool
+# still has a full batch to parallelise across (see the persistence
+# comment in `run_llm_enrichment`).
+TRANSLATE_PERSIST_CHUNK = 50
+
 
 @dataclass
 class EnrichmentResult:
@@ -447,10 +454,34 @@ def run_llm_enrichment(
         translate_client = _try_build_client(conn, TRANSLATION)
         if translate_client is None:
             skipped_stages.append(STAGE_TRANSLATE)
-        articles = stage_translate(articles, translate_client, progress=progress)
-        for a in articles:
-            conn.execute("UPDATE articles SET title_en=%s WHERE id=%s", (a.get("title_en", ""), a["id"]))
-        conn.commit()
+
+        # Persisted in CHUNKS, not once at the end. Translating a full
+        # day is minutes of work (measured: ~77 titles/min against
+        # Mistral, so a 1,376-article backlog day is ~18 minutes), and
+        # writing only after the last one meant the whole stage was
+        # invisible in the DB and in the UI until it finished, and a
+        # crash or restart anywhere in that window threw away every
+        # completed translation. Chunking makes the work durable as it
+        # lands and lets a re-run skip what is already done — the
+        # `if a.get("title_en")` cache check in `stage_translate` turns
+        # already-persisted rows into no-ops.
+        done_before = 0
+
+        def _chunk_progress(done: int, total: int, label: str) -> None:
+            if progress:
+                progress(done_before + done, len(articles), label)
+
+        for start in range(0, len(articles), TRANSLATE_PERSIST_CHUNK):
+            if should_stop and should_stop():
+                break
+            chunk = articles[start : start + TRANSLATE_PERSIST_CHUNK]
+            stage_translate(chunk, translate_client, progress=_chunk_progress)
+            for a in chunk:
+                conn.execute("UPDATE articles SET title_en=%s WHERE id=%s", (a.get("title_en", ""), a["id"]))
+            conn.commit()
+            done_before += len(chunk)
+        if progress:
+            progress(done_before, len(articles), "Translating")
 
     # ── STEP 1: dedup = embedding pre-cluster + LLM verify ──
     if do_dedup and not (should_stop and should_stop()):
