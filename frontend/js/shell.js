@@ -87,7 +87,23 @@ function startRunStatusPolling() {
   pollRunStatus();
 }
 
-async function pollRunStatus() {
+// THE ONLY poller for run status in the whole app.
+//
+// The Run screen used to open a SECOND interval against this same
+// endpoint. Both ran whenever that screen was mounted: 30 req/min here
+// plus 40 req/min there = 70 req/min of pure polling, against a
+// whole-API limit of 120 requests / 60 seconds per IP
+// (`Settings.rate_limit_requests_per_window`, enforced by
+// RateLimitMiddleware). Ordinary navigation on top of that crossed the
+// limit and the API started returning 429 — surfaced in the UI as
+// "Too many requests. Slow down and try again shortly." while a run was
+// perfectly healthy underneath.
+//
+// Fixed by publishing the result to `state.runStatus` and having the
+// Run screen SUBSCRIBE. One request per interval regardless of how many
+// views are showing run progress, and every view sees the same snapshot
+// at the same time.
+export async function pollRunStatus() {
   // Gated to admins (same as the "Run collection" control itself) so a
   // non-admin session — or the pre-login screen, where state.user is
   // still null — never bothers an admin-only route only to eat a
@@ -99,7 +115,9 @@ async function pollRunStatus() {
     applyRunStatusToProgress(data);
   } catch (err) {
     // Silent — shell chrome, not worth a banner for a transient poll
-    // failure (session edge, brief network blip).
+    // failure (session edge, brief network blip). Deliberately does NOT
+    // clear `state.runStatus`: a dropped poll must not make a running
+    // job look finished.
   } finally {
     runPollInFlight = false;
   }
@@ -107,7 +125,12 @@ async function pollRunStatus() {
 
 function applyRunStatusToProgress(data) {
   const text = runStatusProgressText(data);
-  if (state.progress !== text) setState({ progress: text });
+  const patch = {};
+  if (state.progress !== text) patch.progress = text;
+  // Always republish the snapshot — subscribers re-render from it, and
+  // its nested fields change even when the header text does not.
+  patch.runStatus = data;
+  setState(patch);
 }
 
 function runStatusProgressText(data) {

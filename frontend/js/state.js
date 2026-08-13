@@ -18,6 +18,12 @@ export const state = {
   dashMode: "short",
 
   progress: "", // active job/run status text, shell header (§2)
+  // Latest GET /health/pipeline/run/status snapshot, published by
+  // shell.js's single poller. Any view that wants live run progress
+  // SUBSCRIBES to this rather than polling the endpoint itself — two
+  // concurrent pollers previously exceeded the API's 120 req/min limit
+  // and surfaced spurious 429s. null until the first poll returns.
+  runStatus: null,
 
   accountPanelOpen: false, // change-password modal (AUTH-V2), toggled from the rail
 };

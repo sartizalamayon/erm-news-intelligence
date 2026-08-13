@@ -22,12 +22,21 @@
 // back to the top roughly twice a second and reading it while a run was
 // in progress was impossible. Patching in place is what fixes that; it
 // is a correctness requirement of this screen, not an optimisation.
+//
+// POLLING CONTRACT — this screen does NOT poll.
+// It subscribes to `state.runStatus`, which shell.js's single app-wide
+// poller publishes. An earlier version of this screen ran its own
+// 1.5s interval against the same endpoint; combined with the shell's
+// own 2s interval that was ~70 requests/minute of polling against a
+// 120 req/min whole-API limit, and normal navigation on top pushed it
+// over — the API returned 429 and the UI showed "Too many requests.
+// Slow down and try again shortly." over a run that was perfectly
+// healthy. Never reintroduce a second poller here.
 
 import { api } from "../api.js";
-import { state, setState } from "../state.js";
+import { pollRunStatus } from "../shell.js";
+import { setState, state, subscribe } from "../state.js";
 import { escapeHtml } from "../util.js";
-
-const POLL_MS = 1500;
 
 const STATUS_ICON = { done: "&#10003;", ok: "&#10003;", error: "&#10005;", failed: "&#10005;", running: "&#8987;" };
 const STATUS_COLOR = {
@@ -52,7 +61,7 @@ function fmtErr(err) {
 
 export function mountRun(root) {
   let alive = true;
-  let pollTimer = null;
+  let unsubscribe = null;
   let elapsedTimer = null;
   // Identity of the run currently drawn, so a NEW run resets the panel
   // instead of appending onto the previous run's source list.
@@ -291,16 +300,11 @@ export function mountRun(root) {
     elapsedEl.textContent = `${Math.max(0, Math.round((end - startedAtMs) / 1000))}s elapsed`;
   }
 
-  async function poll() {
+  // Render from whatever the shell's poller last published. Called on
+  // mount and on every state change — never issues a request itself.
+  function renderFromState() {
     if (!alive) return;
-    try {
-      const data = await api.get("/health/pipeline/run/status");
-      if (!alive) return;
-      applyPoll(data);
-    } catch (err) {
-      if (!alive) return;
-      idleHint.textContent = fmtErr(err);
-    }
+    applyPoll(state.runStatus);
   }
 
   async function startRun() {
@@ -314,13 +318,18 @@ export function mountRun(root) {
     idleHint.textContent = "";
     try {
       const data = await api.post("/health/pipeline/run", selected);
-      applyPoll(data);
+      // Publish the start snapshot through the same channel the poller
+      // uses, so the header pill and this panel agree immediately
+      // instead of waiting up to one poll interval.
+      setState({ runStatus: data });
     } catch (err) {
       setRunning(false);
       idleHint.textContent = fmtErr(err);
       return;
     }
-    poll();
+    // One immediate refresh for responsiveness; the shell's interval
+    // takes it from here.
+    pollRunStatus();
   }
 
   async function resetToday() {
@@ -343,8 +352,15 @@ export function mountRun(root) {
     }
   }
 
-  poll();
-  pollTimer = setInterval(poll, POLL_MS);
+  // Draw immediately from the last published snapshot (so arriving on
+  // this screen mid-run shows progress without waiting a tick), then
+  // re-draw whenever the shell's poller publishes a new one.
+  renderFromState();
+  unsubscribe = subscribe(renderFromState);
+  // Nudge the shared poller once on mount so a stale snapshot isn't
+  // shown for up to a full interval. This is one request, not a loop.
+  pollRunStatus();
+
   // Elapsed time ticks locally so the number moves smoothly between
   // polls; it patches ONE text node, never the panel.
   elapsedTimer = setInterval(() => {
@@ -354,9 +370,9 @@ export function mountRun(root) {
   return {
     destroy() {
       alive = false;
-      if (pollTimer) clearInterval(pollTimer);
+      if (unsubscribe) unsubscribe();
       if (elapsedTimer) clearInterval(elapsedTimer);
-      pollTimer = null;
+      unsubscribe = null;
       elapsedTimer = null;
     },
   };
