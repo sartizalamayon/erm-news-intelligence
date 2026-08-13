@@ -121,3 +121,34 @@ services:
     name: erm-frontend
     runtime: static
     staticPublishPath: frontend
+    # Force revalidation on every load instead of trusting browser
+    # heuristic caching. Render's docs (render.com/docs/static-sites,
+    # render.com/docs/static-site-headers, fetched 2026-08-13) confirm
+    # the CDN edge cache itself is purged immediately on every
+    # successful deploy ("we deploy it and immediately invalidate our
+    # CDN caches"), but say nothing about what Cache-Control value is
+    # sent to the BROWSER by default — undocumented, not verified safe
+    # to assume. Without an explicit header, browsers apply their own
+    # heuristic freshness and can keep serving an old cached copy of a
+    # same-named file for a long time after a deploy, same failure mode
+    # already confirmed locally (see scripts/dev_frontend_server.py).
+    # `path: /js/*` and `/css/*` mirror Render's own documented glob
+    # example ("/blog/* matches /blog/ and all other paths under it"),
+    # so they cover every file under those directories regardless of
+    # nesting (frontend/js/screens/*.js, frontend/js/components/*.js
+    # included) without relying on the less-clearly-documented `/**/*.ext`
+    # depth semantics. `/` and `/index.html` are covered explicitly too
+    # since the entry document was never confirmed exempt.
+    headers:
+      - path: /js/*
+        name: Cache-Control
+        value: no-cache
+      - path: /css/*
+        name: Cache-Control
+        value: no-cache
+      - path: /
+        name: Cache-Control
+        value: no-cache
+      - path: /index.html
+        name: Cache-Control
+        value: no-cache

@@ -10,7 +10,7 @@
     {
       "name": "erm-frontend",
       "runtimeExecutable": ".venv/bin/python",
-      "runtimeArgs": ["-m", "http.server", "5173", "--directory", "frontend"],
+      "runtimeArgs": ["scripts/dev_frontend_server.py", "5173", "--directory", "frontend"],
       "port": 5173
     }
   ]
