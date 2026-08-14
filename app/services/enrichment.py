@@ -330,15 +330,45 @@ def stage_llm_verify_groups(
     )
 
     chunk_size = parsing.BATCH_SIZE_DEDUP_VERIFY
+    verify_chunks: list[list[dict[str, Any]]] = []
     for gid, members in groups.items():
         if gid is None or len(members) < 2:
             continue
-        member_chunks = [members[i : i + chunk_size] for i in range(0, len(members), chunk_size)]
-        for chunk in member_chunks:
-            if len(chunk) < 2:
+        for i in range(0, len(members), chunk_size):
+            chunk = members[i : i + chunk_size]
+            if len(chunk) >= 2:
+                verify_chunks.append(chunk)
+
+    # Issued through `parallel_map` with the provider's rate limiter,
+    # like every other LLM stage. This loop used to call
+    # `client.verify_group()` directly in a plain `for`: sequential AND
+    # completely unthrottled, bypassing the limiter that exists to keep
+    # us inside a provider's per-minute budget.
+    #
+    # Measured on a 1,752-article day: 136 groups needed 136 verify
+    # calls, which should take ~3 minutes — but Gemini logged over 1,000
+    # requests for them. Unthrottled calls tripped the per-minute
+    # ceiling, the transport retried each 429 with doubling backoff, and
+    # the stage crawled while reporting no progress at all.
+    #
+    # Results are applied AFTER the pool drains, in input order, so
+    # group-id allocation stays deterministic regardless of the order
+    # the network happened to answer in.
+    if verify_chunks:
+        outcomes = parallel_map(
+            verify_chunks,
+            lambda chunk: client.verify_group([(m.get("title_en") or m.get("title", "")) for m in chunk]),
+            limiter=limiter_for(provider_of(client), pool_size=pool_size_of(client)),
+            label="dedup_verify",
+            tokens_per_item=1_500,
+        )
+        for chunk, (sub, error) in zip(verify_chunks, outcomes, strict=True):
+            if error is not None or sub is None:
+                # Leave the proposed group intact rather than splitting
+                # it on a failed answer: `verify_group`'s own documented
+                # fallback is "never wrongly merge", and the proposal
+                # came from a conservative lexical pass.
                 continue
-            headlines = [(m.get("title_en") or m.get("title", "")) for m in chunk]
-            sub = client.verify_group(headlines)
             subgroup_to_gid: dict[int, int] = {}
             for m, s in zip(chunk, sub, strict=False):
                 if s not in subgroup_to_gid:
