@@ -21,7 +21,22 @@ const DEFAULT_DEV_API = "http://localhost:8000";
 // Render Static Site hosting this frontend).
 const DEFAULT_PROD_API = "https://erm-backend.onrender.com";
 
+/** True only inside a real browser. */
+const HAS_BROWSER = typeof window !== "undefined" && !!window.location;
+
 function resolveApiBase() {
+  // Outside a browser there is no location to inspect and no
+  // localStorage to read, so every branch below would throw at MODULE
+  // LOAD time — not at call time. That made this module, and therefore
+  // everything importing it (api.js, and through it util.js and every
+  // screen), impossible to import anywhere except a browser. It is the
+  // single reason the frontend had no unit tests: you could not even
+  // `import` the code to assert on it.
+  //
+  // Returning the dev default here is safe: nothing outside a browser
+  // issues real API calls, and any caller that does must pass a base
+  // explicitly.
+  if (!HAS_BROWSER) return DEFAULT_DEV_API;
   try {
     const params = new URLSearchParams(window.location.search);
     if (params.has("api")) {

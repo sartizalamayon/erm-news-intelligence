@@ -22,13 +22,45 @@ Usage matches `python -m http.server`:
 from __future__ import annotations
 
 import argparse
+import os
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 
 class NoCacheRequestHandler(SimpleHTTPRequestHandler):
+    """No-cache headers, plus SPA history-API fallback.
+
+    The fallback is what makes client-side routes real. `frontend/js/
+    route.js` gives every screen an address (`/review`, `/sources`,
+    `/dash/long`), but those paths are NOT files on disk — a plain
+    static server answers 404 for all of them. The result is a router
+    that works while you click and breaks the moment anyone reloads,
+    bookmarks, or shares a link, which is exactly the case the routing
+    exists to serve.
+
+    So: a request that is not a real file, and that looks like a
+    navigation (GET, `Accept: text/html`), is served `index.html`
+    instead, and the app reads `window.location` to decide what to
+    show. Requests for missing ASSETS still 404 honestly — silently
+    serving HTML in place of a missing .js is how you get a
+    "Unexpected token '<'" console error that tells you nothing.
+    """
+
     def end_headers(self) -> None:
         self.send_header("Cache-Control", "no-cache")
         super().end_headers()
+
+    def _is_navigation_request(self) -> bool:
+        return self.command == "GET" and "text/html" in self.headers.get("Accept", "")
+
+    def send_head(self):  # noqa: ANN201 - matches the base class's untyped signature
+        path = self.translate_path(self.path)
+        missing = not (os.path.isdir(path) or os.path.isfile(path))
+        # Only rewrite genuine navigations. An extensioned path is an
+        # asset request; letting it fall through to index.html would
+        # hide the real 404 behind a confusing parse error.
+        if missing and self._is_navigation_request() and not os.path.splitext(self.path)[1]:
+            self.path = "/index.html"
+        return super().send_head()
 
 
 def main() -> None:

@@ -109,15 +109,31 @@ export function formatNumber(n) {
 // Real maxima, computed from the actual data set — NOT the prototype's
 // hardcoded-denominator bugs (frontend-contract.md §8 item 4:
 // `standing[].width` / 214 and `candidates[].barWidth` / 12).
+/** Clamp to a legal CSS bar width. Both helpers below feed
+ * `style="width:..."` directly, so a value outside 0-100 does not
+ * produce a wrong number — it produces a broken layout, with the bar
+ * escaping its track.
+ *
+ * Not currently reachable: every call site passes a value drawn FROM
+ * the same list/total, so the ratio cannot exceed 1. This is a guard
+ * against the next caller, not a fix for a live bug — the cost is one
+ * comparison and the failure mode it prevents is visual corruption
+ * nobody would think to write a test for.
+ */
+function clampPct(n) {
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(100, Math.max(0, n));
+}
+
 export function pctOfMax(value, list, accessor = (x) => x) {
-  const max = list.reduce((m, item) => Math.max(m, Number(accessor(item)) || 0), 0);
+  const max = (list || []).reduce((m, item) => Math.max(m, Number(accessor(item)) || 0), 0);
   if (max <= 0) return "0%";
-  return Math.round((Number(value) / max) * 100) + "%";
+  return clampPct(Math.round((Number(value) / max) * 100)) + "%";
 }
 
 export function pctOfTotal(value, total) {
   if (!total) return "0%";
-  return Math.round((Number(value) / Number(total)) * 100) + "%";
+  return clampPct(Math.round((Number(value) / Number(total)) * 100)) + "%";
 }
 
 export function debounce(fn, ms) {

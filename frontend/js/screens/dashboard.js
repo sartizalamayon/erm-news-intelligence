@@ -129,7 +129,10 @@ export function mountDashboard(root, { navigate }) {
 
   function bindHeader() {
     root.querySelectorAll("[data-mode]").forEach((btn) => {
-      btn.addEventListener("click", () => setState({ dashMode: btn.getAttribute("data-mode") }));
+      // Through navigate(), not setState: the Short/Long tab is part of
+      // the address (/dash vs /dash/long), so switching it has to move
+      // the URL too or the tab would silently disagree with the bar.
+      btn.addEventListener("click", () => navigate("dash", { dashMode: btn.getAttribute("data-mode") }));
     });
     const goRunBtn = root.querySelector("#goRunBtn");
     if (goRunBtn) goRunBtn.addEventListener("click", () => navigate("run"));

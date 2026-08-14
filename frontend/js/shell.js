@@ -23,6 +23,7 @@ import { escapeHtml } from "./util.js";
 import { mountScreen } from "./router.js";
 import { api } from "./api.js";
 import { mountAccountPanel } from "./components/accountPanel.js";
+import { DEFAULT_SCREEN, canAccess, pathForScreen, pushRoute, readLocation } from "./route.js";
 
 let shellRoot = null;
 let railEl = null;
@@ -160,8 +161,51 @@ function syncAccountPanel() {
   }
 }
 
+/**
+ * Change screen AND put it in the address bar.
+ *
+ * The URL is written here rather than in a state subscriber so that a
+ * navigation is one atomic action: screen, mode and address always
+ * agree. `popstate` (Back/Forward) takes the opposite path — it updates
+ * state WITHOUT pushing, since the browser has already moved history.
+ */
 export function navigate(screenKey, opts = {}) {
-  setState({ screen: screenKey, ...opts });
+  const target = canAccess(screenKey, state.user) ? screenKey : DEFAULT_SCREEN;
+  const next = { screen: target, ...opts };
+  setState(next);
+  pushRoute(target, { dashMode: next.dashMode ?? state.dashMode }, { replace: target !== screenKey });
+}
+
+/**
+ * Adopt whatever the URL currently says. Called once after login (so a
+ * deep link survives the auth round-trip) and on every Back/Forward.
+ *
+ * An unroutable path, or an admin screen requested by a non-admin,
+ * REPLACES the URL rather than pushing — otherwise Back would walk
+ * straight back into the URL we just rejected.
+ */
+export function applyRouteFromUrl() {
+  const { screen, dashMode } = readLocation();
+  const allowed = canAccess(screen, state.user) ? screen : DEFAULT_SCREEN;
+  setState({ screen: allowed, dashMode });
+  if (allowed !== screen || pathForScreen(allowed, { dashMode }) !== window.location.pathname) {
+    pushRoute(allowed, { dashMode }, { replace: true });
+  }
+}
+
+let popstateBound = false;
+
+/** Wire Back/Forward once per app lifetime. */
+export function bindHistoryNavigation() {
+  if (popstateBound || typeof window === "undefined") return;
+  popstateBound = true;
+  window.addEventListener("popstate", () => {
+    // State only — the browser already moved the history pointer, so
+    // pushing here would fight it and make Back require two presses.
+    const { screen, dashMode } = readLocation();
+    const allowed = canAccess(screen, state.user) ? screen : DEFAULT_SCREEN;
+    setState({ screen: allowed, dashMode });
+  });
 }
 
 function pageTitleFor() {

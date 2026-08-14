@@ -6,7 +6,7 @@
 import { fetchMe } from "./auth.js";
 import { setUnauthorizedHandler } from "./api.js";
 import { mountLogin } from "./screens/login.js";
-import { mountShell } from "./shell.js";
+import { mountShell, applyRouteFromUrl, bindHistoryNavigation } from "./shell.js";
 import { state, setState } from "./state.js";
 import { getTheme, applyTheme } from "./theme.js";
 
@@ -30,11 +30,14 @@ async function onAuthenticated() {
   const me = await fetchMe();
   setState({
     user: me,
-    screen: "dash",
     pendingCount: undefined,
     approvedCount: undefined,
   });
   showShell();
+  // AFTER the shell exists, so a deep link survives the login
+  // round-trip: someone opening /review while signed out lands on
+  // /review once authenticated, not on the Dashboard.
+  applyRouteFromUrl();
 }
 
 function showShell() {
@@ -51,8 +54,10 @@ window.addEventListener("erm:signed-out", showLogin);
 async function boot() {
   try {
     const me = await fetchMe();
-    setState({ user: me, authChecked: true, screen: "dash" });
+    setState({ user: me, authChecked: true });
     showShell();
+    applyRouteFromUrl();
+    bindHistoryNavigation();
   } catch (err) {
     setState({ authChecked: true });
     showLogin();
