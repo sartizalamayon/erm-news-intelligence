@@ -278,8 +278,16 @@ export function mountDashboard(root, { navigate }) {
     const avg = days.length ? Math.round(days.reduce((s, d) => s + (d.count || 0), 0) / days.length) : "—";
     const peak = days.length ? Math.max(...days.map((d) => d.count || 0)) : "—";
     const fetchedTotal = kpis[0] ? Number(String(kpis[0].value).replace(/,/g, "")) : 0;
-    const matchTotal = days.reduce((s, d) => s + (d.count || 0), 0);
-    const matchRate = fetchedTotal ? ((matchTotal / days.length / fetchedTotal) * 100).toFixed(1) + "%" : "—";
+    // TODAY's matched / TODAY's fetched.
+    //
+    // This used to be `matchTotal / days.length / fetchedTotal`, which
+    // divided the 14-DAY matched total by 14 and then by TODAY's fetched
+    // count — an average-day numerator over a single-day denominator.
+    // The two are not comparable, so the number it produced was not a
+    // rate of anything: on a light day it read far over 100%, and on a
+    // day with a big fetch it read near zero.
+    const matchedToday = kpis[1] ? Number(String(kpis[1].value).replace(/,/g, "")) : 0;
+    const matchRate = fetchedTotal ? ((matchedToday / fetchedTotal) * 100).toFixed(1) + "%" : "—";
 
     const relRaw = data.relMix || [];
     const relTotal = relRaw.reduce((s, r) => s + (r.count || 0), 0);

@@ -204,39 +204,80 @@ def dashboard_today(user: AuthenticatedUser = Depends(get_current_user)) -> Dash
         matched_today = matched_by_day.get(today, 0)
         matched_yesterday = matched_by_day.get(yesterday, 0)
         approved_today = approved_by_day.get(today, 0)
+        # TWO different numbers, deliberately. The Short-term dashboard is
+        # a TODAY view — every other tile on it is scoped to today — but
+        # this one reported the all-days pending queue, so on a fresh day
+        # it read "0 fetched / 0 matched / 10,723 awaiting review", which
+        # invites the reader to think today produced 10,723 reviewables.
+        # The headline is now today's; the standing backlog is kept as
+        # the note so it is not lost (the header badge shows it too).
         pending_count = _count(conn, "review_status = 'pending' AND COALESCE(is_primary, TRUE) = TRUE", ())
+        pending_today = _count(
+            conn, "day = %s AND review_status = 'pending' AND COALESCE(is_primary, TRUE) = TRUE", (today,)
+        )
         scored_today = _count(conn, "day = %s AND llm_score IS NOT NULL", (today,))
 
         fetched_vals14 = [fetched_by_day.get(d, 0) for d in day_range14]
         matched_vals14 = [matched_by_day.get(d, 0) for d in day_range14]
         approved_vals14 = [approved_by_day.get(d, 0) for d in day_range14]
 
-        sources_total_row = conn.execute("SELECT count(*) AS n FROM sources WHERE enabled").fetchone()
+        # Only sources that CAN respond count toward the denominator.
+        # `sources` holds 51 enabled rows but 6 of them have no
+        # `registry_key`, i.e. no fetch plugin exists for them
+        # (migrations/0014's own note), so they can never contribute an
+        # article. Counting them made the tile read "45 of 51 sources
+        # responded" on a perfect run and "0 of 51" here — a denominator
+        # that is unreachable by construction, and one that disagrees
+        # with the run panel's own "across 45 source(s)".
+        sources_total_row = conn.execute(
+            "SELECT count(*) AS n FROM sources WHERE enabled AND registry_key IS NOT NULL"
+        ).fetchone()
         sources_total = int(sources_total_row["n"]) if sources_total_row else 0
         sources_responded_row = conn.execute(
             "SELECT count(DISTINCT source) AS n FROM articles WHERE day = %s", (today,)
         ).fetchone()
         sources_responded = int(sources_responded_row["n"]) if sources_responded_row else 0
 
+        # Before today's collection has run, EVERY day-over-day delta is
+        # -100.0% — true arithmetic, useless information, and alarming
+        # in red at the top of the screen. A day with nothing fetched
+        # yet has not underperformed; it has not started. Deltas are
+        # suppressed until the day has any data at all.
+        day_has_started = fetched_today > 0
+
         kpis = [
             KpiOut(
                 value=f"{fetched_today:,}",
                 label="Fetched today",
-                delta=_pct_delta(fetched_today, fetched_yesterday),
-                note=f"{sources_responded} of {sources_total} sources responded",
+                delta=_pct_delta(fetched_today, fetched_yesterday) if day_has_started else "",
+                note=(
+                    f"{sources_responded} of {sources_total} sources responded"
+                    if day_has_started
+                    else f"no collection run yet today · {sources_total} sources ready"
+                ),
                 vals=fetched_vals14,
             ),
             KpiOut(
                 value=f"{matched_today:,}",
                 label="Keyword matched",
-                delta=_pct_delta(matched_today, matched_yesterday),
-                note="of everything fetched",
+                delta=_pct_delta(matched_today, matched_yesterday) if day_has_started else "",
+                note=_pct_of(matched_today, fetched_today) + " of everything fetched"
+                if day_has_started
+                else "of everything fetched",
                 vals=matched_vals14,
             ),
-            # No `vals`: "awaiting review" is a point-in-time queue depth
-            # (current pending count), not a daily series this app keeps
-            # history of — a sparkline here would have to be fabricated.
-            KpiOut(value=f"{pending_count:,}", label="Awaiting review", note="across all matched articles"),
+            # No `vals`: "awaiting review" is a point-in-time queue depth,
+            # not a daily series this app keeps history of — a sparkline
+            # here would have to be fabricated.
+            KpiOut(
+                value=f"{pending_today:,}",
+                label="Awaiting review",
+                note=(
+                    f"from today · {pending_count:,} across all days"
+                    if pending_count != pending_today
+                    else "from today"
+                ),
+            ),
             KpiOut(
                 value=f"{approved_today:,}",
                 label="Approved today",
@@ -250,8 +291,15 @@ def dashboard_today(user: AuthenticatedUser = Depends(get_current_user)) -> Dash
                 phase="Phase 1",
                 label="Fetched",
                 value=f"{fetched_today:,}",
-                pct="100%",
-                note=f"Everything published today across {sources_total} sources.",
+                # "100%" was hardcoded, so an empty day drew a full bar
+                # labelled 100% above three zeroes. 100% OF NOTHING is
+                # not a meaningful figure to show.
+                pct="100%" if day_has_started else "0%",
+                note=(
+                    f"Everything published today across {sources_total} sources."
+                    if day_has_started
+                    else f"Nothing collected yet today. {sources_total} sources are configured and enabled."
+                ),
             ),
             FunnelStageOut(
                 phase="Phase 2",
