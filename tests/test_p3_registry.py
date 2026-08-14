@@ -123,26 +123,26 @@ def test_build_client_resolves_primary_only_when_secondary_unconfigured(monkeypa
 
 def test_build_client_for_feature_promotes_secondary_when_primary_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
     # Blank, not delenv: removing the var lets `.env`'s real key through.
-    # scoring's default primary is groq, secondary mistral.
-    monkeypatch.setenv("GROQ_API_KEY", "")
-    monkeypatch.setenv("MISTRAL_API_KEY", "env-bootstrap-mistral-key")
+    # scoring's default primary is mistral, secondary groq.
+    monkeypatch.setenv("MISTRAL_API_KEY", "")
+    monkeypatch.setenv("GROQ_API_KEY", "env-bootstrap-groq-key")
     from app.config import get_settings
 
     get_settings.cache_clear()
     with migrated_schema() as conn:
-        # primary (groq) has no key anywhere; secondary (mistral) does
+        # primary (mistral) has no key anywhere; secondary (groq) does
         client = build_client_for_feature(conn, SCORING)
         assert len(client.transport.candidates) == 1
         identity, transport = client.transport.candidates[0]
-        assert identity == "mistral"
+        assert identity == "groq"
         assert transport.__class__ is OpenAICompatibleTransport
     get_settings.cache_clear()
 
 
 def test_build_client_for_feature_wires_both_primary_and_secondary(monkeypatch: pytest.MonkeyPatch) -> None:
-    # scoring's default route is groq -> mistral (routing._FEATURE_PRIMARY).
-    monkeypatch.setenv("GROQ_API_KEY", "env-groq-key")
+    # scoring's default route is mistral -> groq (routing._FEATURE_PRIMARY).
     monkeypatch.setenv("MISTRAL_API_KEY", "env-mistral-key")
+    monkeypatch.setenv("GROQ_API_KEY", "env-groq-key")
     from app.config import get_settings
 
     get_settings.cache_clear()
@@ -150,7 +150,7 @@ def test_build_client_for_feature_wires_both_primary_and_secondary(monkeypatch: 
         client = build_client_for_feature(conn, SCORING)
         identities = [identity for identity, _ in client.transport.candidates]
         classes = [transport.__class__ for _, transport in client.transport.candidates]
-        assert identities == ["groq", "mistral"]
+        assert identities == ["mistral", "groq"]
         # Both groq and mistral are OpenAI-compatible; the Gemini
         # adapter is exercised by the dedup_verification route instead.
         assert classes == [OpenAICompatibleTransport, OpenAICompatibleTransport]

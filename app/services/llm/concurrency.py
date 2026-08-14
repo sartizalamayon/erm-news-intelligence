@@ -103,6 +103,38 @@ PROVIDER_RPM: dict[str, int] = {
 }
 DEFAULT_RPM = 10
 
+# PER-KEY tokens/minute. Requests-per-minute alone is NOT a sufficient
+# model of these providers, and assuming it was cost a real debugging
+# session: Groq's llama-3.1-8b-instant allows 30 requests/minute but
+# only 6,000 TOKENS/minute, and ONE judge batch of 10 headlines was
+# measured consuming 4,746 of them —
+#
+#     x-ratelimit-limit-tokens:     6000
+#     x-ratelimit-remaining-tokens: 1254   (after a single call)
+#     x-ratelimit-reset-tokens:     47.46s
+#
+# so the real ceiling is ~1.3 judge batches per minute, not 30. An
+# RPM-only limiter happily let eight workers fire eight of those calls
+# at once, every one of them 429'd, and the retry backoff then stacked
+# across ~9 failover candidates until a single batch took minutes. The
+# stage looked hung; nothing in the logs said "token budget".
+#
+# 0 means "no token ceiling worth modelling" (Mistral's 50,000/min is
+# ~10x any batch we send; Gemini publishes nothing measurable).
+PROVIDER_TPM: dict[str, int] = {
+    "mistral": 50_000,  # measured: x-ratelimit-limit-tokens-minute
+    "groq": 6_000,  # measured: x-ratelimit-limit-tokens
+    "gemini": 0,  # not exposed by the API and not published
+    "nvidia": 0,  # no headers at all
+}
+DEFAULT_TPM = 0
+
+# Fallback per-call token estimate when a caller does not supply one.
+# Deliberately near the measured judge-batch cost rather than a
+# small/optimistic number: under-estimating spends budget the limiter
+# thinks it still has, which is the exact failure this models away.
+DEFAULT_CALL_TOKENS = 5_000
+
 # Worker ceiling per stage. Kept modest because the bottleneck is the
 # provider's per-minute budget, not local CPU or sockets — more workers
 # than the rate limiter will admit just means more threads parked in
@@ -120,28 +152,62 @@ class RateLimiter:
     hand out a windfall of tokens or stall the bucket indefinitely.
     """
 
-    def __init__(self, rate_per_minute: int, *, burst: int | None = None) -> None:
+    def __init__(self, rate_per_minute: int, *, burst: int | None = None, tokens_per_minute: int = 0) -> None:
         if rate_per_minute <= 0:
             raise ValueError("rate_per_minute must be positive")
         self.rate_per_minute = rate_per_minute
+        self.tokens_per_minute = max(0, tokens_per_minute)
         self._rate_per_second = rate_per_minute / 60.0
         self._capacity = float(burst if burst is not None else max(1, rate_per_minute // 4))
         self._tokens = self._capacity
+        # SECOND bucket, for providers whose real constraint is tokens
+        # rather than requests. Starts full and refills continuously,
+        # exactly like the request bucket. `tokens_per_minute == 0`
+        # disables it entirely (provider has no meaningful token
+        # ceiling, or does not publish one).
+        self._tok_capacity = float(self.tokens_per_minute)
+        self._tok_available = self._tok_capacity
+        self._tok_per_second = self.tokens_per_minute / 60.0
         self._updated = time.monotonic()
         self._lock = threading.Lock()
 
-    def acquire(self) -> None:
-        """Block until one token is available, then consume it."""
+    def _refill(self, now: float) -> None:
+        """Caller must hold `self._lock`."""
+        elapsed = now - self._updated
+        self._tokens = min(self._capacity, self._tokens + elapsed * self._rate_per_second)
+        if self._tok_capacity:
+            self._tok_available = min(self._tok_capacity, self._tok_available + elapsed * self._tok_per_second)
+        self._updated = now
+
+    def acquire(self, estimated_tokens: int = 0) -> None:
+        """Block until BOTH a request slot and (when the provider has a
+        token ceiling) `estimated_tokens` of token budget are available,
+        then consume them.
+
+        A call larger than the whole per-minute token budget would
+        otherwise wait forever; it is clamped to the full bucket, so it
+        waits at most one refill period and then proceeds. Letting it
+        proceed and risk one 429 is strictly better than deadlocking a
+        pipeline stage.
+        """
+        want = min(max(0, estimated_tokens), int(self._tok_capacity)) if self._tok_capacity else 0
         while True:
             with self._lock:
                 now = time.monotonic()
-                self._tokens = min(self._capacity, self._tokens + (now - self._updated) * self._rate_per_second)
-                self._updated = now
-                if self._tokens >= 1.0:
+                self._refill(now)
+                have_request = self._tokens >= 1.0
+                have_tokens = (not self._tok_capacity) or self._tok_available >= want
+                if have_request and have_tokens:
                     self._tokens -= 1.0
+                    if self._tok_capacity:
+                        self._tok_available -= want
                     return
-                deficit = 1.0 - self._tokens
-                wait = deficit / self._rate_per_second
+                waits = []
+                if not have_request:
+                    waits.append((1.0 - self._tokens) / self._rate_per_second)
+                if not have_tokens and self._tok_per_second:
+                    waits.append((want - self._tok_available) / self._tok_per_second)
+                wait = max(waits) if waits else 0.05
             # Sleep OUTSIDE the lock so waiting threads don't serialize
             # behind each other's sleeps.
             time.sleep(min(wait, 1.0))
@@ -166,14 +232,13 @@ def limiter_for(provider: str, *, pool_size: int = 1) -> RateLimiter:
     whole process.
     """
     key = (provider or "").strip().lower() or "unknown"
-    effective = max(1, pool_size) * PROVIDER_RPM.get(key, DEFAULT_RPM)
+    keys = max(1, pool_size)
+    effective_rpm = keys * PROVIDER_RPM.get(key, DEFAULT_RPM)
+    effective_tpm = keys * PROVIDER_TPM.get(key, DEFAULT_TPM)
     with _limiters_lock:
         existing = _limiters.get(key)
-        if existing is None:
-            existing = RateLimiter(effective)
-            _limiters[key] = existing
-        elif effective > existing.rate_per_minute:
-            existing = RateLimiter(effective)
+        if existing is None or effective_rpm > existing.rate_per_minute:
+            existing = RateLimiter(effective_rpm, tokens_per_minute=effective_tpm)
             _limiters[key] = existing
         return existing
 
@@ -186,6 +251,7 @@ def parallel_map(
     limiter: RateLimiter | None = None,
     label: str = "",
     on_done: Callable[[int, int], None] | None = None,
+    tokens_per_item: int = DEFAULT_CALL_TOKENS,
 ) -> list[tuple[R | None, Exception | None]]:
     """Apply `fn` to every item concurrently, returning
     `[(result, error), ...]` **in input order**.
@@ -210,7 +276,7 @@ def parallel_map(
         nonlocal completed
         try:
             if limiter is not None:
-                limiter.acquire()
+                limiter.acquire(tokens_per_item)
             results[index] = (fn(item), None)
         except Exception as exc:  # noqa: BLE001 - isolation is this function's contract
             logger.warning("parallel_map_item_failed", extra={"label": label, "error": type(exc).__name__})

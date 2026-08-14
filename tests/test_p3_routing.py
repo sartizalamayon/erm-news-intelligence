@@ -37,13 +37,13 @@ def test_default_routing_config_assigns_features_across_providers() -> None:
     config = default_routing_config()
     assert set(config.routes.keys()) == set(FEATURES)
 
-    # Features are spread across providers ON PURPOSE: the stages run
-    # concurrently, so two heavy stages on one provider would queue
-    # behind a single per-minute budget instead of running in parallel.
-    # See routing._FEATURE_PRIMARY for the measured capacity behind each
-    # assignment.
+    # Assignment follows MEASURED token budgets, not request counts: the
+    # bulk stages sit on Mistral (50,000 TPM/key) because one judge batch
+    # costs ~4,746 tokens, which Groq's 6,000 TPM could only serve about
+    # once a minute. Low-volume features go to Gemini. See
+    # routing._FEATURE_PRIMARY.
     expected_primary = {
-        "scoring": "groq",
+        "scoring": "mistral",
         "translation": "mistral",
         "dedup_verification": "gemini",
         "topic_clustering": "mistral",

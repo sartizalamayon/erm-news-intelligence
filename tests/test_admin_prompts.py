@@ -298,9 +298,9 @@ def test_get_routing_config_defaults_spread_features_across_providers() -> None:
         # Default moved off Groq's reasoning model qwen3.6-27b — see
         # app.services.llm.routing.default_feature_route for the
         # measurements behind it.
-        # scoring and translation sit on DIFFERENT providers on purpose
-        # so the two heaviest stages do not share one per-minute budget.
-        assert routes["scoring"]["primary"] == {"provider": "groq", "model": "llama-3.1-8b-instant"}
+        # Bulk stages sit on Mistral for its 50,000 TPM; low-volume
+        # features go to Gemini. Groq is the failover.
+        assert routes["scoring"]["primary"] == {"provider": "mistral", "model": "mistral-small-latest"}
         assert routes["translation"]["primary"] == {"provider": "mistral", "model": "mistral-small-latest"}
         assert routes["scoring"]["secondary"]["provider"] != routes["scoring"]["primary"]["provider"]
 
@@ -517,7 +517,7 @@ def test_router_prompt_config_and_versioning_end_to_end(monkeypatch: pytest.Monk
 
             routing = client.get("/prompts/routing")
             assert routing.status_code == 200
-            assert routing.json()["routes"]["scoring"]["primary"]["provider"] == "groq"
+            assert routing.json()["routes"]["scoring"]["primary"]["provider"] == "mistral"
 
             quota = client.get("/prompts/quota")
             assert quota.status_code == 200

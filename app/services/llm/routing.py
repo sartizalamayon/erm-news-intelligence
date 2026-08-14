@@ -127,31 +127,40 @@ class RoutingConfig:
 #   cerebras                          HTTP 402, no free quota at all
 #
 # Assignment reasoning:
-#   * translation -> mistral. Much the heaviest stage by item count and
-#     the one that benefits most from 50,000 TPM, since it is batched 25
-#     headlines per call.
-#   * scoring -> groq. The other heavy stage, deliberately on a DIFFERENT
-#     provider so it does not queue behind translation. 14,400 requests/
-#     day/key is the largest daily allowance available to us, and judge
-#     batches are small enough to sit inside 6,000 TPM.
-#   * topic_clustering -> mistral. Needs the largest context of the five
-#     (50-headline chunks), which wants Mistral's TPM headroom; it runs
-#     AFTER scoring, so it never contends with translation.
-#   * dedup_verification / summarization -> gemini. Both are low-volume
-#     (dedup only fires on groups of 2+, summarization is ad hoc), which
-#     fits Gemini's much smaller per-minute budget.
+#   * translation / scoring / topic_clustering -> mistral. All three are
+#     BULK stages, and the binding constraint for bulk work is TOKENS
+#     per minute, not requests. Measured: ONE 10-headline judge batch
+#     costs 4,746 tokens, so Groq's 6,000 TPM permits ~1.3 such batches
+#     per MINUTE despite its generous 30 RPM / 14,400 RPD — a
+#     1,376-article day would take over an hour there. Mistral's 50,000
+#     TPM per key across 4 keys does the same work in minutes.
+#
+#     Scoring was briefly routed to Groq on exactly the "spread the load"
+#     reasoning below, and it was wrong: the stages run SEQUENTIALLY
+#     today (translate -> bodies -> dedup -> judge -> topic), so they
+#     never actually contend, and splitting them only moved the heaviest
+#     stage onto the smallest token budget. Revisit this if, and only
+#     if, the stages are ever made to run concurrently.
+#
+#   * dedup_verification / summarization -> gemini. Genuinely low
+#     volume (dedup only fires on proposed groups of 2+, summarization
+#     is ad hoc), which is all Gemini's small, unpublished per-minute
+#     budget can be trusted with.
 #
 # Every feature keeps a secondary on a DIFFERENT provider from its
 # primary, so a provider outage degrades rather than stops the pipeline.
+# Groq is an excellent SECONDARY precisely because its 14,400 requests/
+# day is the largest daily allowance we have — it is a poor primary for
+# bursty batch work and a strong one for spillover.
 _FEATURE_PRIMARY: dict[str, tuple[str, str | None]] = {
-    SCORING: ("groq", "llama-3.1-8b-instant"),
+    SCORING: ("mistral", "mistral-small-latest"),
     TRANSLATION: ("mistral", "mistral-small-latest"),
     DEDUP_VERIFICATION: ("gemini", None),
     TOPIC_CLUSTERING: ("mistral", "mistral-small-latest"),
     SUMMARIZATION: ("gemini", None),
 }
 _FEATURE_SECONDARY: dict[str, tuple[str, str | None]] = {
-    SCORING: ("mistral", "mistral-small-latest"),
+    SCORING: ("groq", "llama-3.1-8b-instant"),
     TRANSLATION: ("groq", "llama-3.1-8b-instant"),
     DEDUP_VERIFICATION: ("mistral", "mistral-small-latest"),
     TOPIC_CLUSTERING: ("groq", "llama-3.1-8b-instant"),

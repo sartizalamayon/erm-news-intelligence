@@ -59,7 +59,13 @@ from app.db.connection import DictConnection
 from app.errors import ConfigurationError
 from app.logging import get_logger
 from app.services.llm import parsing
-from app.services.llm.concurrency import limiter_for, parallel_map, pool_size_of, provider_of
+from app.services.llm.concurrency import (
+    DEFAULT_CALL_TOKENS,
+    limiter_for,
+    parallel_map,
+    pool_size_of,
+    provider_of,
+)
 from app.services.llm.embedding import EmbeddingBackend, default_embedding_backend
 from app.services.llm.provider import LLMClient
 from app.services.llm.registry import build_client_for_feature
@@ -208,6 +214,9 @@ def stage_translate(
         limiter=limiter_for(provider_of(client), pool_size=pool_size_of(client)),
         label="translate",
         on_done=_report,
+        # A 25-headline batch measured well under 3k tokens round-trip;
+        # margin included because Bengali tokenizes heavier than English.
+        tokens_per_item=3_000,
     )
     for batch, (translated, error) in zip(batches, outcomes, strict=True):
         # Same neutral default as the sequential version: a failed or
@@ -562,6 +571,12 @@ def run_llm_enrichment(
                 limiter=limiter_for(provider_of(judge_client), pool_size=pool_size_of(judge_client)),
                 label="judge",
                 on_done=_report,
+                # MEASURED, not guessed: one 10-headline judge batch
+                # consumed 4,746 tokens of Groq's 6,000/min budget
+                # (x-ratelimit-remaining-tokens went 6000 -> 1254 on a
+                # single call). Under-stating this is what let eight
+                # workers stampede a one-call-per-minute ceiling.
+                tokens_per_item=DEFAULT_CALL_TOKENS,
             )
             for chunk, (judgments, error) in zip(chunks, outcomes, strict=True):
                 if should_stop and should_stop():
