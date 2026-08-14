@@ -38,6 +38,7 @@ export function mountHealth(root) {
     runs: [],
     testResult: null,
     testOk: true,
+    testScrolled: false,
     busyStage: null,
     busySource: null,
     runningAll: false,
@@ -123,10 +124,14 @@ export function mountHealth(root) {
 
   async function testSource(src) {
     s.busySource = src.id;
+    s.testScrolled = false;
     render();
     try {
       const res = await api.post(`/health/sources/${src.id}/test`);
-      s.testResult = `${src.name} — ${res.fetched} fetched, ${res.today} from today (via ${res.method})${res.detail ? " · " + res.detail : ""}`;
+      // `res.detail` is already the human sentence ("95 fetched, 95 from
+      // today (via daily_star_nodes)") — appending our own rebuild of it
+      // printed the same clause twice in one banner.
+      s.testResult = `${src.name} — ${res.detail || `${res.fetched} fetched, ${res.today} from today (via ${res.method})`}`;
       s.testOk = !!res.ok;
     } catch (err) {
       s.testResult = `${src.name} — ${fmtErr(err)}`;
@@ -138,12 +143,21 @@ export function mountHealth(root) {
 
   async function diagnoseSource(src) {
     s.busySource = src.id;
+    s.testScrolled = false;
     render();
     try {
       const res = await api.post(`/health/sources/${src.id}/diagnose`);
-      s.testResult = `Diagnosis: ${src.name} — reachable ${mark(res.reachable)} · feed discovery ${mark(res.feed_discovery_ok)} · article URLs ${mark(
-        res.article_url_found
-      )} · date parse ${mark(res.date_parse_ok)}${res.detail ? " · " + res.detail : ""}`;
+      // Same trap as testSource: `res.detail` is ALREADY the rendered
+      // sentence ("reachable ✓ · feed discovery ✓ (6 items) · ..."), so
+      // building our own copy and appending it printed every check
+      // twice in one banner. Prefer the server's, which also carries
+      // the item counts.
+      s.testResult = `Diagnosis: ${src.name} — ${
+        res.detail ||
+        `reachable ${mark(res.reachable)} · feed discovery ${mark(res.feed_discovery_ok)} · article URLs ${mark(
+          res.article_url_found
+        )} · date parse ${mark(res.date_parse_ok)}`
+      }`;
       s.testOk = res.reachable && res.feed_discovery_ok && res.article_url_found && res.date_parse_ok;
     } catch (err) {
       s.testResult = `${src.name} — ${fmtErr(err)}`;
@@ -227,10 +241,21 @@ export function mountHealth(root) {
         </div>
 
         ${
+          // FIXED-position, not inline. This banner used to render at
+          // the top of the page above a 51-row source table, so testing
+          // a source near the bottom put its result ~1,500px out of
+          // view: the button looked dead. `scrollIntoView` was tried
+          // first and is unreliable here — the scroll container is
+          // `main.main-area`, not the document — so the result is
+          // pinned to the viewport instead and cannot be missed
+          // wherever the operator happens to be scrolled to.
           s.testResult
-            ? `<div class="banner ${s.testOk ? "banner-ok" : "banner-error"}"><span>${s.testOk ? "&#10003;" : "&#10005;"}</span><div style="flex:1;">${escapeHtml(
-                s.testResult
-              )}</div><button id="clearTestBtn" class="btn-ghost" style="font-size:14px;">&#10005;</button></div>`
+            ? `<div class="banner ${s.testOk ? "banner-ok" : "banner-error"}" role="status" aria-live="polite"
+                    style="position:fixed;left:50%;transform:translateX(-50%);bottom:24px;z-index:60;max-width:min(760px,92vw);box-shadow:0 8px 28px rgba(0,0,0,.28);">
+                 <span>${s.testOk ? "&#10003;" : "&#10005;"}</span>
+                 <div style="flex:1;">${escapeHtml(s.testResult)}</div>
+                 <button id="clearTestBtn" class="btn-ghost" style="font-size:14px;">&#10005;</button>
+               </div>`
             : ""
         }
 
@@ -307,6 +332,7 @@ export function mountHealth(root) {
     root.querySelectorAll("[data-run-stage]").forEach((b) => b.addEventListener("click", () => runStage(b.getAttribute("data-run-stage"))));
     const clearTestBtn = root.querySelector("#clearTestBtn");
     if (clearTestBtn) clearTestBtn.addEventListener("click", () => { s.testResult = null; render(); });
+
     root.querySelectorAll("[data-test-source]").forEach((b) => b.addEventListener("click", () => testSource(s.sources.find((x) => x.id == b.getAttribute("data-test-source")))));
     root.querySelectorAll("[data-diagnose-source]").forEach((b) => b.addEventListener("click", () => diagnoseSource(s.sources.find((x) => x.id == b.getAttribute("data-diagnose-source")))));
   }

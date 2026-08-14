@@ -474,6 +474,13 @@ def run_collection(
         run_result.wall_seconds = time.monotonic() - start
 
     if conn is not None and run_id is not None:
+        # total_matched stays 0 HERE on purpose: P2 (keyword matching)
+        # is a separate phase that has not run yet at this point, so the
+        # collector genuinely does not know the number. It is filled in
+        # afterwards by `app.services.admin.record_run_match_total()`.
+        # Before that existed, nothing ever wrote it and the Source
+        # health page's "MATCHED LAST RUN" tile read 0 on every run
+        # forever — a KPI that was structurally incapable of being right.
         _finalize_run(
             conn, run_id, status="done", total_new=run_result.total_inserted, total_matched=0, details=details
         )

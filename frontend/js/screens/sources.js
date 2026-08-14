@@ -176,6 +176,8 @@ export function mountSources(root) {
             ${LANGS.map((l) => `<option value="${l}" ${src && src.language === l ? "selected" : ""}>${l}</option>`).join("")}
           </select>
         </div>
+        <div id="srcFormError" role="alert" aria-live="assertive"
+             style="display:none;font-size:12px;color:var(--red);background:color-mix(in oklab, var(--red) 12%, transparent);border:1px solid var(--red);border-radius:6px;padding:8px 11px;"></div>
         <div class="row" style="gap:9px;">
           <button id="srcFormSave" class="btn btn-primary" style="padding:9px 16px;">${isEdit ? "Save" : "Add source"}</button>
           <button id="srcFormCancel" class="btn btn-outline" style="padding:9px 16px;">Cancel</button>
@@ -211,7 +213,27 @@ export function mountSources(root) {
           .map((x) => x.trim())
           .filter(Boolean);
         const language = root.querySelector("#srcFormLang").value;
-        if (!name) return window.alert("Name is required.");
+
+        // Inline, not window.alert(). An alert is modal, unstyled, and
+        // silently suppressed in some contexts — an admin console needs
+        // the error attached to the form it belongs to. `methods` was
+        // also never validated at all, so a source could be created
+        // with an empty method list: accepted by the API, visible in
+        // the table, and incapable of ever fetching anything.
+        const errEl = root.querySelector("#srcFormError");
+        const showError = (msg) => {
+          if (!errEl) return;
+          errEl.textContent = msg;
+          errEl.style.display = "";
+        };
+        if (errEl) errEl.style.display = "none";
+
+        if (!name) return showError("Name is required.");
+        if (!methods.length) {
+          return showError("At least one method is required (e.g. sitemap, rss, api, gnews, id_enum).");
+        }
+
+        saveBtn.disabled = true;
         try {
           if (s.editingId) {
             await api.patch(`/sources/${s.editingId}`, { name, methods, language });
@@ -222,7 +244,13 @@ export function mountSources(root) {
           s.editingId = null;
           load();
         } catch (err) {
-          window.alert("Couldn't save: " + fmtErr(err));
+          // `ApiError.message` already carries the API's `detail`, which
+          // now names the offending field (see app/api/error_handlers.py),
+          // so this surfaces "methods: Field required" rather than a
+          // generic "couldn't save".
+          showError("Couldn't save — " + fmtErr(err));
+        } finally {
+          saveBtn.disabled = false;
         }
       });
     const cancelBtn = root.querySelector("#srcFormCancel");

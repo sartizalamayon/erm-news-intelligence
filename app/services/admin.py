@@ -527,6 +527,32 @@ def rematch_today(conn: DictConnection) -> dict[str, int]:
     return {"matched": matched, "filtered_out": filtered_out, "total": len(rows)}
 
 
+def record_run_match_total(conn: DictConnection, matched: int, *, run_id: int | None = None) -> int | None:
+    """Write P2's matched count onto the run row it belongs to.
+
+    The collector finalizes a run BEFORE matching happens, so it writes
+    `total_matched = 0` and nothing ever corrected it — the Source
+    health page's "MATCHED LAST RUN" tile therefore read 0 after every
+    single run, including ones that matched 1,752 articles.
+
+    `run_id` is passed when a match phase runs as part of a collection.
+    A standalone rematch has no run of its own, so it attributes the
+    number to the most recent run of the same day — that is the run
+    whose articles were just re-matched. Returns the run id updated, or
+    None when there was nothing to attribute it to.
+    """
+    if run_id is None:
+        row = conn.execute(
+            "SELECT id FROM runs WHERE started_at::date = CURRENT_DATE ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        run_id = int(row["id"])
+    conn.execute("UPDATE runs SET total_matched = %s WHERE id = %s", (int(matched), run_id))
+    conn.commit()
+    return run_id
+
+
 def reset_day(conn: DictConnection, *, day: date | None = None, keep_reviewed: bool = True) -> dict[str, Any]:
     """Make a day collectable again from scratch — the supported way to
     re-run a collection you've already run.
@@ -2049,6 +2075,16 @@ def _run_match_subphase(conn: DictConnection) -> None:
         _run_state["match"]["status"] = "running"
     try:
         result = run_match_phase(conn)
+        # Attribute the matched count to the run this phase belongs to.
+        # Without this the `runs` row keeps the collector's placeholder
+        # 0 forever — see record_run_match_total.
+        with _run_lock:
+            fetch_state = _run_state.get("fetch") or {}
+            run_id = fetch_state.get("run_id")
+        try:
+            record_run_match_total(conn, result["matched"], run_id=run_id)
+        except Exception as exc:  # noqa: BLE001 - a reporting write must never fail the phase
+            logger.warning("record_run_match_total_failed", extra={"error": str(exc)[:200]})
         with _run_lock:
             _run_state["match"].update(
                 status="done",
