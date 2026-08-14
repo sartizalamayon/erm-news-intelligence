@@ -24,9 +24,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.db.connection import DictConnection
+from app.logging import get_logger
 from app.services.llm import parsing, prompts
 from app.services.llm.transport import Transport
 from app.services.llm.types import Judgment, Summary
+
+logger = get_logger(__name__)
 
 
 def _current_base_system(conn: DictConnection | None) -> str:
@@ -159,6 +162,48 @@ class LLMClient:
         except Exception:  # noqa: BLE001
             return parsing.translate_title_whole_call_fallback()
         return parsing.parse_translate_title(raw)
+
+    # ── 1.7b translate_titles_batch() — the BATCHED translate call ──────
+
+    def translate_titles_batch(self, titles: list[str]) -> list[str]:
+        """Translate many headlines in ONE request, returning one result
+        per input title in INPUT ORDER.
+
+        Positional alignment is a correctness requirement, not a
+        convenience: `stage_translate` zips this back onto article rows,
+        so a shifted result would write one article's headline onto
+        another. `parsing.parse_translate_titles_batch` keys off the
+        numbers in the response rather than trusting the model to
+        preserve order, and defaults any missing index to that item's
+        ORIGINAL title.
+
+        On a whole-call failure every title falls back to itself, which
+        is the same observable outcome as `translate_title`'s documented
+        `""` fallback (the caller keeps the original) — see
+        p3-contract.md §7.
+        """
+        if not titles:
+            return []
+        system = prompts.translate_titles_batch_system(len(titles))
+        prompt = prompts.translate_titles_batch_prompt(titles)
+        try:
+            raw = self.transport._generate(prompt, system=system, fmt="json")
+        except Exception as exc:  # noqa: BLE001 - mirrors judge_batch's blanket except
+            # LOGGED, unlike the legacy blanket-except call sites. The
+            # fallback here is indistinguishable from success at the
+            # database level — every article simply keeps its original
+            # title — so without this line a systemic failure (an expired
+            # key, a dead model, a dropped DB connection breaking the
+            # quota lookup) reads as "nothing needed translating" for an
+            # entire run. That exact confusion cost real debugging time:
+            # a closed connection surfaced as 25/25 titles "translated"
+            # to themselves in 0.00s.
+            logger.warning(
+                "translate_batch_failed_keeping_originals",
+                extra={"count": len(titles), "error_type": type(exc).__name__, "error": str(exc)[:200]},
+            )
+            return list(titles)
+        return parsing.parse_translate_titles_batch(raw, titles)
 
     # ── 1.8 draft_bullet() — report-bullet drafting ─────────────────────
 

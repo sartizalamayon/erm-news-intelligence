@@ -133,6 +133,24 @@ def judge_batch_response(scores: list[tuple[int, int, str]]) -> str:
     return json.dumps({"scores": [{"n": n, "score": s, "reason": r} for n, s, r in scores]})
 
 
+def translate_batch_response(texts: list[str]) -> str:
+    """`{"translations": [{"n": <1-indexed>, "text": <str>}, ...]}` — the
+    shape `LLMClient.translate_titles_batch` sends and
+    `parsing.parse_translate_titles_batch` expects.
+    """
+    return json.dumps({"translations": [{"n": i + 1, "text": t} for i, t in enumerate(texts)]})
+
+
+def translate_batch_echo(prompt: str, _system: str = "") -> str:
+    """Fake transport that translates every headline in the batch to
+    "EN:<original>". Parses the numbered list back out of the prompt so
+    the response has the right length for ANY batch size, which is what
+    the parser's positional alignment is checked against.
+    """
+    lines = [ln for ln in prompt.splitlines() if ln.strip() and ln[0].isdigit()]
+    return translate_batch_response([f"EN:{ln.split('. ', 1)[-1]}" for ln in lines])
+
+
 def cluster_topics_response(labels: list[tuple[int, str]]) -> str:
     """`{"labels": [{"n": <int>, "label": <str>}, ...]}`"""
     return json.dumps({"labels": [{"n": n, "label": lab} for n, lab in labels]})

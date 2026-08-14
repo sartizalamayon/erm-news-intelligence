@@ -437,6 +437,42 @@ def translate_title_system() -> str:
     )
 
 
+# ── 1.7b translate_titles_batch() — the BATCHED form of the above ──────
+#
+# The single-title call above is faithful to legacy (p3-contract.md §1.7:
+# "the prompt IS the raw title, no template") and is kept, unchanged, as
+# the fallback path. But one HTTP round-trip per headline does not scale:
+# a real backlog day is 1,376 non-English titles, which at one call each
+# is 1,376 sequential-ish round-trips — minutes of pure latency for work
+# that is a single sentence of translation.
+#
+# Batching mirrors `judge_batch` exactly (numbered list in, JSON keyed by
+# the same numbers out), so the shape is already proven in this codebase
+# and the parser can reuse the same per-item-missing-index defaulting.
+# Translation quality is unaffected: each headline is still translated on
+# its own terms, just in one request.
+
+
+def translate_titles_batch_system(n: int) -> str:
+    return (
+        "You translate news headlines to natural English for a "
+        "Bangladesh risk-analysis desk.\n\n"
+        "You will receive a numbered list of headlines in mixed languages "
+        "(mostly Bengali, some already English). Translate EACH one to "
+        "natural English. If a headline is already English, return it "
+        "unchanged.\n\n"
+        'Respond ONLY with JSON: {"translations": [{"n": <number>, '
+        '"text": "<english headline>"}, ...]} with exactly '
+        f"{n} entries, one per input headline, numbered to match. "
+        "No preamble, no explanation, no extra keys."
+    )
+
+
+def translate_titles_batch_prompt(titles: list[str]) -> str:
+    numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(titles))
+    return f"Headlines:\n{numbered}\n\nTranslate all {len(titles)} headlines."
+
+
 # ── 1.8 draft_bullet() — report-bullet drafting ─────────────────────────
 # Downstream of P3 scoring (report-generation stage, not the collection
 # pipeline itself) but still an llm.py prompt method, reproduced here per

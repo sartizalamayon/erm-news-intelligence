@@ -111,7 +111,67 @@ class RoutingConfig:
     def route_for(self, feature: str) -> FeatureRoute:
         if feature not in FEATURES:
             raise ValidationError(f"unknown AI feature {feature!r} — must be one of {FEATURES}")
-        return self.routes.get(feature, default_feature_route())
+        return self.routes.get(feature, default_route_for(feature))
+
+
+# Per-feature provider assignment. The point is NOT that one provider is
+# best — it is that the five features run CONCURRENTLY, so putting two
+# heavy stages on the same provider makes them queue behind one shared
+# per-minute budget instead of running in parallel.
+#
+# Capacity measured live 2026-08-14 against real keys (headers, not docs):
+#
+#   mistral  mistral-small-latest     50 RPM, 50,000 TPM per key x4 keys
+#   groq     llama-3.1-8b-instant     30 RPM,  6,000 TPM, 14,400 RPD  x3
+#   gemini   gemini-flash-lite-latest ~15 RPM (undocumented)          x4
+#   cerebras                          HTTP 402, no free quota at all
+#
+# Assignment reasoning:
+#   * translation -> mistral. Much the heaviest stage by item count and
+#     the one that benefits most from 50,000 TPM, since it is batched 25
+#     headlines per call.
+#   * scoring -> groq. The other heavy stage, deliberately on a DIFFERENT
+#     provider so it does not queue behind translation. 14,400 requests/
+#     day/key is the largest daily allowance available to us, and judge
+#     batches are small enough to sit inside 6,000 TPM.
+#   * topic_clustering -> mistral. Needs the largest context of the five
+#     (50-headline chunks), which wants Mistral's TPM headroom; it runs
+#     AFTER scoring, so it never contends with translation.
+#   * dedup_verification / summarization -> gemini. Both are low-volume
+#     (dedup only fires on groups of 2+, summarization is ad hoc), which
+#     fits Gemini's much smaller per-minute budget.
+#
+# Every feature keeps a secondary on a DIFFERENT provider from its
+# primary, so a provider outage degrades rather than stops the pipeline.
+_FEATURE_PRIMARY: dict[str, tuple[str, str | None]] = {
+    SCORING: ("groq", "llama-3.1-8b-instant"),
+    TRANSLATION: ("mistral", "mistral-small-latest"),
+    DEDUP_VERIFICATION: ("gemini", None),
+    TOPIC_CLUSTERING: ("mistral", "mistral-small-latest"),
+    SUMMARIZATION: ("gemini", None),
+}
+_FEATURE_SECONDARY: dict[str, tuple[str, str | None]] = {
+    SCORING: ("mistral", "mistral-small-latest"),
+    TRANSLATION: ("groq", "llama-3.1-8b-instant"),
+    DEDUP_VERIFICATION: ("mistral", "mistral-small-latest"),
+    TOPIC_CLUSTERING: ("groq", "llama-3.1-8b-instant"),
+    SUMMARIZATION: ("mistral", "mistral-small-latest"),
+}
+
+
+def default_route_for(feature: str) -> FeatureRoute:
+    """Per-FEATURE default (see `_FEATURE_PRIMARY` above). Falls back to
+    `default_feature_route()` for anything not explicitly assigned, so a
+    new feature name can never end up unrouted.
+    """
+    primary = _FEATURE_PRIMARY.get(feature)
+    secondary = _FEATURE_SECONDARY.get(feature)
+    if primary is None:
+        return default_feature_route()
+    return FeatureRoute(
+        primary=ProviderChoice(provider=primary[0], model=primary[1]),
+        secondary=(ProviderChoice(provider=secondary[0], model=secondary[1]) if secondary else None),
+    )
 
 
 def default_feature_route() -> FeatureRoute:
@@ -147,7 +207,7 @@ def default_feature_route() -> FeatureRoute:
 
 
 def default_routing_config() -> RoutingConfig:
-    return RoutingConfig(routes={feature: default_feature_route() for feature in FEATURES})
+    return RoutingConfig(routes={feature: default_route_for(feature) for feature in FEATURES})
 
 
 def _choice_from_json(data: dict[str, Any] | None) -> ProviderChoice | None:
@@ -196,7 +256,7 @@ def load_routing_config(conn: DictConnection | None) -> RoutingConfig:
     for feature in FEATURES:
         entry = data.get(feature)
         try:
-            routes[feature] = _route_from_json(entry) if entry else default_feature_route()
+            routes[feature] = _route_from_json(entry) if entry else default_route_for(feature)
         except ValidationError:
             # Defensive: `ProviderChoice` itself no longer validates the
             # provider string (Task 3 — arbitrary providers are valid
@@ -206,7 +266,7 @@ def load_routing_config(conn: DictConnection | None) -> RoutingConfig:
             # (e.g. a genuinely malformed stored shape) — one feature's
             # bad data degrades to the safe default rather than taking
             # down routing resolution for every feature.
-            routes[feature] = default_feature_route()
+            routes[feature] = default_route_for(feature)
     return RoutingConfig(routes=routes)
 
 

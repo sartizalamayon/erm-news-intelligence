@@ -41,7 +41,14 @@ from app.services.enrichment import (
 )
 from app.services.llm.embedding import UnavailableEmbeddingBackend
 from app.services.llm.provider import LLMClient
-from tests.helpers.fake_llm import FakeLLMProvider, cluster_topics_response, judge_batch_response, verify_group_response
+from tests.helpers.fake_llm import (
+    FakeLLMProvider,
+    cluster_topics_response,
+    judge_batch_response,
+    translate_batch_echo,
+    translate_batch_response,
+    verify_group_response,
+)
 
 # ── pure-logic tests (no DB) ──────────────────────────────────────────────
 
@@ -112,7 +119,9 @@ def test_stage_translate_english_title_is_free_no_client_needed() -> None:
 
 
 def test_stage_translate_non_english_with_client_calls_translate_title() -> None:
-    fake = FakeLLMProvider(responses=lambda p, s: "Translated Title")
+    # stage_translate batches now (BATCH_SIZE_TRANSLATE_BATCHED), so the
+    # transport must answer in the batch JSON shape.
+    fake = FakeLLMProvider(responses=lambda p, s: translate_batch_response(["Translated Title"]))
     client = LLMClient(transport=fake, name="fake")
     articles = [{"title": "বাংলা শিরোনাম"}]
     result = stage_translate(articles, client=client)
@@ -146,17 +155,10 @@ def test_stage_translate_progress_reaches_total_with_a_client() -> None:
     final report equals the total.
     """
 
-    class _Client:
-        name = "test · model"
-
-        def translate_title(self, title: str) -> str:
-            return f"EN:{title}"
-
+    client = LLMClient(transport=FakeLLMProvider(responses=translate_batch_echo), name="test · model")
     calls = []
     articles = [{"title": "বাংলা এক"}, {"title": "বাংলা দুই"}, {"title": "বাংলা তিন"}]
-    stage_translate(
-        articles, client=_Client(), progress=lambda done, total, step: calls.append((done, total, step))
-    )
+    stage_translate(articles, client=client, progress=lambda done, total, step: calls.append((done, total, step)))
     assert [a["title_en"] for a in articles] == ["EN:বাংলা এক", "EN:বাংলা দুই", "EN:বাংলা তিন"]
     assert max(done for done, _t, _s in calls) == 3
 
@@ -326,7 +328,7 @@ def test_full_run_translates_dedups_judges_and_tags_topics(monkeypatch: pytest.M
         _fake_client_factory(
             monkeypatch,
             {
-                "translation": lambda p, s: "Translated Bengali Headline",
+                "translation": lambda p, s: translate_batch_response(["Translated Bengali Headline"]),
                 "dedup_verification": lambda p, s: verify_group_response([0]),
                 "scoring": lambda p, s: judge_batch_response([(1, 8, "relevant"), (2, 3, "noise")]),
                 "topic_clustering": lambda p, s: cluster_topics_response([(1, "Some Topic"), (2, "Some Topic")]),
@@ -367,7 +369,7 @@ def test_standalone_translate_rerun_only_selects_missing_title_en(monkeypatch: p
         a2 = _seed_article(conn, title="বাংলা দুই", title_en="already there", url="u2", url_norm="u2")
         conn.commit()
 
-        _fake_client_factory(monkeypatch, {"translation": lambda p, s: "Fresh Translation"})
+        _fake_client_factory(monkeypatch, {"translation": lambda p, s: translate_batch_response(["Fresh Translation"])})
         result = run_llm_enrichment(conn, today=TODAY, stages={"translate"})
         assert result.enriched == 1  # only a1 matched the WHERE clause
 

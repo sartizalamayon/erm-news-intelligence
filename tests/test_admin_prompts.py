@@ -284,7 +284,7 @@ def test_suggest_refinement_calls_llm_client_with_approved_and_rejected_titles(m
 # ── Provider routing config ─────────────────────────────────────────────
 
 
-def test_get_routing_config_defaults_to_mistral_primary_gemini_secondary() -> None:
+def test_get_routing_config_defaults_spread_features_across_providers() -> None:
     with migrated_schema() as conn:
         _reset_llm_settings(conn)
         routes = admin_service.get_routing_config(conn)
@@ -298,8 +298,11 @@ def test_get_routing_config_defaults_to_mistral_primary_gemini_secondary() -> No
         # Default moved off Groq's reasoning model qwen3.6-27b — see
         # app.services.llm.routing.default_feature_route for the
         # measurements behind it.
-        assert routes["scoring"]["primary"] == {"provider": "mistral", "model": "mistral-small-latest"}
-        assert routes["scoring"]["secondary"] == {"provider": "gemini", "model": None}
+        # scoring and translation sit on DIFFERENT providers on purpose
+        # so the two heaviest stages do not share one per-minute budget.
+        assert routes["scoring"]["primary"] == {"provider": "groq", "model": "llama-3.1-8b-instant"}
+        assert routes["translation"]["primary"] == {"provider": "mistral", "model": "mistral-small-latest"}
+        assert routes["scoring"]["secondary"]["provider"] != routes["scoring"]["primary"]["provider"]
 
 
 def test_save_routing_config_round_trips_and_preserves_untouched_features() -> None:
@@ -311,7 +314,7 @@ def test_save_routing_config_round_trips_and_preserves_untouched_features() -> N
         assert saved["scoring"]["primary"] == {"provider": "gemini", "model": "gemini-flash-lite-latest"}
         assert saved["scoring"]["secondary"] is None
         # unaffected features still default
-        assert saved["translation"]["primary"]["provider"] == "mistral"
+        assert saved["translation"]["primary"]["provider"] == "mistral"  # per-feature default, untouched
 
         reloaded = admin_service.get_routing_config(conn)
         assert reloaded["scoring"]["primary"]["model"] == "gemini-flash-lite-latest"
@@ -514,7 +517,7 @@ def test_router_prompt_config_and_versioning_end_to_end(monkeypatch: pytest.Monk
 
             routing = client.get("/prompts/routing")
             assert routing.status_code == 200
-            assert routing.json()["routes"]["scoring"]["primary"]["provider"] == "mistral"
+            assert routing.json()["routes"]["scoring"]["primary"]["provider"] == "groq"
 
             quota = client.get("/prompts/quota")
             assert quota.status_code == 200

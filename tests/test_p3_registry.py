@@ -29,7 +29,7 @@ from app.services.llm.routing import (
     RoutingConfig,
     save_routing_config,
 )
-from app.services.llm.transport import GeminiTransport, OpenAICompatibleTransport
+from app.services.llm.transport import OpenAICompatibleTransport
 
 pytestmark = pytest.mark.skipif(not pg_available(), reason="no reachable Postgres (set TEST_DATABASE_URL)")
 
@@ -123,24 +123,26 @@ def test_build_client_resolves_primary_only_when_secondary_unconfigured(monkeypa
 
 def test_build_client_for_feature_promotes_secondary_when_primary_unconfigured(monkeypatch: pytest.MonkeyPatch) -> None:
     # Blank, not delenv: removing the var lets `.env`'s real key through.
-    monkeypatch.setenv("MISTRAL_API_KEY", "")
-    monkeypatch.setenv("GEMINI_API_KEY", "env-bootstrap-gemini-key")
+    # scoring's default primary is groq, secondary mistral.
+    monkeypatch.setenv("GROQ_API_KEY", "")
+    monkeypatch.setenv("MISTRAL_API_KEY", "env-bootstrap-mistral-key")
     from app.config import get_settings
 
     get_settings.cache_clear()
     with migrated_schema() as conn:
-        # primary (mistral) has no key anywhere; secondary (gemini) does
+        # primary (groq) has no key anywhere; secondary (mistral) does
         client = build_client_for_feature(conn, SCORING)
         assert len(client.transport.candidates) == 1
         identity, transport = client.transport.candidates[0]
-        assert identity == "gemini"
-        assert transport.__class__ is GeminiTransport
+        assert identity == "mistral"
+        assert transport.__class__ is OpenAICompatibleTransport
     get_settings.cache_clear()
 
 
 def test_build_client_for_feature_wires_both_primary_and_secondary(monkeypatch: pytest.MonkeyPatch) -> None:
+    # scoring's default route is groq -> mistral (routing._FEATURE_PRIMARY).
+    monkeypatch.setenv("GROQ_API_KEY", "env-groq-key")
     monkeypatch.setenv("MISTRAL_API_KEY", "env-mistral-key")
-    monkeypatch.setenv("GEMINI_API_KEY", "env-gemini-key")
     from app.config import get_settings
 
     get_settings.cache_clear()
@@ -148,8 +150,10 @@ def test_build_client_for_feature_wires_both_primary_and_secondary(monkeypatch: 
         client = build_client_for_feature(conn, SCORING)
         identities = [identity for identity, _ in client.transport.candidates]
         classes = [transport.__class__ for _, transport in client.transport.candidates]
-        assert identities == ["mistral", "gemini"]
-        assert classes == [OpenAICompatibleTransport, GeminiTransport]
+        assert identities == ["groq", "mistral"]
+        # Both groq and mistral are OpenAI-compatible; the Gemini
+        # adapter is exercised by the dedup_verification route instead.
+        assert classes == [OpenAICompatibleTransport, OpenAICompatibleTransport]
     get_settings.cache_clear()
 
 

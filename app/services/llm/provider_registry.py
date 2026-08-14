@@ -107,18 +107,46 @@ class ProviderDefinition:
 #     it blind; flipping it back on is a config change, not a code
 #     change, if Cerebras ever adds a free tier.
 DEFAULT_PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
+    # groq — model changed from `qwen/qwen3.6-27b` to
+    # `llama-3.1-8b-instant` after reading Groq's own published free-tier
+    # table (console.groq.com/docs/rate-limits) and confirming it live
+    # against real keys on 2026-08-14:
+    #
+    #     model                  RPM     RPD      TPM      TPD
+    #     qwen/qwen3.6-27b        30    1,000   8,000   200,000
+    #     llama-3.1-8b-instant    30   14,400   6,000   500,000
+    #
+    # 14.4x the daily requests and 2.5x the daily tokens, and qwen is a
+    # REASONING model whose thinking tokens are pure waste here — every
+    # call in this pipeline wants a short JSON verdict, never an
+    # explanation. Live headers on our own keys confirmed exactly
+    # `x-ratelimit-limit-requests: 14400` / `x-ratelimit-limit-tokens: 6000`.
     "groq": ProviderDefinition(
         provider="groq",
         adapter=ADAPTER_OPENAI_COMPATIBLE,
         base_url="https://api.groq.com/openai/v1",
-        default_model="qwen/qwen3.6-27b",
+        default_model="llama-3.1-8b-instant",
         enabled=True,
     ),
+    # gemini — `gemini-2.0-flash` is DEAD. Verified live 2026-08-14:
+    # every key, including the one this project has used since day one,
+    # returns HTTP 404 "This model models/gemini-2.0-flash is no longer
+    # available." Because Gemini was the SECONDARY for all five features,
+    # the entire failover path was broken and would have failed silently
+    # the first time a primary went down.
+    #
+    # Pinned to the `-latest` ALIAS deliberately, not to a version
+    # number: pinning `2.0-flash` is precisely what rotted. Google
+    # repoints `gemini-flash-lite-latest` at the current lite model, so
+    # this survives the next deprecation. Verified 200 OK on all four
+    # keys. (`gemini-2.5-flash-lite` is listed by the models endpoint but
+    # returns 404 for these keys — listed does not mean callable, so
+    # never select a Gemini model without a live probe.)
     "gemini": ProviderDefinition(
         provider="gemini",
         adapter=ADAPTER_GEMINI,
         base_url=None,
-        default_model="gemini-2.0-flash",
+        default_model="gemini-flash-lite-latest",
         enabled=True,
     ),
     "mistral": ProviderDefinition(

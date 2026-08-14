@@ -74,13 +74,34 @@ R = TypeVar("R")
 #     (quota.py's own note: Gemini returns no rate-limit headers at
 #     all). Paced low on purpose; an unknown ceiling is not a licence to
 #     assume a high one.
+# PER-KEY requests/minute. Multiplied by the number of pooled keys at
+# `limiter_for()` time — the budget is per API key, so four Mistral keys
+# really are 4x the ceiling, and pacing them as one key would waste 75%
+# of the capacity we have.
+#
+# All values MEASURED live 2026-08-14 from response headers on the real
+# keys, not taken from documentation:
+#
+#   mistral  x-ratelimit-limit-req-minute: 50, limit-tokens-minute: 50000
+#   groq     x-ratelimit-limit-requests: 14400 (RPD), limit-tokens: 6000
+#            (TPM); RPM is 30 per Groq's published free-tier table for
+#            llama-3.1-8b-instant, which the headers do not restate.
+#   gemini   Google publishes nothing and returns no rate-limit headers.
+#            A 40-request burst on one key returned 14x200 then 26x429,
+#            which is consistent with a ~15/min ceiling being spent
+#            instantly. Paced at 10 — an unmeasurable ceiling is a reason
+#            for caution, not for optimism.
+#
+# Each is set BELOW its measured ceiling because the transport layer
+# retries on its own, and those retries spend from the same real budget
+# without passing through this limiter.
 PROVIDER_RPM: dict[str, int] = {
-    "mistral": 40,
-    "groq": 20,
-    "gemini": 12,
-    "nvidia": 15,
+    "mistral": 40,  # measured 50
+    "groq": 25,  # published 30
+    "gemini": 10,  # inferred ~15
+    "nvidia": 15,  # no headers, no docs — conservative
 }
-DEFAULT_RPM = 12
+DEFAULT_RPM = 10
 
 # Worker ceiling per stage. Kept modest because the bottleneck is the
 # provider's per-minute budget, not local CPU or sockets — more workers
@@ -102,6 +123,7 @@ class RateLimiter:
     def __init__(self, rate_per_minute: int, *, burst: int | None = None) -> None:
         if rate_per_minute <= 0:
             raise ValueError("rate_per_minute must be positive")
+        self.rate_per_minute = rate_per_minute
         self._rate_per_second = rate_per_minute / 60.0
         self._capacity = float(burst if burst is not None else max(1, rate_per_minute // 4))
         self._tokens = self._capacity
@@ -129,16 +151,29 @@ _limiters: dict[str, RateLimiter] = {}
 _limiters_lock = threading.Lock()
 
 
-def limiter_for(provider: str) -> RateLimiter:
+def limiter_for(provider: str, *, pool_size: int = 1) -> RateLimiter:
     """One shared limiter per provider for the process lifetime — the
     budget is per API key, so a per-call or per-stage limiter would let
     two concurrent stages each spend the full ceiling.
+
+    `pool_size` is how many API keys this provider has available. Rate
+    limits are enforced per key, so N pooled keys genuinely multiply the
+    ceiling; pacing a 4-key pool at one key's rate would leave 75% of
+    the paid-for capacity unused. The pool size is captured on FIRST use
+    for a given provider (the limiter is process-wide and shared), and a
+    later call asking for a LARGER pool widens it — never narrows it,
+    so one stage that happens to resolve fewer keys cannot throttle the
+    whole process.
     """
     key = (provider or "").strip().lower() or "unknown"
+    effective = max(1, pool_size) * PROVIDER_RPM.get(key, DEFAULT_RPM)
     with _limiters_lock:
         existing = _limiters.get(key)
         if existing is None:
-            existing = RateLimiter(PROVIDER_RPM.get(key, DEFAULT_RPM))
+            existing = RateLimiter(effective)
+            _limiters[key] = existing
+        elif effective > existing.rate_per_minute:
+            existing = RateLimiter(effective)
             _limiters[key] = existing
         return existing
 
@@ -197,6 +232,25 @@ def parallel_map(
             pool.submit(_one, i, item)
 
     return results
+
+
+def pool_size_of(client: Any) -> int:
+    """How many API keys the client's PRIMARY provider has available.
+
+    `FailoverTransport.candidates` is an ordered list of
+    `(identity, transport)` where a pooled key's identity is
+    `"<provider>:<key_id>"` (registry's `_credentials_for`). Only the
+    primary provider's keys are counted: the secondary exists for
+    failover, and pacing the primary as though the secondary's budget
+    were also available would push the primary into 429s and force the
+    failover it is meant to avoid.
+    """
+    transport = getattr(client, "transport", None)
+    candidates = getattr(transport, "candidates", None)
+    if not candidates:
+        return 1
+    primary = str(candidates[0][0]).split(":")[0].strip().lower()
+    return sum(1 for identity, _t in candidates if str(identity).split(":")[0].strip().lower() == primary)
 
 
 def provider_of(client: Any) -> str:

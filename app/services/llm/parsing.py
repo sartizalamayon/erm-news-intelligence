@@ -166,6 +166,34 @@ def parse_judge_batch(raw: str, item_count: int) -> list[Judgment]:
         return judge_batch_whole_call_fallback(list(range(item_count)), e)
 
 
+def parse_translate_titles_batch(raw: str, titles: list[str]) -> list[str]:
+    """Parse `translate_titles_batch`'s JSON into one translation per
+    input title, IN INPUT ORDER.
+
+    Failure grain matches `parse_judge_batch` deliberately: a malformed
+    whole response falls back to the ORIGINAL titles (which is exactly
+    what `stage_translate`'s single-call path does when a call fails —
+    p3-contract.md §7's "never silently drop"), and a merely missing or
+    mis-numbered index falls back per item, not for the whole batch.
+
+    Returning the original title rather than "" matters: `stage_translate`
+    treats an empty string as "translation failed, keep the original",
+    so both paths converge on the same observable outcome, but doing it
+    here keeps the positional alignment explicit and auditable.
+    """
+    try:
+        data = json.loads(raw)
+        by_n: dict[int, str] = {}
+        for entry in data.get("translations", []):
+            n = int(entry.get("n", 0))
+            text = str(entry.get("text", "")).strip()
+            if text:
+                by_n[n] = text[:TRANSLATE_MAXLEN]
+        return [by_n.get(i + 1, titles[i]) for i in range(len(titles))]
+    except Exception:  # noqa: BLE001 - mirrors parse_judge_batch's blanket except
+        return list(titles)
+
+
 def parse_cluster_topics_chunk(raw: str, item_count: int) -> list[str]:
     """Port of `cluster_topics_chunk()`'s post-`_generate()` logic
     (p3-contract.md §1.3). Per-ENTRY `try/except (ValueError, TypeError):
@@ -302,7 +330,15 @@ def parse_suggest_guidance(raw: str) -> str:
 # below must match, since §5's ordering/mapping guarantees were derived
 # from these exact numbers.
 
-BATCH_SIZE_TRANSLATE = 1  # no batching — one call per non-English title
+# Single-call translation remains the frozen legacy contract
+# (p3-contract.md §1.7) and is still the fallback path.
+BATCH_SIZE_TRANSLATE = 1
+# Headlines per BATCHED translate call (`translate_titles_batch`). 25 is
+# sized against the binding constraint, which is tokens-per-minute, not
+# requests: a Bengali headline is ~40-60 tokens, so 25 in + 25 out lands
+# around 2.5-3k tokens per call -- comfortably inside Mistral's measured
+# 50,000 TPM while cutting a 1,376-article day from 1,376 calls to ~55.
+BATCH_SIZE_TRANSLATE_BATCHED = 25
 BATCH_SIZE_DEDUP_VERIFY = 12  # hard-coded CHUNK, pipeline.py:189
 BATCH_SIZE_JUDGE_DEFAULT = 10  # LLM_BATCH env default, collection_service.py:383
 BATCH_SIZE_TOPIC_CHUNK_DEFAULT = 50  # LLM_TOPIC_CHUNK env default, :429

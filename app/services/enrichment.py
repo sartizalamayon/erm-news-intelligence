@@ -59,7 +59,7 @@ from app.db.connection import DictConnection
 from app.errors import ConfigurationError
 from app.logging import get_logger
 from app.services.llm import parsing
-from app.services.llm.concurrency import limiter_for, parallel_map, provider_of
+from app.services.llm.concurrency import limiter_for, parallel_map, pool_size_of, provider_of
 from app.services.llm.embedding import EmbeddingBackend, default_embedding_backend
 from app.services.llm.provider import LLMClient
 from app.services.llm.registry import build_client_for_feature
@@ -183,28 +183,44 @@ def stage_translate(
 
     assert client is not None  # guaranteed by the partition above
 
-    def _translate(article: dict[str, Any]) -> str:
-        return client.translate_title(article.get("title", ""))
+    # BATCHED, then parallel across batches. Two multipliers stack here:
+    # `BATCH_SIZE_TRANSLATE_BATCHED` headlines per request turns a
+    # 1,376-title day from 1,376 requests into ~55, and those ~55 still
+    # run concurrently under the provider's rate limiter. The old
+    # one-title-per-call path is preserved verbatim in
+    # `LLMClient.translate_title` and remains the documented legacy
+    # contract (p3-contract.md §1.7); it is what a single-item batch
+    # degenerates to, and what the per-item fallback returns to.
+    batch_size = max(1, parsing.BATCH_SIZE_TRANSLATE_BATCHED)
+    batches = [needs_call[i : i + batch_size] for i in range(0, len(needs_call), batch_size)]
 
-    def _report(done: int, _n: int) -> None:
+    def _translate_batch(batch: list[dict[str, Any]]) -> list[str]:
+        return client.translate_titles_batch([a.get("title", "") for a in batch])
+
+    def _report(done_batches: int, _n: int) -> None:
         if progress:
-            progress(already_done + done, total, "Translating")
+            done_items = min(done_batches * batch_size, len(needs_call))
+            progress(already_done + done_items, total, "Translating")
 
     outcomes = parallel_map(
-        needs_call,
-        _translate,
-        limiter=limiter_for(provider_of(client)),
+        batches,
+        _translate_batch,
+        limiter=limiter_for(provider_of(client), pool_size=pool_size_of(client)),
         label="translate",
         on_done=_report,
     )
-    for article, (translated, error) in zip(needs_call, outcomes, strict=True):
-        # Same neutral default as the sequential version: an empty or
-        # failed translation leaves the original title in place rather
+    for batch, (translated, error) in zip(batches, outcomes, strict=True):
+        # Same neutral default as the sequential version: a failed or
+        # empty translation leaves the original title in place rather
         # than blanking it (p3-contract.md §7 — never silently drop).
-        if error is not None:
-            article["title_en"] = article.get("title", "")
-        else:
-            article["title_en"] = translated or article.get("title", "")
+        if error is not None or translated is None:
+            for article in batch:
+                article["title_en"] = article.get("title", "")
+            continue
+        for article, text in zip(batch, translated, strict=False):
+            article["title_en"] = text or article.get("title", "")
+    if progress:
+        progress(total, total, "Translating")
     return articles
 
 
@@ -543,7 +559,7 @@ def run_llm_enrichment(
             outcomes = parallel_map(
                 chunks,
                 judge_client.judge_batch,
-                limiter=limiter_for(provider_of(judge_client)),
+                limiter=limiter_for(provider_of(judge_client), pool_size=pool_size_of(judge_client)),
                 label="judge",
                 on_done=_report,
             )

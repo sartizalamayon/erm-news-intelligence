@@ -19,7 +19,7 @@ from app.services.llm.routing import (
     FeatureRoute,
     ProviderChoice,
     RoutingConfig,
-    default_feature_route,
+    default_route_for,
     default_routing_config,
     load_routing_config,
     save_routing_config,
@@ -28,7 +28,7 @@ from app.services.llm.routing import (
 pytestmark = pytest.mark.skipif(not pg_available(), reason="no reachable Postgres (set TEST_DATABASE_URL)")
 
 
-def test_default_routing_config_is_mistral_primary_gemini_secondary_for_every_feature() -> None:
+def test_default_routing_config_assigns_features_across_providers() -> None:
     """Default moved off Groq's `qwen/qwen3.6-27b` — a REASONING model
     metered against an 8,000 token/MINUTE ceiling, measured 391% over
     its own daily budget on one scoring run and observed sitting in
@@ -36,13 +36,26 @@ def test_default_routing_config_is_mistral_primary_gemini_secondary_for_every_fe
     """
     config = default_routing_config()
     assert set(config.routes.keys()) == set(FEATURES)
+
+    # Features are spread across providers ON PURPOSE: the stages run
+    # concurrently, so two heavy stages on one provider would queue
+    # behind a single per-minute budget instead of running in parallel.
+    # See routing._FEATURE_PRIMARY for the measured capacity behind each
+    # assignment.
+    expected_primary = {
+        "scoring": "groq",
+        "translation": "mistral",
+        "dedup_verification": "gemini",
+        "topic_clustering": "mistral",
+        "summarization": "gemini",
+    }
     for feature in FEATURES:
         route = config.route_for(feature)
-        assert route.primary.provider == "mistral"
-        assert route.primary.model == "mistral-small-latest"
-        assert route.secondary is not None
-        assert route.secondary.provider == "gemini"
-        assert route.secondary.model is None
+        assert route.primary.provider == expected_primary[feature], feature
+        # Every feature must fail over to a DIFFERENT provider, or an
+        # outage takes the stage down instead of degrading it.
+        assert route.secondary is not None, feature
+        assert route.secondary.provider != route.primary.provider, feature
 
 
 def test_route_for_unknown_feature_raises_validation_error() -> None:
@@ -95,7 +108,7 @@ def test_save_and_load_routing_config_round_trips() -> None:
 
         # untouched features still default
         translation_route = reloaded.route_for(TRANSLATION)
-        assert translation_route == default_feature_route()
+        assert translation_route == default_route_for(TRANSLATION)
 
 
 def test_partial_admin_edit_does_not_blow_away_other_features() -> None:
@@ -119,7 +132,7 @@ def test_partial_admin_edit_does_not_blow_away_other_features() -> None:
         for feature in FEATURES:
             if feature == SCORING:
                 continue
-            assert config.route_for(feature) == default_feature_route()
+            assert config.route_for(feature) == default_route_for(feature)
 
 
 def test_corrupt_json_in_settings_degrades_to_full_default() -> None:
