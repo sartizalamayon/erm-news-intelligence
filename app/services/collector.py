@@ -61,7 +61,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from psycopg.types.json import Jsonb
@@ -70,7 +70,7 @@ from app.db import queries
 from app.db.connection import DictConnection
 from app.errors import SourceError
 from app.logging import get_logger
-from app.sources._util import normalize_url, today_dhaka
+from app.sources._util import DHAKA, FUTURE_TOLERANCE, normalize_url, today_dhaka
 from app.sources.base import FeedItem, NewsSource
 from app.sources.registry import all_sources, load_all
 
@@ -226,6 +226,74 @@ def fetch_all(
     return results
 
 
+def editorial_day(published: datetime | None, *, collected_on: date) -> date:
+    """The date an article belongs to — its PUBLICATION date in Dhaka
+    local time, falling back to the collection date only when the source
+    gave us no date at all.
+
+    `articles.day` used to be the COLLECTION day: whatever date the run
+    happened to execute on. That is an operational fact, not an
+    editorial one, and it was wrong for most of the corpus. Because the
+    fetch window is a rolling 30 hours (app/sources/_util.py's WINDOW),
+    every run legitimately picks up the previous evening's news — and
+    filed all of it under today. Measured across 60,058 real articles
+    before this change:
+
+        day == published date      25,845
+        day is 1 day LATE          30,653
+        day is 2+ days LATE         2,932
+        -> 34,130 articles (56.8%) filed after the day they happened
+
+    So "14 August" in the review queue meant "what the 14 August run
+    collected", which was mostly 13 August news. Dating by publication
+    makes the word mean what a reader assumes it means.
+
+    Dhaka local time, not UTC: the desk works in Dhaka, and a story
+    published at 02:00 Dhaka is that day's news to them even though UTC
+    still calls it yesterday.
+
+    The fallback matters less than it looks. Only 61 of 60,058 articles
+    (0.10%) have no publication date, and every one of them came from a
+    single incident on 2026-07-18 — a real news article essentially
+    always carries a date. When one genuinely does not, the collection
+    date is the only honest guess available, and it is better than
+    discarding the article.
+
+    NOTE the accepted trade-off: an article published at 23:00 and
+    collected by a 01:00 run now lands on the PREVIOUS day, which may
+    already have been reviewed. That is the owner's explicit decision —
+    correct dates over guaranteed visibility.
+    """
+    if published is None:
+        return collected_on
+    published_day = published.astimezone(DHAKA).date()
+    # Second line of defence against an IMPLAUSIBLE date — not against
+    # any future date at all.
+    #
+    # Tomorrow's date is normal and correct here: a newspaper publishes
+    # its next-day edition the previous evening, and 1,222 real rows do
+    # exactly that (BD Pratidin, Daily Star, Daily Inqilab and others,
+    # always +1 day). Clamping those to the collection day would undo
+    # the whole point of this function and quietly re-file a day of real
+    # news under the wrong date.
+    #
+    # `FUTURE_TOLERANCE` (2 days) is what separates an edition date from
+    # a parse failure — e.g. the two Somoy Journal event-announcement
+    # pages that carried the date of the EVENT (41 and 86 days out)
+    # rather than of publication.
+    if published_day - collected_on > FUTURE_TOLERANCE:
+        logger.warning(
+            "article_published_implausibly_far_ahead_using_collection_day",
+            extra={
+                "published": published.isoformat(),
+                "collected_on": collected_on.isoformat(),
+                "days_ahead": (published_day - collected_on).days,
+            },
+        )
+        return collected_on
+    return published_day
+
+
 def write_items(conn: DictConnection, source_result: SourceResult, items: list[FeedItem], *, day: date) -> SourceResult:
     """Dedup-on-insert write path (legacy-behavior.md §2.6 minus P2's
     match step). Two-step dedup, per app/db/queries.py's own docstring:
@@ -264,7 +332,7 @@ def write_items(conn: DictConnection, source_result: SourceResult, items: list[F
             source=source_result.display_name,
             title=item.title,
             published=item.published_at,
-            day=day,
+            day=editorial_day(item.published_at, collected_on=day),
         )
         if new_id is None:
             duplicate += 1

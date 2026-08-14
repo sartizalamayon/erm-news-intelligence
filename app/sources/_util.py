@@ -28,6 +28,36 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 DHAKA = timezone(timedelta(hours=6))
 WINDOW = timedelta(hours=30)  # rolling "today" window, same as legacy
 
+# How far into the future a "publication" date may be before we stop
+# believing it.
+#
+# `is_recent` used to test only `(now - dt) <= WINDOW`. For a future
+# date that difference is NEGATIVE, which is always <= WINDOW, so an
+# article dated months ahead sailed through as "recent" — verified: a
+# date 60 days in the future returned True. Two real rows reached the
+# database this way, both Somoy Journal event pages where the parser
+# picked up the date of the EVENT being announced rather than the date
+# the story was published, landing them under 2026-09-15 and
+# 2026-10-30 while actually collected on 2026-08-05.
+#
+# The tolerance is DAYS, not hours, because a newspaper legitimately
+# publishes tomorrow's edition tonight. Verified in real data:
+#
+#   BD Pratidin    published 2026-08-01 06:00  fetched 2026-07-31 20:35
+#   Daily Star     published 2026-08-01 12:00  fetched 2026-07-31 20:37
+#   Daily Inqilab  published 2026-08-01 00:03  fetched 2026-07-31 20:36
+#
+# 1,222 rows follow that pattern, spread across many outlets and always
+# exactly one day ahead. Those are EDITION dates, not broken parses, and
+# the edition date is the date a reader means. Rejecting them would
+# throw away a day of real news every night.
+#
+# What this is actually guarding against is the other 2 rows: Somoy
+# Journal event-announcement pages where the parser picked up the date
+# of the event being announced (41 and 86 days out) instead of the
+# publication date.
+FUTURE_TOLERANCE = timedelta(days=2)
+
 _ENTITY_MAP = {
     "&amp;": "&",
     "&lt;": "<",
@@ -140,7 +170,15 @@ def is_recent(dt: datetime | None, *, now: datetime | None = None) -> bool | Non
     reference = now if now is not None else datetime.now(DHAKA)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return (reference - dt.astimezone(DHAKA)) <= WINDOW
+    age = reference - dt.astimezone(DHAKA)
+    if age < -FUTURE_TOLERANCE:
+        # Dated meaningfully in the FUTURE. Not "recent" — not real.
+        # Returning False (confidently reject) rather than None
+        # (undated, keep) is the point: `None` would keep the row and
+        # file it under a future date, which is what let two
+        # event-announcement pages land months ahead of today.
+        return False
+    return age <= WINDOW
 
 
 # Fix for docs/red-team-findings.md RT-3: only "utm_" is a genuine
