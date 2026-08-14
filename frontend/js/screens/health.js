@@ -19,6 +19,7 @@
 
 import { api } from "../api.js";
 import { setState } from "../state.js";
+import { resultToast } from "../components/toast.js";
 import { escapeHtml, fmtErr, notWiredBanner, skeletonRows } from "../util.js";
 
 const STATUS_META = {
@@ -249,14 +250,7 @@ export function mountHealth(root) {
           // `main.main-area`, not the document — so the result is
           // pinned to the viewport instead and cannot be missed
           // wherever the operator happens to be scrolled to.
-          s.testResult
-            ? `<div class="banner ${s.testOk ? "banner-ok" : "banner-error"}" role="status" aria-live="polite"
-                    style="position:fixed;left:50%;transform:translateX(-50%);bottom:24px;z-index:60;max-width:min(760px,92vw);box-shadow:0 8px 28px rgba(0,0,0,.28);">
-                 <span>${s.testOk ? "&#10003;" : "&#10005;"}</span>
-                 <div style="flex:1;">${escapeHtml(s.testResult)}</div>
-                 <button id="clearTestBtn" class="btn-ghost" style="font-size:14px;">&#10005;</button>
-               </div>`
-            : ""
+          resultToast({ message: s.testResult, ok: s.testOk, dismissId: "clearTestBtn" })
         }
 
         <div class="table-wrap" style="margin-bottom:16px;">

@@ -228,9 +228,15 @@ test("accumulators built from remote text are escaped where they render", () => 
   for (const file of FILES) {
     const builds = /\b(s\.)?testResult\s*=\s*`/.test(file.src);
     if (!builds) continue;
-    if (!/escapeHtml\(\s*s?\.?testResult/s.test(file.src.replace(/\n/g, " "))) {
-      offenders.push(file.rel);
-    }
+    const flat = file.src.replace(/\n/g, " ");
+    // Satisfied EITHER by escaping in place, OR by handing the string to
+    // the shared toast, which escapes it (components/toast.js, covered
+    // by toast.test.mjs). The second route is how it works now: both
+    // screens used to hand-roll the banner and one of the copies had
+    // drifted, so the escaping was moved into the component.
+    const escapesLocally = /escapeHtml\(\s*s?\.?testResult/.test(flat);
+    const escapesViaToast = /resultToast\(/.test(flat);
+    if (!escapesLocally && !escapesViaToast) offenders.push(file.rel);
   }
   assert.deepEqual(offenders, [], `builds a result string from remote text but never escapes it: ${offenders.join(", ")}`);
 });

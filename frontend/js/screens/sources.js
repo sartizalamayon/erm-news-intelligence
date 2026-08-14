@@ -16,6 +16,7 @@
 // just a hidden nav link.
 
 import { api } from "../api.js";
+import { resultToast } from "../components/toast.js";
 import { escapeHtml, fmtErr, notWiredBanner, skeletonRows } from "../util.js";
 
 const LANGS = ["en", "bn", "mixed"];
@@ -59,7 +60,15 @@ export function mountSources(root) {
     render();
     try {
       const res = await api.post(`/sources/${src.id}/test`);
-      s.testResult = `${src.name} — ${res.fetched} fetched, ${res.today} from today (via ${res.method})${res.detail ? " · " + res.detail : ""}`;
+      // `res.detail` is ALREADY the human sentence ("102 fetched, 25
+      // from today (via rss_multi)"), so rebuilding it and then
+      // appending detail printed the same clause twice. Identical bug
+      // to the one fixed in health.js — the two screens were written by
+      // copy-paste, which is why the rendering has since been pulled
+      // into components/toast.js.
+      s.testResult = `${src.name} — ${
+        res.detail || `${res.fetched} fetched, ${res.today} from today (via ${res.method})`
+      }`;
       s.testOk = !!res.ok;
     } catch (err) {
       s.testResult = `${src.name} — ${fmtErr(err)}`;
@@ -102,11 +111,7 @@ export function mountSources(root) {
         </div>
 
         ${
-          s.testResult
-            ? `<div class="banner ${s.testOk ? "banner-ok" : "banner-error"}"><span>${s.testOk ? "&#10003;" : "&#10005;"}</span><div style="flex:1;">${escapeHtml(
-                s.testResult
-              )}</div><button id="clearTestBtn" class="btn-ghost" style="font-size:14px;">&#10005;</button></div>`
-            : ""
+          resultToast({ message: s.testResult, ok: s.testOk, dismissId: "clearTestBtn" })
         }
 
         ${s.addingOpen ? sourceForm(null) : ""}

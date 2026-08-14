@@ -21,7 +21,12 @@ export function setUnauthorizedHandler(fn) {
   onUnauthorized = fn;
 }
 
-function classify(status) {
+// Exported so the status -> kind mapping can be asserted directly
+// rather than grepped for. `kind` drives real UI branches (dashboard
+// renders a "not wired yet" banner for not_found instead of a red
+// error; main.js sends unauthorized back to login), so a silent remap
+// changes behaviour in several screens at once.
+export function classify(status) {
   if (status === 401) return "unauthorized";
   if (status === 403) return "forbidden";
   if (status === 404) return "not_found";
