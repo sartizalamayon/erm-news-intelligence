@@ -73,9 +73,26 @@ _BN_MONTHS = {
     "নভেম্বর": 11,
     "ডিসেম্বর": 12,
 }
-_BENGALI_DATE_RE = re.compile(
-    r"([০-৯]{1,2})\s+(" + "|".join(_BN_MONTHS) + r")\s+([০-৯]{4})"
-)
+_BN_MONTH_ALT = "|".join(_BN_MONTHS)
+
+# TWO orderings, because the sites using this parser do not agree.
+#
+#   DAY-FIRST    "১৪ আগস্ট ২০২৬"          (the only form legacy handled)
+#   MONTH-FIRST  "শুক্রবার, আগস্ট ১৪, ২০২৬"  (what somoyjournal.com serves)
+#
+# Only the day-first form existed here, so Somoy Journal's date never
+# matched, `_parse_bengali_date` returned None, and EVERY article it
+# discovered was dropped as undated — a permanent silent zero, reported
+# in the run panel as an unremarkable "0 fetched". Discovery was working
+# the whole time: the homepage yields 45 valid ids, and article pages
+# return HTTP 200 in ~1.1s.
+#
+# Separators are `[\s,]+` rather than `\s+` so the comma in the
+# month-first form does not have to be special-cased, and the optional
+# leading weekday ("শুক্রবার,") is simply not matched — the regex starts
+# at the month.
+_BENGALI_DATE_RE_DAY_FIRST = re.compile(r"([০-৯]{1,2})[\s,]+(" + _BN_MONTH_ALT + r")[\s,]+([০-৯]{4})")
+_BENGALI_DATE_RE_MONTH_FIRST = re.compile(r"(" + _BN_MONTH_ALT + r")[\s,]+([০-৯]{1,2})[\s,]+([০-৯]{4})")
 
 
 @dataclass
@@ -112,16 +129,32 @@ def _parse_jsonld_date(html: str, tz_override: str | None) -> datetime | None:
 
 
 def _parse_bengali_date(html: str) -> datetime | None:
-    m = _BENGALI_DATE_RE.search(html)
-    if not m:
-        return None
-    try:
-        day = int(m.group(1).translate(_BN_DIGIT_TABLE))
-        month = _BN_MONTHS[m.group(2)]
-        year = int(m.group(3).translate(_BN_DIGIT_TABLE))
-        return datetime(year, month, day, 12, 0, tzinfo=DHAKA)
-    except (ValueError, KeyError):
-        return None
+    """Bengali-script date out of raw HTML, in either ordering.
+
+    Day-first is tried first because it is the historical form and is
+    unambiguous; month-first is the fallback. See the two regexes above
+    for why both are needed.
+    """
+    for pattern, day_first in ((_BENGALI_DATE_RE_DAY_FIRST, True), (_BENGALI_DATE_RE_MONTH_FIRST, False)):
+        m = pattern.search(html)
+        if not m:
+            continue
+        try:
+            if day_first:
+                day, month_name, year_s = m.group(1), m.group(2), m.group(3)
+            else:
+                month_name, day, year_s = m.group(1), m.group(2), m.group(3)
+            return datetime(
+                int(year_s.translate(_BN_DIGIT_TABLE)),
+                _BN_MONTHS[month_name],
+                int(day.translate(_BN_DIGIT_TABLE)),
+                12,
+                0,
+                tzinfo=DHAKA,
+            )
+        except (ValueError, KeyError):
+            continue
+    return None
 
 
 def _is_article(html: str, not_article_check: str, site_url: str) -> bool:

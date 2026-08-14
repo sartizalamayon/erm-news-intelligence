@@ -54,7 +54,30 @@ DEFAULT_HEADERS = {
     "Connection": "keep-alive",
 }
 
-DEFAULT_TIMEOUT = 10.0
+# SPLIT connect/read timeout, not one flat number.
+#
+# A single 10.0s budget conflates two very different failures and got
+# both wrong. Measured live 2026-08-14 against the two sources the run
+# panel was reporting as dead:
+#
+#     somoyjournal.com        HTTP 200 after 12.51s   <- alive, just slow
+#     tob.news wp-json/...    HTTP 200 after  2.62s   <- fast alone,
+#                                                        timed out under
+#                                                        28-way concurrency
+#
+# Neither was unreachable. Both were being killed by an impatient read
+# budget and then reported to the operator as "failed after retries (no
+# response)" / "unreachable", which is actively misleading — it sends
+# you looking at the wrong thing (the site) instead of the right one
+# (our timeout).
+#
+# `requests` accepts `(connect, read)`. Separating them means a
+# genuinely dead host still fails FAST (nothing listening -> connect
+# fails in 5s, so a dead source cannot stall a 45-source run), while a
+# host that is merely slow to generate a page gets the room it needs.
+CONNECT_TIMEOUT = 5.0
+READ_TIMEOUT = 30.0
+DEFAULT_TIMEOUT: tuple[float, float] = (CONNECT_TIMEOUT, READ_TIMEOUT)
 DEFAULT_MAX_RETRIES = 3
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
@@ -66,6 +89,14 @@ RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 # across the whole run is bounded here, in exactly one place.
 GLOBAL_MAX_IN_FLIGHT = 28
 GLOBAL_SEMAPHORE = threading.Semaphore(GLOBAL_MAX_IN_FLIGHT)
+
+# Why the last transport exception is stashed rather than returned:
+# `get()` returns `Response | None` and dozens of call sites depend on
+# that shape, but `get_or_raise()` needs the CAUSE to write a message an
+# operator can act on. Thread-local because sources run concurrently in
+# a ThreadPoolExecutor — a module-level attribute would let one source's
+# failure describe another's.
+_last_error = threading.local()
 
 
 def make_session(pool_size: int = 8) -> requests.Session:
@@ -143,7 +174,7 @@ def get(
     *,
     source: str,
     method: str = "GET",
-    timeout: float = DEFAULT_TIMEOUT,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
     max_retries: int = DEFAULT_MAX_RETRIES,
     headers: dict[str, str] | None = None,
     data: Any = None,
@@ -164,6 +195,7 @@ def get(
     (e.g. a fallback probe).
     """
     last_exc: Exception | None = None
+    _last_error.exc = None
     for attempt in range(max_retries + 1):
         try:
             with GLOBAL_SEMAPHORE:
@@ -181,9 +213,16 @@ def get(
             if attempt < max_retries:
                 time.sleep(_backoff_seconds(attempt))
                 continue
+            _last_error.exc = exc
             logger.warning(
                 "http_get_exhausted",
-                extra={"source": source, "url": url, "attempts": attempt + 1, "error": type(exc).__name__},
+                extra={
+                    "source": source,
+                    "url": url,
+                    "attempts": attempt + 1,
+                    "error": type(exc).__name__,
+                    "diagnosis": _describe_failure(exc),
+                },
             )
             return None
         if response.status_code in RETRYABLE_STATUS and attempt < max_retries:
@@ -192,8 +231,34 @@ def get(
         _repair_encoding(response)
         return response
     if last_exc is not None:
+        _last_error.exc = last_exc
         logger.warning("http_get_failed", extra={"source": source, "url": url, "error": type(last_exc).__name__})
     return None
+
+
+def _describe_failure(exc: Exception | None) -> str:
+    """Turn the last transport exception into something an operator can
+    ACT on.
+
+    The old message for every network failure was "failed after retries
+    (no response)", which reads as "the site is down" and sent us
+    investigating two perfectly healthy sources. A read timeout, a
+    refused connection, and a DNS failure need three different responses
+    from a human, so they get three different messages.
+    """
+    if exc is None:
+        return "no response"
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return f"could not establish a connection within {CONNECT_TIMEOUT:.0f}s (host not accepting connections)"
+    if isinstance(exc, requests.exceptions.ReadTimeout):
+        return f"connected, but sent no response within {READ_TIMEOUT:.0f}s (host is alive but too slow)"
+    if isinstance(exc, requests.exceptions.SSLError):
+        return f"TLS handshake failed ({type(exc).__name__})"
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return "connection refused or DNS lookup failed"
+    if isinstance(exc, requests.exceptions.TooManyRedirects):
+        return "redirect loop"
+    return f"{type(exc).__name__}"
 
 
 def get_or_raise(
@@ -214,5 +279,8 @@ def get_or_raise(
     """
     response = get(session, url, source=source, **kwargs)
     if response is None:
-        raise SourceFetchError(f"GET {url} failed after retries (no response)", source=source)
+        raise SourceFetchError(
+            f"GET {url} failed after retries — {_describe_failure(getattr(_last_error, 'exc', None))}",
+            source=source,
+        )
     return response
