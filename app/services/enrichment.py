@@ -527,16 +527,28 @@ def run_llm_enrichment(
                 conn.execute("UPDATE articles SET title_en=%s WHERE id=%s", (a.get("title_en", ""), a["id"]))
             conn.commit()
 
+        # Reported in THREE phases, not just start and end. Previously
+        # this published `0/N` and then nothing until it finished, so on
+        # a 1,752-article day an operator watched "Group duplicates
+        # 0/1752" sit motionless for minutes with no way to tell
+        # progress from a hang — the same blind spot that once hid a
+        # genuinely stuck stage. Each phase names what it is doing.
         if progress:
-            progress(0, total, "Grouping duplicates")
+            progress(0, total, "Clustering headlines")
         allocate_group_id = _sequence_group_id_allocator(conn)
         articles = stage_dedup_embeddings(articles, embedding_backend, allocate_id=allocate_group_id)
+
+        if progress:
+            progress(0, total, "Verifying groups")
         articles = stage_llm_verify_groups(articles, dedup_verify_client, allocate_id=allocate_group_id)
-        for a in articles:
+
+        for i, a in enumerate(articles, start=1):
             conn.execute(
                 "UPDATE articles SET dup_group=%s, is_primary=%s, also_in=%s WHERE id=%s",
                 (a.get("dup_group"), bool(a.get("is_primary", True)), a.get("also_in", ""), a["id"]),
             )
+            if progress and (i % 100 == 0 or i == total):
+                progress(i, total, "Saving duplicate groups")
         conn.commit()
         if progress:
             progress(total, total, "Grouping duplicates")

@@ -37,7 +37,13 @@ def test_malformed_json_returns_uniform_422_envelope(client):
         headers={"Content-Type": "application/json"},
     )
     assert response.status_code == 422
-    assert response.json() == {"error": "validation_error", "detail": "The request body failed validation."}
+    body = response.json()
+    assert body["error"] == "validation_error"
+    # A malformed body has no field to name, so it is labelled "body"
+    # rather than pydantic's raw byte offset (which rendered as a field
+    # literally called "1").
+    assert body["fields"] == [{"field": "body", "problem": body["fields"][0]["problem"]}]
+    assert body["detail"].startswith("body: ")
 
 
 def test_malformed_json_does_not_echo_the_submitted_body(client):
@@ -59,7 +65,33 @@ def test_wrong_field_type_returns_uniform_422_envelope(client):
         json={"email": "a@grameenphone.com", "code": 123456, "new_password": "Zx9!Qwerty42Lmn"},
     )
     assert response.status_code == 422
-    assert response.json() == {"error": "validation_error", "detail": "The request body failed validation."}
+    body = response.json()
+    assert body["error"] == "validation_error"
+    # The whole point of the change: name the offending field and say
+    # what is wrong with it. A bare "The request body failed validation."
+    # left an operator adding a source with no way to discover that
+    # `methods` is a list, not a string.
+    assert body["fields"] == [{"field": "code", "problem": "Input should be a valid string"}]
+    assert body["detail"] == "code: Input should be a valid string"
+
+
+def test_validation_error_names_the_field_but_never_echoes_its_value(client):
+    """The security property the detailed 422 must not break.
+
+    pydantic's `errors()` carries the submitted value under `input`.
+    Field NAMES and pydantic's own message are safe to return; the
+    submitted value is not — a bad OTP code or email would otherwise be
+    reflected straight back to the caller (and into any log or proxy
+    that records response bodies).
+    """
+    secret = "s3cret-value-must-not-be-reflected-4b1e7"
+    response = client.post(
+        "/auth/password/set",
+        json={"email": "a@grameenphone.com", "code": [secret], "new_password": "Zx9!Qwerty42Lmn"},
+    )
+    assert response.status_code == 422
+    assert secret not in response.text
+    assert response.json()["fields"][0]["field"] == "code"
 
 
 def _fake_db_connection():

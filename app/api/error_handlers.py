@@ -48,20 +48,52 @@ from app.logging import get_logger
 logger = get_logger(__name__)
 
 
+def _field_label(loc: object, error_type: object) -> str:
+    """A human-usable field name from pydantic's `loc` tuple.
+
+    The first element is the request part ("body"/"query"/"path"), which
+    the caller already knows, so it is dropped — except when nothing
+    useful remains. A malformed-JSON error carries a byte OFFSET there
+    (`("body", 1)`), and reporting a field called "1" is worse than
+    saying "body", so whole-body failures are labelled as such.
+    """
+    parts = tuple(loc) if isinstance(loc, (list, tuple)) else ()
+    if str(error_type or "").startswith("json_"):
+        return "body"
+    rest = [str(p) for p in parts[1:]]
+    if not rest or all(p.isdigit() for p in rest):
+        return str(parts[0]) if parts else "body"
+    return ".".join(rest)
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(RequestValidationError)
     async def _request_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
-        # exc.errors() includes the raw submitted value per failing
-        # field (pydantic's `input` key) -- a malformed OTP-code or
-        # email submission could put something worth not casually
-        # logging in there, so only (field location, error type) is
-        # logged, never the submitted value, and neither ever reaches
-        # the response body.
+        # `exc.errors()` carries the raw submitted value per failing
+        # field (pydantic's `input` key). A malformed OTP code or email
+        # lands there, so `input` is NEVER logged and NEVER returned.
+        #
+        # What IS returned: which field failed and why. The response
+        # used to be a bare "The request body failed validation." with
+        # no field and no reason, which is unusable in an admin console
+        # — an operator adding a source by hand got a flat 422 and no
+        # way to tell that `methods` is a LIST, not a string. Field
+        # names and pydantic's own error text are not user secrets; the
+        # submitted value is, and it stays out.
         fields = [{"loc": e.get("loc"), "type": e.get("type")} for e in exc.errors()]
         logger.warning("request_validation_error", extra={"path": request.url.path, "fields": fields})
+        reported = [
+            {"field": _field_label(e.get("loc"), e.get("type")), "problem": str(e.get("msg", ""))[:160]}
+            for e in exc.errors()[:20]  # cap: a pathological body must not produce an unbounded response
+        ]
+        summary = "; ".join(f"{f['field']}: {f['problem']}" for f in reported if f["field"])
         return JSONResponse(
             status_code=422,
-            content={"error": "validation_error", "detail": "The request body failed validation."},
+            content={
+                "error": "validation_error",
+                "detail": summary or "The request body failed validation.",
+                "fields": reported,
+            },
         )
 
     @app.exception_handler(ValidationError)

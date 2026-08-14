@@ -587,6 +587,16 @@ class RunStageOut(BaseModel):
     desc: str
     status: str  # "pending" | "running" | "done" | "error"
     detail: str = ""
+    # Live progress WHILE the stage runs. Without these a stage showed
+    # only "running…", which made a slow stage and a hung stage look
+    # identical — the state a genuinely stuck judge stage hid in.
+    # `done`/`total` are article counts; `step` is what the stage is
+    # doing right now (e.g. "Scoring relevance").
+    done: int = 0
+    total: int = 0
+    step: str = ""
+    started_at: str | None = None
+    finished_at: str | None = None
 
 
 class RunEnrichPhaseOut(BaseModel):

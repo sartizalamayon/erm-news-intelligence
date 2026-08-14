@@ -146,6 +146,52 @@ export function mountRun(root) {
     return row;
   }
 
+  // A running stage says WHAT it is doing and HOW FAR along it is.
+  // "running…" alone made a slow stage and a hung stage look identical,
+  // which is precisely how a genuinely stuck stage went unnoticed for
+  // several minutes. Percentage is included because "1030/1752" is hard
+  // to read at a glance while it moves.
+  function stageDetailText(s) {
+    if (s.status === "pending") return "waiting…";
+    if (s.status === "error") return s.detail || "failed";
+    if (s.status === "running") {
+      const step = s.step || "running";
+      if (s.total > 0) {
+        const pct = Math.min(100, Math.round((s.done / s.total) * 100));
+        return `${step} · ${s.done.toLocaleString()} / ${s.total.toLocaleString()} (${pct}%)`;
+      }
+      return `${step}…`;
+    }
+    return `${s.status}${s.detail ? " · " + s.detail : ""}`;
+  }
+
+  // Thin determinate progress bar under a running stage. Created on
+  // demand and removed when the stage stops running, so a finished row
+  // collapses back to a single line.
+  function setStageBar(key, s) {
+    const row = rowsEl.querySelector(`[data-row-key="${key}"]`);
+    if (!row) return;
+    const running = s.status === "running" && s.total > 0;
+    let bar = row.querySelector('[data-el="bar"]');
+    if (!running) {
+      if (bar) bar.remove();
+      return;
+    }
+    if (!bar) {
+      bar = document.createElement("div");
+      bar.dataset.el = "bar";
+      bar.style.cssText =
+        "height:3px;border-radius:2px;background:var(--line);margin:0 0 6px 27px;overflow:hidden;";
+      const fill = document.createElement("div");
+      fill.dataset.el = "fill";
+      fill.style.cssText = "height:100%;width:0%;background:var(--ac2);transition:width .4s ease;";
+      bar.appendChild(fill);
+      row.appendChild(bar);
+    }
+    const fill = bar.querySelector('[data-el="fill"]');
+    fill.style.width = `${Math.min(100, Math.round((s.done / s.total) * 100))}%`;
+  }
+
   function setRow(key, status, detail) {
     const row = rowsEl.querySelector(`[data-row-key="${key}"]`);
     if (!row) return;
@@ -270,15 +316,8 @@ export function mountRun(root) {
     }
     if (poll.enrich) {
       (poll.enrich.stages || []).forEach((s) => {
-        setRow(
-          `stage:${s.key}`,
-          s.status,
-          s.status === "pending"
-            ? "waiting…"
-            : s.status === "running"
-            ? "running…"
-            : `${s.status}${s.detail ? " · " + s.detail : ""}`
-        );
+        setRow(`stage:${s.key}`, s.status, stageDetailText(s));
+        setStageBar(`stage:${s.key}`, s);
       });
     }
     tickElapsed();

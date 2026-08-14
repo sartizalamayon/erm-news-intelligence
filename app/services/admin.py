@@ -43,6 +43,7 @@ from psycopg.types.json import Jsonb
 from app.db.connection import DictConnection
 from app.db.settings import get_setting, set_setting
 from app.errors import SourceError, ValidationError
+from app.logging import get_logger
 from app.services.data_transfer import ExportManifest, ImportReport, export_to_jsonl, import_from_jsonl
 from app.services.llm import quota as llm_quota
 from app.services.llm import routing as llm_routing
@@ -75,6 +76,9 @@ _CROSS = "✕"
 # Storing multiple methods as a comma-joined string in that one column
 # is the pragmatic choice available without a schema change — this task
 # may not touch migrations/**.
+
+
+logger = get_logger(__name__)
 
 
 def _methods_to_str(methods: list[str]) -> str:
@@ -1416,7 +1420,9 @@ BODIES_STAGE_MAX = 2000
 BODIES_STAGE_WORKERS = 12
 
 
-def _run_bodies_stage(conn: DictConnection, *, limit: int = BODIES_STAGE_MAX) -> dict[str, int]:
+def _run_bodies_stage(
+    conn: DictConnection, *, limit: int = BODIES_STAGE_MAX, progress: Any | None = None
+) -> dict[str, int]:
     """Fetch full article text for today's matched articles.
 
     Two bugs fixed here, both observed on a live run (2026-08-14, 173
@@ -1495,8 +1501,24 @@ def _run_bodies_stage(conn: DictConnection, *, limit: int = BODIES_STAGE_MAX) ->
 
     results: list[tuple[dict[str, Any], str | None, bool]] = []
     if rows:
+        done = 0
+        done_lock = _threading.Lock()
+
+        def _fetch_and_report(row: dict[str, Any]) -> tuple[dict[str, Any], str | None, bool]:
+            nonlocal done
+            out = _fetch_one(row)
+            if progress is not None:
+                with done_lock:
+                    done += 1
+                    seen = done
+                try:
+                    progress(seen, len(rows), "Fetching article text")
+                except Exception:  # noqa: BLE001 - reporting must never fail the stage
+                    pass
+            return out
+
         with ThreadPoolExecutor(max_workers=min(BODIES_STAGE_WORKERS, len(rows))) as pool:
-            results = list(pool.map(_fetch_one, rows))
+            results = list(pool.map(_fetch_and_report, rows))
 
     fetched = failed = skipped = 0
     for row, body_text, no_plugin in results:
@@ -1524,12 +1546,24 @@ def _run_bodies_stage(conn: DictConnection, *, limit: int = BODIES_STAGE_MAX) ->
     }
 
 
-def run_pipeline_stage(conn: DictConnection, stage_key: str) -> dict[str, str]:
+def run_pipeline_stage(
+    conn: DictConnection,
+    stage_key: str,
+    *,
+    progress: Any | None = None,
+) -> dict[str, str]:
+    """Run ONE enrichment stage.
+
+    `progress(done, total, step)` is forwarded to the enrichment stage
+    so callers can render live x/n counts instead of an opaque
+    "running…". Optional: every existing caller that omits it behaves
+    exactly as before.
+    """
     if stage_key not in _PIPELINE_STAGE_KEYS:
         raise ValidationError(f"unknown pipeline stage {stage_key!r} — must be one of {sorted(_PIPELINE_STAGE_KEYS)}")
     try:
         if stage_key == "bodies":
-            result = _run_bodies_stage(conn)
+            result = _run_bodies_stage(conn, progress=progress)
             detail = (
                 f"attempted {result['attempted']}, fetched {result['fetched']}, "
                 f"failed {result['failed']}, skipped (no plugin) {result['skipped_no_plugin']}"
@@ -1547,7 +1581,7 @@ def run_pipeline_stage(conn: DictConnection, stage_key: str) -> dict[str, str]:
             # patches the exact object this resolves to.
             from app.services import enrichment
 
-            enrichment_result = enrichment.run_llm_enrichment(conn, stages={stage_key})
+            enrichment_result = enrichment.run_llm_enrichment(conn, stages={stage_key}, progress=progress)
             detail = f"processed {enrichment_result.enriched} article(s)"
             if enrichment_result.skipped_stages:
                 detail += f"; skipped (no provider configured): {', '.join(enrichment_result.skipped_stages)}"
@@ -1942,11 +1976,34 @@ def _new_match_phase_state() -> dict[str, Any]:
     return {"status": "pending", "detail": "", "matched": 0, "filtered_out": 0, "total": 0, "error": None}
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _new_enrich_phase_state() -> dict[str, Any]:
+    """Per-stage state, including LIVE progress fields.
+
+    `done`/`total`/`step` are what turn an opaque "running…" into
+    "Scoring relevance · 430/1376". They are updated from the stage's
+    own progress callback while it runs, so an operator can tell a slow
+    stage apart from a stuck one — previously indistinguishable, which
+    is exactly how a genuinely hung judge stage went unnoticed.
+    """
     return {
         "status": "pending",
         "stages": [
-            {"key": key, "name": name, "desc": desc, "status": "pending", "detail": ""}
+            {
+                "key": key,
+                "name": name,
+                "desc": desc,
+                "status": "pending",
+                "detail": "",
+                "done": 0,
+                "total": 0,
+                "step": "",
+                "started_at": None,
+                "finished_at": None,
+            }
             for key, name, desc in PIPELINE_STAGES
         ],
     }
@@ -2005,24 +2062,116 @@ def _run_match_subphase(conn: DictConnection) -> None:
             _run_state["match"].update(status="error", error=str(exc), detail=str(exc))
 
 
+# The enrichment DAG, as WAVES of stages that may run concurrently.
+#
+# The five stages were run strictly one after another, which was safe
+# but slower than it needs to be — several of them have no relationship
+# to each other at all. The real dependencies are on COLUMNS:
+#
+#   translate  reads title            -> writes title_en
+#   bodies     reads url              -> writes article_bodies (no LLM)
+#   dedup      reads title_en         -> writes dup_group/is_primary/also_in
+#   judge      reads title_en         -> writes llm_score/llm_reason
+#   topic      reads llm_score >= 5   -> writes topic_tag/topic_parent_id
+#
+# So `bodies` shares nothing with `translate` (different source column,
+# different destination table, and it is pure HTTP with no LLM budget to
+# contend for). `dedup` and `judge` both read title_en but write
+# DISJOINT columns, so they cannot race each other either. `topic` must
+# follow `judge` because it filters on the scores judge writes.
+#
+# Stages inside a wave run concurrently; waves run in order. Anything
+# not listed here still runs, appended as its own final wave, so adding
+# a stage to PIPELINE_STAGES can never silently drop it.
+ENRICH_WAVES: tuple[tuple[str, ...], ...] = (
+    ("translate", "bodies"),
+    ("dedup", "judge"),
+    ("topic",),
+)
+
+
+def _stage_entry(stage_key: str) -> dict[str, Any] | None:
+    """Caller must hold `_run_lock`."""
+    enrich = _run_state.get("enrich")
+    if not enrich:
+        return None
+    return next((s for s in enrich.get("stages", []) if s["key"] == stage_key), None)
+
+
+def _run_one_enrich_stage(stage_key: str) -> bool:
+    """Run one stage on its OWN connection. Returns True on success.
+
+    Its own connection, not the caller's: stages in a wave run on
+    separate threads and a psycopg connection is not thread-safe.
+    Sharing one would corrupt the protocol under concurrency — the
+    failure mode is silent and awful, so each thread gets its own.
+
+    Never raises. A stage that fails is recorded and the rest of the run
+    continues, matching the per-source isolation the collector already
+    uses one level down.
+    """
+    from app.db.connection import get_connection
+
+    def _report(done: int, total: int, step: str) -> None:
+        with _run_lock:
+            entry = _stage_entry(stage_key)
+            if entry is not None:
+                entry["done"] = int(done)
+                entry["total"] = int(total)
+                entry["step"] = str(step)
+
+    with _run_lock:
+        entry = _stage_entry(stage_key)
+        if entry is not None:
+            entry.update(status="running", done=0, total=0, step="", started_at=_now_iso())
+    try:
+        with get_connection() as stage_conn:
+            result = run_pipeline_stage(stage_conn, stage_key, progress=_report)
+        with _run_lock:
+            entry = _stage_entry(stage_key)
+            if entry is not None:
+                entry.update(status=result["status"], detail=result["detail"], finished_at=_now_iso())
+        return True
+    except Exception as exc:  # noqa: BLE001 - per-stage isolation
+        logger.warning("enrich_stage_failed", extra={"stage": stage_key, "error": str(exc)[:300]})
+        with _run_lock:
+            entry = _stage_entry(stage_key)
+            if entry is not None:
+                entry.update(status="error", detail=str(exc)[:300], finished_at=_now_iso())
+        return False
+
+
 def _run_enrich_subphase(conn: DictConnection) -> None:
+    """Run the enrichment DAG. `conn` is intentionally unused — each
+    stage opens its own (see `_run_one_enrich_stage`) — but is kept in
+    the signature so the phase functions stay uniform.
+    """
+    del conn  # each stage owns its connection; see _run_one_enrich_stage
+    from concurrent.futures import ThreadPoolExecutor
+
     with _run_lock:
         _run_state["phase"] = "enrich"
+
+    configured = [key for key, _, _ in PIPELINE_STAGES]
+    planned = [tuple(s for s in wave if s in configured) for wave in ENRICH_WAVES]
+    # Anything in PIPELINE_STAGES that no wave claims still has to run.
+    claimed = {s for wave in planned for s in wave}
+    leftovers = tuple(s for s in configured if s not in claimed)
+    if leftovers:
+        logger.info("enrich_unclaimed_stages_appended", extra={"stages": list(leftovers)})
+        planned.append(leftovers)
+
     any_error = False
-    for stage_key, _, _ in PIPELINE_STAGES:
-        with _run_lock:
-            entry = next(s for s in _run_state["enrich"]["stages"] if s["key"] == stage_key)
-            entry["status"] = "running"
-        try:
-            result = run_pipeline_stage(conn, stage_key)
-            with _run_lock:
-                entry["status"] = result["status"]
-                entry["detail"] = result["detail"]
-        except Exception as exc:  # noqa: BLE001 - per-stage isolation, same as run_pipeline_all
-            any_error = True
-            with _run_lock:
-                entry["status"] = "error"
-                entry["detail"] = str(exc)
+    for wave in planned:
+        if not wave:
+            continue
+        if len(wave) == 1:
+            any_error |= not _run_one_enrich_stage(wave[0])
+            continue
+        with ThreadPoolExecutor(max_workers=len(wave)) as pool:
+            for ok in pool.map(_run_one_enrich_stage, wave):
+                any_error |= not ok
+
     with _run_lock:
         _run_state["enrich"]["status"] = "error" if any_error else "done"
 
