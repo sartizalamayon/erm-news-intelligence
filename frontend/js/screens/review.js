@@ -46,6 +46,7 @@
 // server sends the score, not the label.
 
 import { api, ApiError } from "../api.js";
+import { setState, state } from "../state.js";
 import { escapeHtml, tier, debounce, fmtErr, formatNumber, skeletonRows, notWiredBanner } from "../util.js";
 
 const PAGE_SIZE = 200;
@@ -189,12 +190,42 @@ export function mountReview(root, { navigate }) {
     });
   }
 
+  /**
+   * Keep the sidebar's pending badge honest as decisions are made.
+   *
+   * `state.pendingCount` was only ever written by the Dashboard's load
+   * and the shell's own fetch, so it went stale the moment anyone
+   * reviewed anything: you could work through fifty articles and the
+   * badge next to "Review queue" would still show the count from when
+   * you arrived. On the one screen whose entire purpose is draining
+   * that queue, a number that never moves is worse than no number.
+   *
+   * `delta` is negative when an article LEAVES pending and positive
+   * when one returns to it, so re-opening a decision counts back up.
+   */
+  function adjustPendingBadge(delta) {
+    if (!delta) return;
+    const current = state.pendingCount;
+    if (typeof current !== "number") return; // not loaded yet, leave it alone
+    setState({ pendingCount: Math.max(0, current + delta) });
+  }
+
+  /** How the badge should move for a status change. */
+  function pendingDelta(from, to) {
+    if (from === to) return 0;
+    if (from === "pending") return -1;
+    if (to === "pending") return 1;
+    return 0; // approved <-> rejected, both already out of the queue
+  }
+
   function decide(id, status) {
     const list = s.items;
     const i = list.findIndex((a) => a.id === id);
     const item = list[i];
     if (!item) return;
+    const wasStatus = item.status;
     item.status = status; // optimistic
+    adjustPendingBadge(pendingDelta(wasStatus, status));
     const stillVisible = s.viewMode === "all" || s.viewMode === status;
     if (!stillVisible) {
       list.splice(i, 1);
@@ -206,6 +237,9 @@ export function mountReview(root, { navigate }) {
     render();
     if (s.selId) ensureDetail(s.selId);
     api.patch(`/articles/${id}`, { status }).catch((err) => {
+      // The optimistic badge move has to come back too, or a failed
+      // decision leaves the sidebar claiming work that was never done.
+      adjustPendingBadge(-pendingDelta(wasStatus, status));
       s.error = err;
       fetchList();
     });
@@ -230,9 +264,15 @@ export function mountReview(root, { navigate }) {
         });
       } else {
         const newStatus = action === "approve" ? "approved" : "rejected";
+        let leavingPending = 0;
         s.items.forEach((a) => {
-          if (idSet.has(a.id)) a.status = newStatus;
+          if (!idSet.has(a.id)) return;
+          leavingPending += pendingDelta(a.status, newStatus);
+          a.status = newStatus;
         });
+        // Counted from the items actually changed, not from ids.length:
+        // a selection can include articles that were already decided.
+        adjustPendingBadge(leavingPending);
         const stillVisible = (a) => s.viewMode === "all" || s.viewMode === a.status;
         s.items = s.items.filter((a) => !idSet.has(a.id) || stillVisible(a));
         if (s.selId && idSet.has(s.selId) && !s.items.some((a) => a.id === s.selId)) {
