@@ -259,3 +259,56 @@ def test_trends_relmix_trend_and_top_sources_are_real_rollup_reads(dash_client) 
     top_sources = {s["label"]: s["count"] for s in data["topSources"]}
     assert top_sources["Prothom Alo"] == 24  # 2/month x 12 months
     assert top_sources["Daily Star"] == 12
+
+
+def test_macro_card_says_no_data_instead_of_showing_a_zero(dash_client, monkeypatch) -> None:
+    """A failed live fetch with nothing stored must not print the
+    gap-fill 0.0 as a reading.
+
+    `vals` fills missing months with 0.0 so the sparkline has twelve
+    points. `macro_indicator_values` is empty in this deployment, so
+    when the live fetch also failed the card rendered "Inflation 0.0%"
+    under the caption "showing the last known figure" — a last known
+    figure that does not exist. An inflation rate of 0.0 is plausible
+    enough that nobody looks twice, which makes it worse than a blank.
+    """
+    client, conn = dash_client
+    conn.commit()
+
+    import app.api.routers.dashboard as dash_module
+
+    monkeypatch.setattr(dash_module.macro_service, "fetch_usd_bdt", lambda: None)
+    monkeypatch.setattr(dash_module.macro_service, "fetch_inflation", lambda: None)
+    monkeypatch.setattr(dash_module.macro_service, "fetch_brent", lambda _key: None)
+
+    data = client.get("/dashboard/trends").json()
+    inflation = next(c for c in data["trendCards"] if c["label"] == "Inflation")
+
+    assert inflation["status"] == "no_data"
+    assert "last known figure" not in (inflation["note"] or "")
+    assert "no earlier figure is stored" in inflation["note"]
+
+
+def test_macro_card_shows_the_stored_figure_when_one_exists(dash_client, monkeypatch) -> None:
+    """The other half of the same branch: when a stored figure IS
+    present, falling back to it is correct and the card should say so
+    rather than claiming no data.
+    """
+    client, conn = dash_client
+    this_month = _month_start(_today_dhaka())
+    conn.execute(
+        "INSERT INTO macro_indicator_values (indicator, month, value) VALUES (%s, %s, %s)",
+        ("inflation", this_month, 9.7),
+    )
+    conn.commit()
+
+    import app.api.routers.dashboard as dash_module
+
+    monkeypatch.setattr(dash_module.macro_service, "fetch_inflation", lambda: None)
+
+    data = client.get("/dashboard/trends").json()
+    inflation = next(c for c in data["trendCards"] if c["label"] == "Inflation")
+
+    assert inflation["status"] == "rollup"
+    assert inflation["vals"][-1] == pytest.approx(9.7)
+    assert "last stored figure" in inflation["note"]

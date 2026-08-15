@@ -57,12 +57,30 @@ export function mountManual(root) {
   }
 
   function phase1() {
+    // These used to carry per-method source COUNTS and proportional
+    // bars: "Sitemap 18 sources" at 100% width, "RSS feed 9" at 50%,
+    // and so on. Every number was invented. The real configuration has
+    // 9 sitemap sources, 4 rss, 8 gnews and 3 api, spread across
+    // sixteen distinct method names rather than five.
+    //
+    // A page whose entire job is orientation cannot state checkable
+    // facts that do not check out: an analyst who reads "18 sitemap
+    // sources" here and finds 9 on the Sources page stops trusting the
+    // rest of the explanation too.
+    //
+    // Live numbers are not an option: this screen is visible to
+    // analysts and every source endpoint is admin only. So the counts
+    // are gone rather than faked. What an analyst actually needs from
+    // this card is WHY a source might return less than everything, and
+    // that is what each note says. The five categories are a
+    // deliberate simplification of sixteen internal method names, which
+    // is the right altitude here.
     const methods = [
-      { l: "Sitemap", n: 18, w: "100%", note: "The paper publishes a machine-readable list of today's articles." },
-      { l: "RSS feed", n: 9, w: "50%", note: "A standard news feed. Usually only the most recent items." },
-      { l: "Google News", n: 11, w: "61%", note: "Used where a site blocks us directly. A dated subset, not everything." },
-      { l: "JSON API", n: 5, w: "28%", note: "The site's own data endpoint. Most complete when available." },
-      { l: "ID scan", n: 3, w: "17%", note: "Walks article numbers one by one. Slow but misses nothing." },
+      { l: "Sitemap", note: "The paper publishes a machine-readable list of today's articles." },
+      { l: "RSS feed", note: "A standard news feed. Usually only the most recent items." },
+      { l: "Google News", note: "Used where a site blocks us directly. A dated subset, not everything." },
+      { l: "JSON API", note: "The site's own data endpoint. Most complete when available." },
+      { l: "ID scan", note: "Walks article numbers one by one. Slow but misses nothing." },
     ];
     const risks = [
       { icon: "&#10005;", color: "var(--red)", title: "The site blocks us", note: "Shows as an error on the Sources page. Usually fixed by switching that source to Google News." },
@@ -74,18 +92,18 @@ export function mountManual(root) {
       <p style="color:var(--tx2);font-size:13.5px;line-height:1.7;margin:0 0 22px;max-width:70ch;">Every morning the collector visits every configured news source and asks each one: what did you publish today? It takes whatever it gets, politics, sport, entertainment, everything. No judgement happens here. The only thing thrown away at this stage is an article with no usable publication date, or one already stored from a previous run.</p>
       <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-bottom:22px;">
         <div style="border:1px solid var(--line);border-radius:12px;background:var(--panel2);padding:18px 20px;">
-          <div class="mono" style="font-size:9px;letter-spacing:1.3px;text-transform:uppercase;color:var(--tx3);margin-bottom:14px;">How each source is read (example)</div>
+          <div class="mono" style="font-size:9px;letter-spacing:1.3px;text-transform:uppercase;color:var(--tx3);margin-bottom:14px;">How each source is read</div>
           <div class="stack" style="gap:12px;">
             ${methods
               .map(
-                (m) => `<div>
-              <div class="row-between" style="margin-bottom:5px;"><span style="font-size:12.5px;color:var(--tx2);">${m.l}</span><span class="mono" style="font-size:11px;color:var(--tx3);">${m.n} sources</span></div>
-              <div class="bar-track bar-track-sm"><div class="bar-fill" style="width:${m.w};background:var(--ac);"></div></div>
-              <div style="font-size:11px;color:var(--tx3);margin-top:5px;line-height:1.45;">${m.note}</div>
+                (m) => `<div style="border-left:2px solid var(--line2);padding-left:11px;">
+              <div style="font-size:12.5px;color:var(--tx2);font-weight:600;">${escapeHtml(m.l)}</div>
+              <div style="font-size:11px;color:var(--tx3);margin-top:3px;line-height:1.45;">${escapeHtml(m.note)}</div>
             </div>`
               )
               .join("")}
           </div>
+          <div style="font-size:11px;color:var(--tx4);margin-top:13px;line-height:1.45;">Which method each outlet uses, and how it performed on the last run, is on the Sources page.</div>
         </div>
         <div style="border:1px solid var(--line);border-radius:12px;background:var(--panel2);padding:18px 20px;">
           <div class="mono" style="font-size:9px;letter-spacing:1.3px;text-transform:uppercase;color:var(--tx3);margin-bottom:14px;">What can go wrong</div>
@@ -137,16 +155,28 @@ export function mountManual(root) {
           <span>stops here, never reaches the queue</span>
         </div>
       </div>
+      <!-- These five numbers are illustrative, and the label says so on
+           the card rather than only in the phase heading above. They sit
+           directly under a worked example, in the same visual language
+           the Dashboard uses for live KPIs, so without a caption they
+           read as today's real counts. Live per-section figures are on
+           the Dashboard and the Review queue. -->
+      <div class="mono" style="font-size:9px;letter-spacing:1.3px;text-transform:uppercase;color:var(--tx3);margin-bottom:10px;">
+        Roughly how a day splits (illustrative, not today's counts)
+      </div>
       <div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;">
         ${cards
           .map(
             (c) => `<div style="border:1px solid var(--line);border-radius:11px;background:var(--panel2);padding:15px 16px;">
-          <div style="font-size:20px;font-weight:700;letter-spacing:-.8px;color:var(--ac2);">${c.n}</div>
-          <div style="font-size:11.5px;color:var(--tx2);margin-top:6px;line-height:1.4;">${c.l}</div>
+          <div style="font-size:20px;font-weight:700;letter-spacing:-.8px;color:var(--tx3);">${c.n}</div>
+          <div style="font-size:11.5px;color:var(--tx2);margin-top:6px;line-height:1.4;">${escapeHtml(c.l)}</div>
         </div>`
           )
           .join("")}
       </div>
+      <p style="font-size:11.5px;color:var(--tx4);margin:12px 0 0;line-height:1.5;">
+        Today's real split is on the Dashboard, and the Review queue can be filtered by section.
+      </p>
     </div>`;
   }
 

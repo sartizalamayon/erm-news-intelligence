@@ -162,6 +162,27 @@ def _pct_of(part: int, whole: int) -> str:
     return f"{pct:.0f}%" if pct >= 10 else f"{pct:.1f}%"
 
 
+def _stale_or_missing(has_stored_current: bool, source_label: str) -> tuple[str, str]:
+    """Status and note for a macro card whose live fetch just failed.
+
+    The two cases are NOT the same and used to share one message,
+    "Live fetch unavailable right now, showing the last known figure":
+
+      * There IS a stored figure for this month, and it is being shown.
+        That sentence is true.
+      * There is NO stored figure. `macro_indicator_values` is empty in
+        this deployment, so the gap-fill 0.0 was shown instead and the
+        card asserted "Inflation 0.0%" as a last known figure that does
+        not exist. A plausible-looking number is worse than a blank,
+        because nothing about it invites a second look.
+
+    "no_data" tells the frontend to render n/a rather than the fill.
+    """
+    if has_stored_current:
+        return "rollup", f"Couldn't reach {source_label} just now, showing the last stored figure."
+    return "no_data", f"Couldn't reach {source_label}, and no earlier figure is stored."
+
+
 @router.get("/today", response_model=DashboardTodayOut)
 def dashboard_today(user: AuthenticatedUser = Depends(get_current_user)) -> DashboardTodayOut:
     today = _today_dhaka()
@@ -419,6 +440,18 @@ def dashboard_trends(
             ).fetchall()
             by_month = {r["month"]: float(r["value"]) for r in rows}
             vals = [by_month.get(m, 0.0) for m in month_list]
+            # Whether the CURRENT month has a genuine stored figure, as
+            # opposed to the 0.0 the line above fills gaps with.
+            #
+            # `macro_indicator_values` is empty in this deployment, so
+            # every month of every indicator is 0.0. When a live fetch
+            # also fails, the card rendered "Inflation 0.0%" under the
+            # caption "showing the last known figure" — but there is no
+            # last known figure, and 0.0 is a plausible-looking
+            # inflation rate rather than an obvious blank. A fill value
+            # presented as a measurement is the same defect as a full
+            # progress bar labelled 0%.
+            has_stored_current = month_list[-1] in by_month
 
             # MACRO-DASHBOARD: layer a real live figure onto the CURRENT
             # month's value only — historical months keep reading
@@ -440,7 +473,7 @@ def dashboard_trends(
                     status, as_of = "live", live.fetched_at.isoformat()
                     note = "Live from open.er-api.com (USD → BDT)."
                 else:
-                    note = "Live fetch unavailable right now, showing the last known figure."
+                    status, note = _stale_or_missing(has_stored_current, "open.er-api.com")
             elif indicator == "inflation":
                 live = macro_service.fetch_inflation()
                 if live is not None:
@@ -448,7 +481,7 @@ def dashboard_trends(
                     status, as_of = "live", live.fetched_at.isoformat()
                     note = "Live from World Bank CPI (annual data, ~1yr publication lag)."
                 else:
-                    note = "Live fetch unavailable right now, showing the last known figure."
+                    status, note = _stale_or_missing(has_stored_current, "the World Bank CPI API")
             elif indicator == "brent_crude":
                 if not settings.oilpriceapi_key:
                     status = "unconfigured"
@@ -460,7 +493,7 @@ def dashboard_trends(
                         status, as_of = "live", live.fetched_at.isoformat()
                         note = "Live from oilpriceapi.com."
                     else:
-                        note = "Live fetch unavailable right now, showing the last known figure."
+                        status, note = _stale_or_missing(has_stored_current, "oilpriceapi.com")
 
             trend_cards.append(
                 TrendCardOut(

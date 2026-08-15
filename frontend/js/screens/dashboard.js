@@ -86,6 +86,10 @@ function kpiSparklineHtml(vals) {
 const MACRO_STATUS_META = {
   live: { label: "Live", color: "var(--green)" },
   unconfigured: { label: "Not configured", color: "var(--amber)" },
+  // The live source failed AND nothing is stored for this month. The
+  // card must not print the gap-fill 0.0 as if it were a reading: an
+  // "Inflation 0.0%" is plausible enough that nobody looks twice.
+  no_data: { label: "No data", color: "var(--amber)" },
 };
 function macroStatusHtml(t) {
   const meta = MACRO_STATUS_META[t.status];
@@ -418,16 +422,22 @@ export function mountDashboard(root, { navigate }) {
       const bad = !!t.bad;
       const badDirection = bad ? rising : !rising;
       const decimals = t.decimals !== undefined ? t.decimals : 1;
+      // With no reading there is also no change to report: a delta
+      // computed from two fill values is "0.0%", which reads as a
+      // measured flat month rather than an absence.
+      const known = t.status !== "no_data";
       return {
         label: t.label,
-        unit: t.unit,
-        value: last.toFixed(decimals),
-        rawValue: last,
-        delta: (rising ? "▲ " : "▼ ") + Math.abs(pc).toFixed(1) + "%",
+        unit: known ? t.unit : "",
+        value: known ? last.toFixed(decimals) : "n/a",
+        rawValue: known ? last : null,
+        delta: known ? (rising ? "▲ " : "▼ ") + Math.abs(pc).toFixed(1) + "%" : "",
         color: badDirection ? "var(--red)" : "var(--green)",
         fillColor: badDirection ? "var(--redsoft)" : "var(--greensoft)",
-        points: poly(vals, 240, 56, false),
-        area: poly(vals, 240, 56, true),
+        // No sparkline either: a flat line across twelve zeroes draws
+        // a confident picture of data that was never collected.
+        points: known ? poly(vals, 240, 56, false) : "",
+        area: known ? poly(vals, 240, 56, true) : "",
         status: t.status || "rollup",
         asOf: t.asOf || "",
         note: t.note || "",

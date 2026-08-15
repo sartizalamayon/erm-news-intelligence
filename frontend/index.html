@@ -7,11 +7,22 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,500;0,600;1,400&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="./css/theme.css">
-<link rel="stylesheet" href="./css/app.css">
+<!-- ROOT-RELATIVE (leading slash), not "./".
+     These were "./css/...", which the browser resolves against the
+     CURRENT path. Every one-segment route (/review, /sources) resolves
+     against "/" and worked, so this went unnoticed. The Dashboard's
+     long-term tab is the only route with TWO segments: at /dash/long
+     the browser asked for /dash/css/app.css and /dash/js/main.js, got
+     404s, and rendered a blank page.
+
+     It breaks the same way in production, where render.yaml rewrites
+     every path to index.html, so any future nested route would inherit
+     the bug. A leading slash pins them to the site root. -->
+<link rel="stylesheet" href="/css/theme.css">
+<link rel="stylesheet" href="/css/app.css">
 </head>
 <body>
 <div id="app"></div>
-<script type="module" src="./js/main.js"></script>
+<script type="module" src="/js/main.js"></script>
 </body>
 </html>
