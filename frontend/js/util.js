@@ -107,6 +107,104 @@ export function formatNumber(n) {
 }
 
 /**
+ * Split a search box's contents into the words the server matches on.
+ * The API requires every word to appear, so this is also the list of
+ * things worth pointing at in a result.
+ */
+export function searchTerms(query) {
+  return [
+    ...new Set(
+      String(query || "")
+        .toLowerCase()
+        .split(/\s+/)
+        .map((w) => w.trim())
+        .filter(Boolean)
+    ),
+  ];
+}
+
+/**
+ * Escaped HTML with every occurrence of `terms` wrapped in <mark>.
+ *
+ * Searching 60,000 articles and getting back a list of headlines with
+ * no indication of WHICH word matched, or where, makes the result list
+ * something you have to re-read rather than scan. This is the whole
+ * point of the archive screen.
+ *
+ * SECURITY: matches are found in the RAW text and the output is built
+ * by escaping each segment separately. The obvious implementation,
+ * escaping first and then running a replace over the result, is subtly
+ * wrong: escaping produces entities like `&amp;`, so a search for "amp"
+ * would inject a <mark> into the middle of an entity and corrupt the
+ * markup. Working on raw offsets cannot collide with entities, and
+ * every character that reaches the output has been through escapeHtml.
+ *
+ * @param {string} text
+ * @param {string[]} terms lowercase words
+ * @returns {string} HTML
+ */
+export function highlightTerms(text, terms) {
+  const src = String(text ?? "");
+  if (!src) return "";
+  const words = (terms || []).map((t) => String(t).toLowerCase()).filter(Boolean);
+  if (!words.length) return escapeHtml(src);
+
+  const lower = src.toLowerCase();
+  const ranges = [];
+  for (const w of words) {
+    let from = 0;
+    for (;;) {
+      const at = lower.indexOf(w, from);
+      if (at < 0) break;
+      ranges.push([at, at + w.length]);
+      from = at + w.length; // w is non-empty, so this always advances
+    }
+  }
+  if (!ranges.length) return escapeHtml(src);
+
+  ranges.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  // Overlapping hits ("oil" and "oils") must merge, or the second <mark>
+  // opens inside the first and the tags interleave.
+  const merged = [];
+  for (const r of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+    else merged.push([r[0], r[1]]);
+  }
+
+  let out = "";
+  let cursor = 0;
+  for (const [a, b] of merged) {
+    out += escapeHtml(src.slice(cursor, a)) + "<mark>" + escapeHtml(src.slice(a, b)) + "</mark>";
+    cursor = b;
+  }
+  return out + escapeHtml(src.slice(cursor));
+}
+
+/**
+ * The part of a body worth showing: a window around the first match,
+ * with ellipses where text was dropped.
+ *
+ * The old screen offered the whole body or nothing, so confirming a
+ * body-only match meant expanding a wall of text and reading for the
+ * word yourself.
+ */
+export function snippetAround(text, terms, radius = 170) {
+  const src = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (!src) return "";
+  const lower = src.toLowerCase();
+  let at = -1;
+  for (const w of terms || []) {
+    const i = lower.indexOf(String(w).toLowerCase());
+    if (i >= 0 && (at < 0 || i < at)) at = i;
+  }
+  if (at < 0) return src.slice(0, radius * 2) + (src.length > radius * 2 ? "…" : "");
+  const start = Math.max(0, at - radius);
+  const end = Math.min(src.length, at + radius);
+  return (start > 0 ? "…" : "") + src.slice(start, end) + (end < src.length ? "…" : "");
+}
+
+/**
  * A timestamp a person can read, from an ISO string.
  *
  * The run-history table printed the API's raw value, so every row read

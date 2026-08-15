@@ -19,6 +19,7 @@ uses stdlib `html.parser` instead.
 
 from __future__ import annotations
 
+import html
 import re
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -58,15 +59,26 @@ WINDOW = timedelta(hours=30)  # rolling "today" window, same as legacy
 # publication date.
 FUTURE_TOLERANCE = timedelta(days=2)
 
-_ENTITY_MAP = {
-    "&amp;": "&",
-    "&lt;": "<",
-    "&gt;": ">",
-    "&#039;": "'",
-    "&apos;": "'",
-    "&quot;": '"',
-    "&nbsp;": " ",
-}
+# Entity decoding used to be this hand-written map of seven:
+#
+#   &amp; &lt; &gt; &#039; &apos; &quot; &nbsp;
+#
+# Everything else survived into the database as literal text, so 220
+# stored headlines read `Israeli PM Netanyahu labels UK &#8216;Islamic
+# Republic of Britain&#8217;` and `র&zwj;্যাগিং`. The frontend escapes
+# titles (correctly, they are remote input), which means the entity is
+# displayed rather than rendered, so the reader sees the raw code.
+#
+# The map also decoded in dict order, so `&amp;lt;` became `&lt;` on the
+# first replacement and then `<` on the second. A double decode turns
+# deliberately-escaped text back into markup, which is the wrong
+# direction for anything downstream that trusts this output.
+#
+# `html.unescape` covers the full HTML5 named and numeric set and makes
+# exactly ONE pass, so it fixes both. Kept as a named indirection
+# because clean_title's contract is "no entities out", not "call this
+# specific stdlib function".
+_unescape_entities = html.unescape
 
 
 class _TextStripper(HTMLParser):
@@ -88,9 +100,15 @@ class _TextStripper(HTMLParser):
 
 def clean_title(raw: str | None) -> str:
     """Strip HTML/CDATA wrapping, unescape entities, collapse whitespace.
-    Mirrors `collector_logic.clean_title()` exactly (legacy-behavior.md
-    §2.6 step 1) — some feeds wrap titles in markup (e.g. Daily Star),
-    which would otherwise render as raw `<a>` links downstream.
+    Mirrors `collector_logic.clean_title()` (legacy-behavior.md §2.6
+    step 1) — some feeds wrap titles in markup (e.g. Daily Star), which
+    would otherwise render as raw `<a>` links downstream.
+
+    Titles that arrive as markup are decoded by the stripper below
+    (HTMLParser resolves charrefs as it parses). Titles that arrive as
+    PLAIN text with entities in them reach `_unescape_entities`, and
+    that is the path the old seven-entity map got wrong — see its
+    comment above.
     """
     if not raw:
         return ""
@@ -102,8 +120,7 @@ def clean_title(raw: str | None) -> str:
             text = stripper.text()
         except Exception:
             text = re.sub(r"<[^>]+>", " ", text)
-    for entity, replacement in _ENTITY_MAP.items():
-        text = text.replace(entity, replacement)
+    text = _unescape_entities(text)
     return re.sub(r"\s+", " ", text).strip()
 
 

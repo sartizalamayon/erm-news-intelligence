@@ -64,6 +64,12 @@ button { font-family: inherit; }
    active filter is indistinguishable from the others and the table
    silently hides rows with nothing on screen explaining why. */
 .btn-sm-on { background: var(--acsoft); border-color: var(--acline); color: var(--actx); }
+/* A date range whose start is after its end can never match. Marking the
+   control says which input to fix; a bare "no results" does not. */
+.range-invalid { border-color: var(--amber) !important; }
+/* Search-term highlighting. Must stay legible in both themes, so it
+   tints the text rather than painting a light block behind it. */
+mark { background: color-mix(in oklab, var(--ac2) 26%, transparent); color: var(--tx); border-radius: 3px; padding: 0 1px; }
 .icon-btn {
   width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 9px;
   background: var(--panel); color: var(--tx2); cursor: pointer; font-size: 13px;

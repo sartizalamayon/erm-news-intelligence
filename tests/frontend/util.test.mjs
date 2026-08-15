@@ -10,7 +10,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { escapeHtml, fmtTimestamp, formatNumber, pctOfMax, pctOfTotal, poly, tier } from "../../frontend/js/util.js";
+import {
+  escapeHtml,
+  fmtTimestamp,
+  formatNumber,
+  highlightTerms,
+  pctOfMax,
+  pctOfTotal,
+  poly,
+  searchTerms,
+  snippetAround,
+  tier,
+} from "../../frontend/js/util.js";
 
 // ── escapeHtml ───────────────────────────────────────────────────────────
 
@@ -134,4 +145,80 @@ test("fmtTimestamp never renders Invalid Date where a time belongs", () => {
   for (const junk of ["not-a-date", "0000", "{}"]) {
     assert.ok(!/Invalid Date/.test(fmtTimestamp(junk)), junk);
   }
+});
+
+// ── search highlighting ──────────────────────────────────────────────────
+//
+// This is the one helper in the codebase that deliberately emits markup
+// containing content derived from remote text, so it carries the whole
+// weight of not being an XSS hole.
+
+test("searchTerms splits, lowercases and dedupes", () => {
+  assert.deepEqual(searchTerms("Hormuz OIL  oil "), ["hormuz", "oil"]);
+  assert.deepEqual(searchTerms(""), []);
+  assert.deepEqual(searchTerms(null), []);
+});
+
+test("highlightTerms marks the matches", () => {
+  assert.equal(highlightTerms("Hormuz oil spill", ["oil"]), "Hormuz <mark>oil</mark> spill");
+  assert.equal(highlightTerms("OIL prices", ["oil"]), "<mark>OIL</mark> prices", "match is case-insensitive, output keeps the original case");
+});
+
+test("highlightTerms escapes everything it emits", () => {
+  const out = highlightTerms('<img src=x onerror=alert(1)> "quoted" & more', ["img"]);
+  assert.ok(!out.includes("<img"), out);
+  assert.ok(!out.includes("onerror=alert(1)>"), out);
+  assert.match(out, /&lt;<mark>img<\/mark>/);
+  // The only tags in the output are the <mark> pairs we added.
+  const tags = out.match(/<[^>]*>/g) || [];
+  assert.deepEqual([...new Set(tags)].sort(), ["</mark>", "<mark>"]);
+});
+
+test("highlightTerms does not corrupt HTML entities", () => {
+  // The naive implementation escapes FIRST and then replaces, so
+  // searching "amp" would inject a <mark> inside the "&amp;" produced
+  // by escaping an ampersand. Matching on raw offsets cannot.
+  assert.equal(highlightTerms("Tom & Jerry", ["amp"]), "Tom &amp; Jerry");
+  assert.equal(highlightTerms("a < b", ["lt"]), "a &lt; b");
+  assert.equal(highlightTerms("say \"hi\"", ["quot"]), "say &quot;hi&quot;");
+});
+
+test("highlightTerms merges overlapping matches instead of nesting tags", () => {
+  // "oil" and "oils" both hit at index 0. Emitting both opens a second
+  // <mark> before the first closes.
+  const out = highlightTerms("oils rise", ["oil", "oils"]);
+  assert.equal(out, "<mark>oils</mark> rise");
+  assert.equal((out.match(/<mark>/g) || []).length, (out.match(/<\/mark>/g) || []).length);
+});
+
+test("highlightTerms handles nothing-to-do inputs without throwing", () => {
+  assert.equal(highlightTerms("", ["a"]), "");
+  assert.equal(highlightTerms(null, ["a"]), "");
+  assert.equal(highlightTerms("plain", []), "plain");
+  assert.equal(highlightTerms("plain", null), "plain");
+  assert.equal(highlightTerms("plain", ["zzz"]), "plain");
+  // An empty term would make indexOf return the cursor forever.
+  assert.equal(highlightTerms("plain", ["", "  "]).includes("mark"), false);
+});
+
+test("highlightTerms still escapes when there is no match", () => {
+  assert.equal(highlightTerms("<b>hi</b>", ["zzz"]), "&lt;b&gt;hi&lt;/b&gt;");
+  assert.equal(highlightTerms("<b>hi</b>", []), "&lt;b&gt;hi&lt;/b&gt;");
+});
+
+test("snippetAround centres on the first match", () => {
+  const body = "x".repeat(400) + " oil " + "y".repeat(400);
+  const out = snippetAround(body, ["oil"], 30);
+  assert.ok(out.includes("oil"), out);
+  assert.ok(out.length < 120, `snippet should be short, got ${out.length}`);
+  assert.ok(out.startsWith("…") && out.endsWith("…"), out);
+});
+
+test("snippetAround degrades sanely", () => {
+  assert.equal(snippetAround("", ["oil"]), "");
+  assert.equal(snippetAround(null, ["oil"]), "");
+  // No match: show the opening rather than nothing.
+  assert.ok(snippetAround("nothing relevant here", ["zzz"]).startsWith("nothing"));
+  // Collapses the whitespace that makes scraped bodies unreadable.
+  assert.equal(snippetAround("a\n\n   b", ["a"]), "a b");
 });

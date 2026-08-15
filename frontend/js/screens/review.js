@@ -601,7 +601,7 @@ export function mountReview(root, { navigate }) {
       </div>
       <h2 class="detail-title">${escapeHtml(cur.title)}</h2>
       ${detailReady && cur.titleEn ? `<div class="detail-title-en">${escapeHtml(cur.titleEn)}</div>` : ""}
-      ${detailReady ? `<a href="${escapeHtml(cur.url || "#")}" target="_blank" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;margin-bottom:20px;">Open at source &#8599;</a>` : ""}
+      ${detailReady ? `<a href="${escapeHtml(cur.url || "#")}" target="_blank" rel="noopener noreferrer" style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;margin-bottom:20px;">Open at source &#8599;</a>` : ""}
       <div class="detail-actions">
         <button id="approveCurBtn" class="btn btn-primary" style="flex:1;justify-content:center;padding:13px 20px;font-size:14px;">&#10003; Approve</button>
         <button id="rejectCurBtn" class="btn btn-outline" style="flex:1;justify-content:center;padding:13px 20px;font-size:14px;">&#10005; Reject</button>
@@ -630,7 +630,7 @@ export function mountReview(root, { navigate }) {
                 .map(
                   (d) => `<div class="peer-row">
               <span style="flex:0 0 114px;font-size:12px;font-weight:600;color:var(--actx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(d.source)}</span>
-              <a href="${escapeHtml(d.url || "#")}" target="_blank" style="flex:1;min-width:0;font-size:12.5px;color:var(--tx2);">${escapeHtml(d.title)}</a>
+              <a href="${escapeHtml(d.url || "#")}" target="_blank" rel="noopener noreferrer" style="flex:1;min-width:0;font-size:12.5px;color:var(--tx2);">${escapeHtml(d.title)}</a>
               <div class="row" style="gap:6px;flex:0 0 auto;">
                 <button class="btn-sm" data-dup-keep="${d.id}">keep</button>
                 <button class="btn-sm" data-dup-drop="${d.id}">drop</button>
@@ -660,7 +660,7 @@ export function mountReview(root, { navigate }) {
                   return `<div class="peer-row">
                 <span style="flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:${pt.color}"></span>
                 <span style="flex:0 0 102px;font-size:12px;font-weight:600;color:var(--actx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(p.source)}</span>
-                <a href="${escapeHtml(p.url || "#")}" target="_blank" style="flex:1;min-width:0;font-size:12.5px;color:var(--tx2);">${escapeHtml(p.title)}</a>
+                <a href="${escapeHtml(p.url || "#")}" target="_blank" rel="noopener noreferrer" style="flex:1;min-width:0;font-size:12.5px;color:var(--tx2);">${escapeHtml(p.title)}</a>
                 <div class="row" style="gap:6px;flex:0 0 auto;">
                   <button class="btn-sm" data-peer-approve="${p.id}">approve</button>
                   <button class="btn-sm" data-peer-reject="${p.id}">reject</button>

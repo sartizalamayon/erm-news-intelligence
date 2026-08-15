@@ -36,6 +36,35 @@ class TestCleanTitle:
     def test_plain_text_passthrough(self):
         assert clean_title("Plain headline, no markup") == "Plain headline, no markup"
 
+    def test_unescapes_entities_beyond_the_common_seven(self):
+        """Entity decoding used to be a hand-written map of seven, so
+        everything else was stored verbatim and DISPLAYED as its code:
+        220 stored headlines read `labels UK &#8216;Islamic Republic of
+        Britain&#8217;` because the frontend escapes titles (correctly,
+        they are remote input) rather than rendering them.
+        """
+        assert (
+            clean_title("Israeli PM Netanyahu labels UK &#8216;Islamic Republic of Britain&#8217;")
+            == "Israeli PM Netanyahu labels UK ‘Islamic Republic of Britain’"
+        )
+        assert clean_title("Gates&rsquo; startup &lsquo;Phia&rsquo;") == "Gates’ startup ‘Phia’"
+        # Zero-width joiner: Bengali conjuncts need it and it is invisible,
+        # so a raw `&zwj;` in the middle of a word is especially jarring.
+        assert clean_title("র&zwj;্যাগিং") == "র‍্যাগিং"
+        assert clean_title("a &#8230; b") == "a … b"
+
+    def test_decodes_exactly_one_level(self):
+        """The old map iterated a dict, decoding `&amp;` first, so
+        `&amp;lt;` became `&lt;` and then `<`. A double decode turns
+        deliberately-escaped text back into markup, which is the wrong
+        direction for anything downstream that trusts this output.
+        """
+        assert clean_title("&amp;lt;script&amp;gt;") == "&lt;script&gt;"
+        assert clean_title("&amp;amp;") == "&amp;"
+
+    def test_leaves_a_non_entity_ampersand_alone(self):
+        assert clean_title("AT&T and R&D") == "AT&T and R&D"
+
 
 class TestParseDt:
     def test_epoch_seconds(self):

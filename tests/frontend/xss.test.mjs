@@ -240,3 +240,40 @@ test("accumulators built from remote text are escaped where they render", () => 
   }
   assert.deepEqual(offenders, [], `builds a result string from remote text but never escapes it: ${offenders.join(", ")}`);
 });
+
+test("highlighting only ever comes from the audited helper", () => {
+  // `highlightTerms` is the one function in this codebase that
+  // deliberately emits markup wrapping remote text (util.js; its
+  // escaping is pinned by util.test.mjs). The interpolation scanner
+  // above skips any expression containing parentheses, which is a
+  // documented limit of its scope, so a hand-rolled highlighter built
+  // by string-replacing into already-escaped text would sail straight
+  // past it and corrupt entities or worse.
+  //
+  // Rule: a screen may RENDER <mark>, but only by calling the helper.
+  const offenders = [];
+  for (const file of FILES) {
+    if (!file.src.includes("<mark>")) continue;
+    if (file.rel.endsWith("util.js")) continue; // the helper itself
+    if (!file.src.includes("highlightTerms(")) {
+      offenders.push(`${file.rel} emits <mark> without calling highlightTerms()`);
+    }
+  }
+  assert.deepEqual(offenders, [], offenders.join("\n  "));
+});
+
+test("links to scraped article URLs carry rel=noopener noreferrer", () => {
+  // `url` comes from a scraped page, so it is remote input opened in a
+  // new tab. Browsers now imply noopener for target=_blank, but that is
+  // a behaviour to rely on explicitly rather than by default, and it
+  // does not cover the referrer leak.
+  const offenders = [];
+  for (const { rel, src } of FILES) {
+    const re = /target="_blank"(?![^>]*rel=)/g;
+    let m;
+    while ((m = re.exec(src)) !== null) {
+      offenders.push(`${rel}:${src.slice(0, m.index).split("\n").length}`);
+    }
+  }
+  assert.deepEqual(offenders, [], `target="_blank" without rel:\n  ${offenders.join("\n  ")}`);
+});
