@@ -170,7 +170,7 @@ export function mountExport(root) {
       URL.revokeObjectURL(url);
       s.note = "✓ Downloaded";
     } catch (err) {
-      s.note = err && err.kind === "not_found" ? "Export endpoint isn't implemented yet." : "Export failed — " + fmtErr(err);
+      s.note = err && err.kind === "not_found" ? "Export endpoint isn't implemented yet." : "Export failed: " + fmtErr(err);
     }
     s.exporting = false;
     render();
@@ -184,7 +184,7 @@ export function mountExport(root) {
       s.note = "✓ Saved as a preset";
       loadPresets();
     } catch (err) {
-      s.note = "Couldn't save preset — " + fmtErr(err);
+      s.note = "Couldn't save preset: " + fmtErr(err);
     }
     render();
   }
@@ -220,14 +220,14 @@ export function mountExport(root) {
               <div class="stack" style="gap:9px;">
                 ${FILTERS.map((f) => {
                   const active = s.filter === f.k;
-                  const count = s.preview && s.preview.counts ? s.preview.counts[f.k] : "—";
+                  const count = s.preview && s.preview.counts ? s.preview.counts[f.k] : "n/a";
                   return `<button class="filter-opt ${active ? "active" : ""}" data-filter="${f.k}">
                     <span class="radio-dot-outer" style="${active ? "border-color:var(--ac2);" : ""}"><span class="radio-dot-inner" style="${active ? "background:var(--ac2);" : ""}"></span></span>
                     <span style="flex:1;min-width:0;">
                       <span style="display:block;font-size:13.5px;font-weight:600;color:var(--tx);">${f.l}</span>
                       <span style="display:block;font-size:12px;color:var(--tx3);line-height:1.5;margin-top:3px;">${f.n}</span>
                     </span>
-                    <span class="mono" style="font-size:11px;font-weight:600;color:var(--tx2);">${count === undefined ? "—" : count}</span>
+                    <span class="mono" style="font-size:11px;font-weight:600;color:var(--tx2);">${count === undefined ? "n/a" : count}</span>
                   </button>`;
                 }).join("")}
               </div>
@@ -323,7 +323,7 @@ export function mountExport(root) {
                     : `<div class="banner banner-error" style="margin:0;"><span>&#10005;</span><div>${escapeHtml(fmtErr(s.previewError))}</div></div>`
                   : `<div class="row" style="align-items:baseline;gap:8px;">
                     <div style="font-size:38px;font-weight:700;letter-spacing:-1.6px;line-height:1;">${
-                      s.previewLoading ? "…" : rows !== null ? rows.toLocaleString() : "—"
+                      s.previewLoading ? "…" : rows !== null ? rows.toLocaleString() : "n/a"
                     }</div>
                     <div style="font-size:13px;color:var(--tx2);">rows</div>
                   </div>

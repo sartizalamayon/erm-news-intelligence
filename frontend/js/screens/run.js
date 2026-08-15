@@ -81,7 +81,7 @@ export function mountRun(root) {
       </div>
       <p class="hint" style="margin:0 0 12px;">
         Fetch pulls today's articles from every enabled source. Match applies your keyword rules.
-        Enrich runs the five AI stages. Pick any combination — each phase reads whatever the previous
+        Enrich runs the five AI stages. Pick any combination. Each phase reads whatever the previous
         one left in the database, so you can re-run them independently.
       </p>
       <div class="row wrap" style="gap:12px;align-items:center;">
@@ -290,7 +290,7 @@ export function mountRun(root) {
     titleEl.textContent = `Run collection · ${running ? "running" : hasError ? "finished with errors" : "done"}`;
     panel.style.borderColor = running ? "var(--ac2)" : hasError ? "var(--red)" : "var(--line)";
     hintEl.textContent = running
-      ? "This run is executing on the server. You can leave this page, close the tab, or sign out — it will keep going."
+      ? "This run is executing on the server. You can leave this page, close the tab, or sign out. It will keep going."
       : "Finished. Re-run any phase above; each reads whatever the previous one left in the database.";
 
     if (poll.fetch) {

@@ -374,7 +374,7 @@ export function mountReview(root, { navigate }) {
             <div class="date-range-group">
               <span class="mono" style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--tx4);">Date</span>
               <input type="date" data-role="date-from" class="date-input" value="${escapeHtml(s.dateFrom)}" ${s.topN ? "disabled" : ""} />
-              <span style="color:var(--tx4);">–</span>
+              <span style="color:var(--tx4);">to</span>
               <input type="date" data-role="date-to" class="date-input" value="${escapeHtml(s.dateTo)}" ${s.topN ? "disabled" : ""} />
             </div>
             <div class="score-slider-group">
@@ -383,7 +383,7 @@ export function mountReview(root, { navigate }) {
                 <input type="range" min="1" max="10" step="1" data-role="score-min" value="${s.scoreMin}" />
                 <input type="range" min="1" max="10" step="1" data-role="score-max" value="${s.scoreMax}" />
               </div>
-              <span class="mono" id="scoreRangeLabel" style="font-size:11px;color:var(--tx2);min-width:38px;">${s.scoreMin}–${s.scoreMax}</span>
+              <span class="mono" id="scoreRangeLabel" style="font-size:11px;color:var(--tx2);min-width:38px;">${s.scoreMin} to ${s.scoreMax}</span>
             </div>
             <div class="seg-group" style="padding:0 3px;">
               <span class="mono" style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--tx4);padding:0 6px;">Top N</span>
@@ -565,7 +565,7 @@ export function mountReview(root, { navigate }) {
       <div style="flex:1;min-width:0;">
         <div class="article-meta-row">
           <span class="tag">${escapeHtml(a.source)}</span>
-          <span class="pill" style="background:${t.bg};color:${t.color}"><span class="pill-dot" style="background:${t.color}"></span>${t.label} · ${a.score ?? "–"}</span>
+          <span class="pill" style="background:${t.bg};color:${t.color}"><span class="pill-dot" style="background:${t.color}"></span>${t.label} · ${a.score ?? " to "}</span>
           ${a.dupCount ? `<span class="pill" style="background:var(--acsoft);color:var(--actx);">+${a.dupCount}</span>` : ""}
           ${a.isStarred ? `<span style="font-size:11px;color:var(--amber);">&#9733;</span>` : ""}
           ${statusLabel ? `<span class="pill" style="background:${statusBg};color:${statusFg};text-transform:uppercase;letter-spacing:.6px;font-size:9px;">${statusLabel}</span>` : ""}
@@ -593,7 +593,7 @@ export function mountReview(root, { navigate }) {
     return `<div class="detail-wrap">
       <div class="detail-head">
         <span class="tag" style="font-size:12px;padding:4px 11px;">${escapeHtml(cur.source)}</span>
-        <span class="pill" style="background:${t.bg};color:${t.color};font-size:11px;padding:4px 10px;"><span class="pill-dot" style="background:${t.color}"></span>${t.label} · ${cur.score ?? "–"}/10</span>
+        <span class="pill" style="background:${t.bg};color:${t.color};font-size:11px;padding:4px 10px;"><span class="pill-dot" style="background:${t.color}"></span>${t.label} · ${cur.score ?? "n/a"}/10</span>
         <span class="mono" style="font-size:11px;color:var(--tx2);">${escapeHtml(cur.section || "")}</span>
         <div class="grow"></div>
         <button id="starCurBtn" class="icon-btn" title="Star for later" style="color:${cur.isStarred ? "var(--amber)" : "var(--tx4)"};border-color:${cur.isStarred ? "var(--amber)" : "var(--line)"}">&#9733;</button>
@@ -611,7 +611,7 @@ export function mountReview(root, { navigate }) {
           ? `<div style="padding:8px 0;">${skeletonRows(6, 16)}</div>`
           : `
       <div class="reason-box" style="border-left-color:${t.color}">
-        <div class="reason-kicker">Why it scored ${cur.score ?? "–"}</div>
+        <div class="reason-kicker">Why it scored ${cur.score ?? "n/a"}</div>
         <div style="font-size:13.5px;color:var(--tx2);line-height:1.6;">${escapeHtml(cur.reason || "")}</div>
         <div class="row wrap" style="gap:7px;margin-top:11px;">${(cur.keywords || []).map((k) => `<span class="kw-chip">${escapeHtml(k)}</span>`).join("")}</div>
       </div>
@@ -681,7 +681,7 @@ export function mountReview(root, { navigate }) {
         ${
           cur.body
             ? `<div class="article-body-text">${escapeHtml(cur.body)}</div>`
-            : `<div class="body-missing"><span style="color:var(--tx3);">—</span><div style="flex:1;font-size:13px;color:var(--tx2);line-height:1.55;">Body text wasn't retrieved for this article. Read it at the source, or ask an administrator to re-run the text fetch.</div></div>`
+            : `<div class="body-missing"><span style="color:var(--tx3);">·</span><div style="flex:1;font-size:13px;color:var(--tx2);line-height:1.55;">Body text wasn't retrieved for this article. Read it at the source, or ask an administrator to re-run the text fetch.</div></div>`
         }
       </div>`
       }
@@ -742,7 +742,7 @@ export function mountReview(root, { navigate }) {
       const label = root.querySelector("#scoreRangeLabel");
       const sync = () => {
         if (Number(scoreMinEl.value) > Number(scoreMaxEl.value)) scoreMinEl.value = scoreMaxEl.value;
-        if (label) label.textContent = `${scoreMinEl.value}–${scoreMaxEl.value}`;
+        if (label) label.textContent = `${scoreMinEl.value} to ${scoreMaxEl.value}`;
       };
       scoreMinEl.addEventListener("input", sync);
       scoreMaxEl.addEventListener("input", sync);

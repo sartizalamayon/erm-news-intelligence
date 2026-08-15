@@ -161,7 +161,7 @@ export function mountPrompts(root) {
       s.versions.guidance = [];
       flashSaved();
     } catch (err) {
-      s.savedNote = "Couldn't save — " + fmtErr(err);
+      s.savedNote = "Couldn't save: " + fmtErr(err);
       render();
     }
   }
@@ -173,7 +173,7 @@ export function mountPrompts(root) {
       s.versions.examples = [];
       flashSaved();
     } catch (err) {
-      s.savedNote = "Couldn't save — " + fmtErr(err);
+      s.savedNote = "Couldn't save: " + fmtErr(err);
       render();
     }
   }
@@ -227,7 +227,7 @@ export function mountPrompts(root) {
       s.routingDraft = JSON.parse(JSON.stringify(s.routing));
       s.routingNote = "✓ Routing saved";
     } catch (err) {
-      s.routingNote = "Couldn't save — " + fmtErr(err);
+      s.routingNote = "Couldn't save: " + fmtErr(err);
     }
     s.routingSaving = false;
     render();
@@ -311,7 +311,7 @@ export function mountPrompts(root) {
 
         ${
           s.forbidden
-            ? `<div class="banner banner-error"><span>&#128274;</span><div>This whole console is admin-only. Your account doesn't have the admin role — the server rejected every request here with 403.</div></div>`
+            ? `<div class="banner banner-error"><span>&#128274;</span><div>This whole console is admin-only. Your account doesn't have the admin role, the server rejected every request here with 403.</div></div>`
             : ""
         }
 
@@ -436,7 +436,7 @@ export function mountPrompts(root) {
     if (!s.routingDraft) return `<div class="card" style="margin-bottom:16px;"><h3>Model routing</h3>${skeletonRows(5, 20)}</div>`;
     return `<div class="card" style="margin-bottom:16px;">
       <h3>Model routing per feature</h3>
-      <p class="hint">Which provider (and optionally which model) handles each pipeline feature — independently, not as a failover chain.</p>
+      <p class="hint">Which provider (and optionally which model) handles each pipeline feature, independently rather than as a failover chain.</p>
       <div class="stack" style="gap:10px;">
         ${FEATURES.map((f) => {
           const route = s.routingDraft[f] || { primary: { provider: "", model: "" }, secondary: null };
@@ -481,7 +481,7 @@ export function mountPrompts(root) {
         <h3 style="margin:0;">Providers</h3>
         <button id="addProviderBtn" class="btn btn-outline" style="padding:8px 14px;font-size:12.5px;">+ Add provider</button>
       </div>
-      <p class="hint">Add any provider by name — Mistral, NVIDIA NIM, Groq, Gemini, or one that doesn't exist yet. Model IDs are free text.</p>
+      <p class="hint">Add any provider by name: Mistral, NVIDIA NIM, Groq, Gemini, or one that doesn't exist yet. Model IDs are free text.</p>
       ${s.addingProvider ? providerForm(null) : ""}
       <div class="stack" style="gap:9px;">
         ${
@@ -522,7 +522,7 @@ export function mountPrompts(root) {
           ? `<div class="stack" style="gap:6px;margin-bottom:10px;">${keys
               .map(
                 (k) => `<div class="row-between" style="font-size:12px;">
-            <span class="mono" style="color:var(--tx2);">${escapeHtml(k.key_id)} — …${escapeHtml(k.api_key_last4)}</span>
+            <span class="mono" style="color:var(--tx2);">${escapeHtml(k.key_id)}: …${escapeHtml(k.api_key_last4)}</span>
             <button class="btn-sm btn-sm-danger" data-delete-cred="${escapeHtml(provider)}:${escapeHtml(k.key_id)}">delete</button>
           </div>`
               )

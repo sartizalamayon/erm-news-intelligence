@@ -14,7 +14,7 @@ const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 export function mountLogin(root, { onAuthenticated }) {
   const local = {
     step: "login", // login | otp-email | otp-code
-    purpose: "signup", // "signup" | "password_reset" — which otp-email/otp-code flow we're in
+    purpose: "signup", // "signup" | "password_reset", which otp-email/otp-code flow we're in
     email: "",
     password: "",
     code: "",
@@ -73,7 +73,7 @@ export function mountLogin(root, { onAuthenticated }) {
   function renderOtpEmailStep() {
     return `
       <div style="font-size:13px;color:var(--tx2);line-height:1.5;margin-bottom:14px;">
-        ${local.purpose === "signup" ? "First time here — verify your work email to set up your account." : "Enter your work email and we'll send a code to reset your password."}
+        ${local.purpose === "signup" ? "First time here? Verify your work email to set up your account." : "Enter your work email and we'll send a code to reset your password."}
       </div>
       <label class="field-label">Work email</label>
       <input id="loginEmail" type="email" class="text-input" placeholder="firstname.lastname@grameenphone.com"
@@ -298,9 +298,9 @@ export function mountLogin(root, { onAuthenticated }) {
   // own (deliberately generic, for /auth/login) message.
   function describeAuthError(err, fallback) {
     if (err instanceof ApiError) {
-      if (err.kind === "rate_limited") return err.message || "Too many attempts — wait a few minutes and try again.";
+      if (err.kind === "rate_limited") return err.message || "Too many attempts. Wait a few minutes and try again.";
       if (err.kind === "network") return err.message;
-      if (err.kind === "server") return "We couldn't send that email right now — the mail service is temporarily unavailable. Try again shortly.";
+      if (err.kind === "server") return "We couldn't send that email right now. The mail service is temporarily unavailable. Try again shortly.";
       if (err.message) return err.message;
     }
     return fallback;

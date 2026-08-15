@@ -28,7 +28,7 @@ export function mountManual(root) {
       <div class="page page-md">
         <div class="card" style="margin-bottom:18px;">
           <h2 style="font-size:24px;font-weight:700;letter-spacing:-1px;margin:0 0 8px;">Five thousand articles in, twenty-five out.</h2>
-          <p style="color:var(--tx2);font-size:14px;line-height:1.65;margin:0;max-width:66ch;">Every weekday the desk narrows the whole day's news down to the handful of stories that matter to enterprise risk. It happens in four phases. Nothing is ever deleted — each phase only decides what gets your attention.</p>
+          <p style="color:var(--tx2);font-size:14px;line-height:1.65;margin:0;max-width:66ch;">Every weekday the desk narrows the whole day's news down to the handful of stories that matter to enterprise risk. It happens in four phases. Nothing is ever deleted, each phase only decides what gets your attention.</p>
         </div>
 
         <div class="phase-tabs">
@@ -70,8 +70,8 @@ export function mountManual(root) {
       { icon: "&#9680;", color: "var(--amber)", title: "Quiet day", note: "Nothing published, nothing wrong. The page says “no articles today” rather than an error." },
     ];
     return `<div class="card">
-      ${phaseHead(1, "var(--tx4)", "Collect — about 5,000 articles a day (example day)")}
-      <p style="color:var(--tx2);font-size:13.5px;line-height:1.7;margin:0 0 22px;max-width:70ch;">Every morning the collector visits every configured news source and asks each one: what did you publish today? It takes whatever it gets — politics, sport, entertainment, everything. No judgement happens here. The only thing thrown away at this stage is an article with no usable publication date, or one already stored from a previous run.</p>
+      ${phaseHead(1, "var(--tx4)", "Collect: about 5,000 articles a day (example day)")}
+      <p style="color:var(--tx2);font-size:13.5px;line-height:1.7;margin:0 0 22px;max-width:70ch;">Every morning the collector visits every configured news source and asks each one: what did you publish today? It takes whatever it gets, politics, sport, entertainment, everything. No judgement happens here. The only thing thrown away at this stage is an article with no usable publication date, or one already stored from a previous run.</p>
       <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-bottom:22px;">
         <div style="border:1px solid var(--line);border-radius:12px;background:var(--panel2);padding:18px 20px;">
           <div class="mono" style="font-size:9px;letter-spacing:1.3px;text-transform:uppercase;color:var(--tx3);margin-bottom:14px;">How each source is read (example)</div>
@@ -103,7 +103,7 @@ export function mountManual(root) {
       </div>
       <div class="banner banner-info" style="margin-bottom:0;">
         <span>i</span>
-        <div style="flex:1;">If a source shows <b style="color:var(--tx);">no articles today</b> on the Source health page, that usually means a quiet news day — not a fault. The page tells you which of the two it is.</div>
+        <div style="flex:1;">If a source shows <b style="color:var(--tx);">no articles today</b> on the Source health page, that usually means a quiet news day, not a fault. The page tells you which of the two it is.</div>
       </div>
     </div>`;
   }
@@ -117,7 +117,7 @@ export function mountManual(root) {
       { n: 29, l: "Others" },
     ];
     return `<div class="card">
-      ${phaseHead(2, "var(--ac)", "Keyword filter — 5,000 down to about 1,100 (example day)")}
+      ${phaseHead(2, "var(--ac)", "Keyword filter: 5,000 down to about 1,100 (example day)")}
       <p style="color:var(--tx2);font-size:13.5px;line-height:1.7;margin:0 0 22px;max-width:70ch;">Each article is checked against the keyword list, in English and Bengali, grouped into five risk sections. If any term appears in the headline or the body, the article is kept and tagged with the section that term belongs to. If none appear, it stops here. This is a plain text match: no judgement, no model, no guessing.</p>
       <div style="border:1px solid var(--line);border-radius:12px;background:var(--panel2);padding:20px 22px;margin-bottom:18px;">
         <div class="mono" style="font-size:9px;letter-spacing:1.3px;text-transform:uppercase;color:var(--tx3);margin-bottom:14px;">A match, step by step</div>
@@ -154,18 +154,18 @@ export function mountManual(root) {
     const steps = [
       { g: "1", chip: "linear-gradient(145deg,#8b6cff,#b39cff)", name: "Translate", what: "Every Bengali headline gets an English version stored alongside it, so one reviewer can work the whole queue.", ex: "ডলারের বিপরীতে টাকার মান কমল → Taka weakens against the dollar" },
       { g: "2", chip: "linear-gradient(145deg,#1a9bd0,#36d6f5)", name: "Group duplicates", what: "When several outlets run the same story, they collapse into one card. You decide once instead of eight times.", ex: "8 articles about the Hormuz strike → 1 card, badge “+7”" },
-      { g: "3", chip: "linear-gradient(145deg,#c0392b,#e2685a)", name: "Score relevance", what: "Each story is rated 1–10 for how much it matters to enterprise risk, with a one-line reason you can read and disagree with.", ex: "Spectrum repricing → 9/10, “direct regulatory action on pricing”" },
+      { g: "3", chip: "linear-gradient(145deg,#c0392b,#e2685a)", name: "Score relevance", what: "Each story is rated 1 to 10 for how much it matters to enterprise risk, with a one-line reason you can read and disagree with.", ex: "Spectrum repricing → 9/10, “direct regulatory action on pricing”" },
       { g: "4", chip: "linear-gradient(145deg,#d97706,#fbbf24)", name: "Group topics", what: "Related stories are clustered by theme so a running story reads as one thread rather than scattered cards.", ex: "“Energy costs” gathers fuel imports, gas curtailment, Brent moves" },
     ];
     const bands = [
-      { l: "High", b: "8–10", c: "var(--red)", bg: "var(--redsoft)", m: "Acts on us directly, or a shock big enough to reprice costs. Read today.", ex: "BTRC reprices spectrum" },
-      { l: "Medium", b: "6–7", c: "var(--amber)", bg: "var(--ambersoft)", m: "Affects us through a second step — energy, banks, trade. Worth a line in the brief.", ex: "Fuel import bill climbs 14%" },
+      { l: "High", b: "8 to 10", c: "var(--red)", bg: "var(--redsoft)", m: "Acts on us directly, or a shock big enough to reprice costs. Read today.", ex: "BTRC reprices spectrum" },
+      { l: "Medium", b: "6 to 7", c: "var(--amber)", bg: "var(--ambersoft)", m: "Affects us through a second step, such as energy or banks, trade. Worth a line in the brief.", ex: "Fuel import bill climbs 14%" },
       { l: "Low", b: "5", c: "var(--green)", bg: "var(--greensoft)", m: "Context. Useful background, rarely actionable on the day.", ex: "Chip bottleneck lifts handset prices" },
       { l: "Least", b: "below 5", c: "var(--violet)", bg: "var(--violetsoft)", m: "Matched a keyword but reads as unrelated. Usually a reject.", ex: "Foreign data rule with no local effect" },
     ];
     return `<div class="card">
-      ${phaseHead(3, "var(--ac3)", "AI stage — about 1,100 organised into a reviewable set")}
-      <p style="color:var(--tx2);font-size:13.5px;line-height:1.7;margin:0 0 22px;max-width:70ch;">A language model does four jobs in order. It never removes an article from the database — it translates, groups and scores, so the queue arrives sorted with the most consequential story at the top.</p>
+      ${phaseHead(3, "var(--ac3)", "AI stage: about 1,100 organised into a reviewable set")}
+      <p style="color:var(--tx2);font-size:13.5px;line-height:1.7;margin:0 0 22px;max-width:70ch;">A language model does four jobs in order. It never removes an article from the database, it translates, groups and scores, so the queue arrives sorted with the most consequential story at the top.</p>
       <div class="stack" style="gap:10px;margin-bottom:24px;">
         ${steps
           .map(
@@ -181,8 +181,8 @@ export function mountManual(root) {
           .join("")}
       </div>
       <div style="border:1px solid var(--line);border-radius:12px;background:var(--panel2);padding:20px 22px;margin-bottom:18px;">
-        <div class="mono" style="font-size:9px;letter-spacing:1.3px;text-transform:uppercase;color:var(--tx3);margin-bottom:6px;">How the 1–10 score becomes a colour</div>
-        <p style="font-size:12.5px;color:var(--tx2);line-height:1.6;margin:0 0 18px;max-width:64ch;">You never need to read the number. The colour is the whole message — and you can filter the queue by colour.</p>
+        <div class="mono" style="font-size:9px;letter-spacing:1.3px;text-transform:uppercase;color:var(--tx3);margin-bottom:6px;">How the 1 to 10 score becomes a colour</div>
+        <p style="font-size:12.5px;color:var(--tx2);line-height:1.6;margin:0 0 18px;max-width:64ch;">You never need to read the number. The colour is the whole message, and you can filter the queue by colour.</p>
         <div class="stack" style="gap:10px;">
           ${bands
             .map(
@@ -198,7 +198,7 @@ export function mountManual(root) {
       </div>
       <div class="banner" style="background:var(--ambersoft);border:1px solid var(--ambersoft);margin-bottom:0;">
         <span style="color:var(--amber);">&#9888;</span>
-        <div style="flex:1;color:var(--tx2);">The score is advice, not a decision. A low score still appears in the queue and can still be approved. If the model keeps misjudging a kind of story, an administrator adjusts the guidance on the <b style="color:var(--tx);">AI prompts</b> page — that is how the tool gets sharper over time.</div>
+        <div style="flex:1;color:var(--tx2);">The score is advice, not a decision. A low score still appears in the queue and can still be approved. If the model keeps misjudging a kind of story, an administrator adjusts the guidance on the <b style="color:var(--tx);">AI prompts</b> page, that is how the tool gets sharper over time.</div>
       </div>
     </div>`;
   }
@@ -213,12 +213,12 @@ export function mountManual(root) {
       ["/", "Jump to the filter box"],
     ];
     const outputs = [
-      ["&#9638;", "Excel export", "Build it on the Export page — approved only, top N by relevance, a date range, or the whole matched pool."],
+      ["&#9638;", "Excel export", "Build it on the Export page: approved only, top N by relevance, a date range, or the whole matched pool."],
       ["&#9998;", "Word brief", "Daily Risk Insights, drafted from approved stories in house style. You polish the wording after download."],
       ["&#9733;", "Starred list", "A running shelf of stories to revisit, separate from approve and reject."],
     ];
     return `<div class="card">
-      ${phaseHead(4, "var(--green)", "Review and export — your decisions")}
+      ${phaseHead(4, "var(--green)", "Review and export: your decisions")}
       <p style="color:var(--tx2);font-size:13.5px;line-height:1.7;margin:0 0 22px;max-width:70ch;">This is the only phase where a person decides anything. You work down the queue approving or rejecting; approved stories become the Excel export and the Word brief. Nothing leaves the tool that you didn't approve.</p>
       <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-bottom:18px;">
         <div style="border:1px solid var(--line);border-radius:12px;background:var(--panel2);padding:18px 20px;">
@@ -243,7 +243,7 @@ export function mountManual(root) {
       </div>
       <div style="border:1px solid var(--line);border-radius:12px;background:var(--panel2);padding:20px 22px;">
         <div class="mono" style="font-size:9px;letter-spacing:1.3px;text-transform:uppercase;color:var(--tx3);margin-bottom:14px;">Grouped stories</div>
-        <p style="font-size:12.5px;color:var(--tx2);line-height:1.7;margin:0 0 14px;max-width:68ch;">When several outlets run the same story, you see <b style="color:var(--tx);">one</b> card with a <b style="color:var(--tx);">+N</b> badge. Approving the card approves the story. Open the group only if you'd rather export a different outlet's version — press <b style="color:var(--tx);">keep</b> on that one.</p>
+        <p style="font-size:12.5px;color:var(--tx2);line-height:1.7;margin:0 0 14px;max-width:68ch;">When several outlets run the same story, you see <b style="color:var(--tx);">one</b> card with a <b style="color:var(--tx);">+N</b> badge. Approving the card approves the story. Open the group only if you'd rather export a different outlet's version, press <b style="color:var(--tx);">keep</b> on that one.</p>
         <div class="row" style="gap:14px;padding:14px 16px;border:1px solid var(--line);border-radius:10px;background:var(--panel);">
           <span class="tag">Al Jazeera</span>
           <span class="serif" style="flex:1;font-size:13.5px;color:var(--tx);">Shipping insurers pull cover for Hormuz transits</span>
@@ -263,7 +263,7 @@ export function mountManual(root) {
         bg: "var(--acsoft)",
         can: [
           ["&#10003;", "var(--green)", "See the dashboard, short and long term"],
-          ["&#10003;", "var(--green)", "Work the review queue — approve, reject, star, annotate"],
+          ["&#10003;", "var(--green)", "Work the review queue: approve, reject, star, annotate"],
           ["&#10003;", "var(--green)", "Build exports and draft the daily brief"],
           ["&#10003;", "var(--green)", "Search the whole archive"],
           ["&#10005;", "var(--red)", "Cannot change keywords, sources or AI prompts"],
@@ -278,7 +278,7 @@ export function mountManual(root) {
         can: [
           ["&#10003;", "var(--green)", "Everything an analyst can do"],
           ["&#10003;", "var(--green)", "Add, edit, disable and test news sources"],
-          ["&#10003;", "var(--green)", "Own the keyword list — the whole of phase 2"],
+          ["&#10003;", "var(--green)", "Own the keyword list: the whole of phase 2"],
           ["&#10003;", "var(--green)", "Write the AI guidance and scoring examples"],
           ["&#10003;", "var(--green)", "Re-run any pipeline stage and read source health"],
         ],
@@ -288,7 +288,7 @@ export function mountManual(root) {
       ["Phase", "One of the four stages a story passes through: collect, keyword filter, AI, review."],
       ["Matched", "An article that contained at least one of your keywords. Everything in the queue is matched."],
       ["Grouped", "Several outlets' versions of one story folded into a single card, shown as “+N”."],
-      ["Relevance", "The 1–10 rating from the AI stage, shown to you as a colour: High, Medium, Low, Least."],
+      ["Relevance", "The 1 to 10 rating from the AI stage, shown to you as a colour: High, Medium, Low, Least."],
       ["Topic", "A theme that links otherwise separate stories, e.g. “Energy costs”."],
       ["Approved", "You signed it off. Approved stories are the only ones that reach the brief."],
     ];

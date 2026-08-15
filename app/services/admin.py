@@ -706,7 +706,7 @@ def import_keywords_xlsx(conn: DictConnection, content: bytes) -> dict[str, Any]
 
             if not term_en and not term_bn:
                 skipped += 1
-                errors.append(f"row {i}: skipped — both term_en and term_bn are blank")
+                errors.append(f"row {i}: skipped, both term_en and term_bn are blank")
                 continue
 
             normalized_section = _normalize_section(section)
@@ -776,7 +776,7 @@ PROMPT_FIELDS: dict[str, str] = {
 
 def _validate_prompt_field(field: str) -> None:
     if field not in PROMPT_FIELDS:
-        raise ValidationError(f"unknown prompt field {field!r} — must be one of {sorted(PROMPT_FIELDS)}")
+        raise ValidationError(f"unknown prompt field {field!r}, must be one of {sorted(PROMPT_FIELDS)}")
 
 
 def _versions_settings_key(field: str) -> str:
@@ -1138,7 +1138,7 @@ def upsert_provider_config(
     the return value never includes it (see ProviderConfigOut).
     """
     if provider not in _PROVIDER_CONFIGS_PROVIDERS:
-        raise ValidationError(f"unknown provider {provider!r} — must be one of {_PROVIDER_CONFIGS_PROVIDERS}")
+        raise ValidationError(f"unknown provider {provider!r}, must be one of {_PROVIDER_CONFIGS_PROVIDERS}")
     if role is not None and role not in _PROVIDER_ROLES:
         raise ValidationError(f"role must be one of {_PROVIDER_ROLES}, got {role!r}")
 
@@ -1346,7 +1346,7 @@ def run_purge(
         if older_than is None:
             raise ValidationError("older_than (an ISO date) is required for the 'matched' purge operation")
         return purge_matched_articles(conn, older_than=older_than, require_exported=require_exported, confirm=confirm)
-    raise ValidationError(f"unknown purge operation {operation!r} — must be stale_bodies/stale_unmatched/matched")
+    raise ValidationError(f"unknown purge operation {operation!r}, must be stale_bodies/stale_unmatched/matched")
 
 
 EXPORT_DIR = "var/exports"
@@ -1586,7 +1586,7 @@ def run_pipeline_stage(
     exactly as before.
     """
     if stage_key not in _PIPELINE_STAGE_KEYS:
-        raise ValidationError(f"unknown pipeline stage {stage_key!r} — must be one of {sorted(_PIPELINE_STAGE_KEYS)}")
+        raise ValidationError(f"unknown pipeline stage {stage_key!r}, must be one of {sorted(_PIPELINE_STAGE_KEYS)}")
     try:
         if stage_key == "bodies":
             result = _run_bodies_stage(conn, progress=progress)
@@ -1597,7 +1597,7 @@ def run_pipeline_stage(
             if result.get("capped"):
                 # Never let a truncated run render identically to a
                 # complete one — that is what hid the old limit=100.
-                detail += f" — CAPPED at {BODIES_STAGE_MAX}, more remain"
+                detail += f", CAPPED at {BODIES_STAGE_MAX}, more remain"
         else:
             # Lazy import — see _build_client_for_feature's docstring for
             # why app.services.llm/.enrichment are never imported at

@@ -14,7 +14,7 @@ export const state = {
   theme: "dark",
   railOpen: true,
 
-  screen: "login", // one of the 10 screen keys (Daily Risk Insight/"brief" removed — see this task's report)
+  screen: "login", // one of the 10 screen keys (Daily Risk Insight/"brief" removed, see this task's report)
   dashMode: "short",
 
   progress: "", // active job/run status text, shell header (§2)

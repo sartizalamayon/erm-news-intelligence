@@ -105,7 +105,7 @@ export function mountSearch(root) {
   function render() {
     root.innerHTML = `
       <div class="page page-narrow">
-        <p style="color:var(--tx2);font-size:13.5px;line-height:1.6;margin:0 0 18px;max-width:62ch;">Searches every article ever collected — headline, English translation and body text — across all dates and statuses. All words must appear. Newest first.</p>
+        <p style="color:var(--tx2);font-size:13.5px;line-height:1.6;margin:0 0 18px;max-width:62ch;">Searches every article ever collected, headline, English translation and body text, across all dates and statuses. All words must appear. Newest first.</p>
         <div class="row" style="gap:10px;margin-bottom:8px;">
           <div class="search-box" style="height:46px;padding:0 14px;">
             <span style="color:var(--tx4);">&#8981;</span>
@@ -122,7 +122,7 @@ export function mountSearch(root) {
           <div class="date-range-group">
             <span class="mono" style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--tx4);">Date</span>
             <input type="date" data-role="date-from" class="date-input" value="${escapeHtml(s.dateFrom)}" />
-            <span style="color:var(--tx4);">–</span>
+            <span style="color:var(--tx4);">to</span>
             <input type="date" data-role="date-to" class="date-input" value="${escapeHtml(s.dateTo)}" />
           </div>
           <div class="seg-group">
@@ -220,7 +220,7 @@ export function mountSearch(root) {
       <button data-toggle-body="${r.id}" class="btn-ghost" style="display:inline-flex;align-items:center;gap:7px;margin-top:10px;color:${
       r.body ? "var(--actx)" : "var(--tx3)"
     };font-size:12.5px;font-weight:600;cursor:${r.body ? "pointer" : "default"};padding:0;">${
-      r.body ? (open ? "⌄ Hide article" : "› Read article") : "— No article text"
+      r.body ? (open ? "⌄ Hide article" : "› Read article") : "No article text"
     }</button>
       ${open && r.body ? `<div style="margin-top:11px;padding:14px 16px;background:var(--bg);border:1px solid var(--line);border-radius:9px;font-family:'Lora',Georgia,serif;font-size:14px;line-height:1.75;color:var(--tx2);white-space:pre-wrap;">${escapeHtml(
         r.body

@@ -78,7 +78,7 @@ export function mountAccountPanel(root, { onClose }) {
       await changePassword(s.current, s.next);
       s.busy = false;
       s.current = s.next = s.confirm = "";
-      s.note = "✓ Password changed. Your other sessions were signed out — this one stays signed in.";
+      s.note = "✓ Password changed. Your other sessions were signed out. This one stays signed in.";
       render();
     } catch (err) {
       s.busy = false;
@@ -96,7 +96,7 @@ export function mountAccountPanel(root, { onClose }) {
       // text ("Current password is incorrect."), so this branch is a
       // belt-and-suspenders friendly fallback, not the primary path.
       if (err.kind === "validation") return err.message || "Current password is incorrect.";
-      if (err.kind === "rate_limited") return err.message || "Too many attempts — wait a few minutes and try again.";
+      if (err.kind === "rate_limited") return err.message || "Too many attempts. Wait a few minutes and try again.";
       if (err.message) return err.message;
     }
     return "Couldn't change your password. Try again.";

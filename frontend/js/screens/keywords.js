@@ -131,7 +131,7 @@ export function mountKeywords(root) {
       const res = await api.post("/keywords/rematch");
       s.rematchNote = `✓ ${res.matched} matched, ${res.filtered_out} filtered out (of ${res.total} candidates)`;
     } catch (err) {
-      s.rematchNote = err.kind === "not_found" ? "Rematch endpoint not available." : "Rematch failed — " + fmtErr(err);
+      s.rematchNote = err.kind === "not_found" ? "Rematch endpoint not available." : "Rematch failed: " + fmtErr(err);
     }
     s.rematching = false;
     render();
@@ -181,7 +181,7 @@ export function mountKeywords(root) {
       URL.revokeObjectURL(url);
       s.ioNote = "✓ Exported";
     } catch (err) {
-      s.ioNote = err && err.kind === "not_found" ? "Export endpoint isn't implemented yet." : "Export failed — " + fmtErr(err);
+      s.ioNote = err && err.kind === "not_found" ? "Export endpoint isn't implemented yet." : "Export failed: " + fmtErr(err);
     }
     s.exporting = false;
     render();
@@ -212,13 +212,13 @@ export function mountKeywords(root) {
       }
       const r = payload || {};
       const errCount = (r.errors || []).length;
-      s.ioNote = `✓ Import done — ${r.created || 0} created, ${r.updated || 0} updated, ${r.skipped || 0} skipped${
+      s.ioNote = `✓ Import done: ${r.created || 0} created, ${r.updated || 0} updated, ${r.skipped || 0} skipped${
         errCount ? `, ${errCount} row error(s): ${r.errors.slice(0, 3).join("; ")}${errCount > 3 ? "…" : ""}` : ""
       }`;
       loadSections();
       loadRows();
     } catch (err) {
-      s.ioNote = err && err.kind === "not_found" ? "Import endpoint isn't implemented yet." : "Import failed — " + fmtErr(err);
+      s.ioNote = err && err.kind === "not_found" ? "Import endpoint isn't implemented yet." : "Import failed: " + fmtErr(err);
     }
     s.importing = false;
     render();
@@ -228,7 +228,7 @@ export function mountKeywords(root) {
     root.innerHTML = `
       <div class="page page-md" style="max-width:1080px;">
         <div class="row-between wrap" style="margin-bottom:20px;">
-          <p style="color:var(--tx2);font-size:13.5px;line-height:1.6;margin:0;max-width:58ch;">Bilingual search terms across risk sections — the whole of phase 2. Changes apply to the next collection, or re-run the filter to re-check today's articles.</p>
+          <p style="color:var(--tx2);font-size:13.5px;line-height:1.6;margin:0;max-width:58ch;">Bilingual search terms across risk sections, the whole of phase 2. Changes apply to the next collection, or re-run the filter to re-check today's articles.</p>
           <div class="row wrap" style="gap:9px;">
             <input type="file" id="kwImportFile" accept=".xlsx" style="display:none;" />
             <button id="kwImportBtn" class="btn btn-outline" style="padding:11px 16px;white-space:nowrap;" ${s.importing ? "disabled" : ""}>&#8593; ${
@@ -300,8 +300,8 @@ export function mountKeywords(root) {
   function keywordRow(k) {
     const on = !!k.enabled;
     return `<div class="table-row keywords-cols" style="opacity:${on ? 1 : 0.55}">
-      <div style="font-size:13.5px;font-weight:600;">${escapeHtml(k.term_en || "—")}</div>
-      <div style="font-size:13.5px;color:var(--tx2);">${escapeHtml(k.term_bn || "—")}</div>
+      <div style="font-size:13.5px;font-weight:600;">${escapeHtml(k.term_en || "n/a")}</div>
+      <div style="font-size:13.5px;color:var(--tx2);">${escapeHtml(k.term_bn || "n/a")}</div>
       <div><span class="pill" style="background:${on ? "var(--acsoft)" : "var(--gridline)"};color:${on ? "var(--actx)" : "var(--tx3)"}"><span class="pill-dot" style="background:${
       on ? "var(--ac2)" : "var(--tx4)"
     }"></span>${on ? "on" : "off"}</span></div>

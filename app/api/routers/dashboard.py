@@ -440,7 +440,7 @@ def dashboard_trends(
                     status, as_of = "live", live.fetched_at.isoformat()
                     note = "Live from open.er-api.com (USD → BDT)."
                 else:
-                    note = "Live fetch unavailable right now — showing the last known figure."
+                    note = "Live fetch unavailable right now, showing the last known figure."
             elif indicator == "inflation":
                 live = macro_service.fetch_inflation()
                 if live is not None:
@@ -448,11 +448,11 @@ def dashboard_trends(
                     status, as_of = "live", live.fetched_at.isoformat()
                     note = "Live from World Bank CPI (annual data, ~1yr publication lag)."
                 else:
-                    note = "Live fetch unavailable right now — showing the last known figure."
+                    note = "Live fetch unavailable right now, showing the last known figure."
             elif indicator == "brent_crude":
                 if not settings.oilpriceapi_key:
                     status = "unconfigured"
-                    note = "Needs an oilpriceapi.com API key (Settings.oilpriceapi_key) — not yet configured."
+                    note = "Needs an oilpriceapi.com API key (Settings.oilpriceapi_key), not yet configured."
                 else:
                     live = macro_service.fetch_brent(settings.oilpriceapi_key)
                     if live is not None:
@@ -460,7 +460,7 @@ def dashboard_trends(
                         status, as_of = "live", live.fetched_at.isoformat()
                         note = "Live from oilpriceapi.com."
                     else:
-                        note = "Live fetch unavailable right now — showing the last known figure."
+                        note = "Live fetch unavailable right now, showing the last known figure."
 
             trend_cards.append(
                 TrendCardOut(

@@ -41,8 +41,8 @@ import {
 } from "../util.js";
 
 const REL_TIER_META = {
-  red: { label: "High", band: "8–10", color: "var(--red)" },
-  yellow: { label: "Medium", band: "6–7", color: "var(--amber)" },
+  red: { label: "High", band: "8 to 10", color: "var(--red)" },
+  yellow: { label: "Medium", band: "6 to 7", color: "var(--amber)" },
   green: { label: "Low", band: "5", color: "var(--green)" },
   magenta: { label: "Least", band: "<5", color: "var(--violet)" },
 };
@@ -278,8 +278,8 @@ export function mountDashboard(root, { navigate }) {
           })
           .join("")
       : "";
-    const avg = days.length ? Math.round(days.reduce((s, d) => s + (d.count || 0), 0) / days.length) : "—";
-    const peak = days.length ? Math.max(...days.map((d) => d.count || 0)) : "—";
+    const avg = days.length ? Math.round(days.reduce((s, d) => s + (d.count || 0), 0) / days.length) : "n/a";
+    const peak = days.length ? Math.max(...days.map((d) => d.count || 0)) : "n/a";
     const fetchedTotal = kpis[0] ? Number(String(kpis[0].value).replace(/,/g, "")) : 0;
     // TODAY's matched / TODAY's fetched.
     //
@@ -290,7 +290,7 @@ export function mountDashboard(root, { navigate }) {
     // rate of anything: on a light day it read far over 100%, and on a
     // day with a big fetch it read near zero.
     const matchedToday = kpis[1] ? Number(String(kpis[1].value).replace(/,/g, "")) : 0;
-    const matchRate = fetchedTotal ? ((matchedToday / fetchedTotal) * 100).toFixed(1) + "%" : "—";
+    const matchRate = fetchedTotal ? ((matchedToday / fetchedTotal) * 100).toFixed(1) + "%" : "n/a";
 
     const relRaw = data.relMix || [];
     const relTotal = relRaw.reduce((s, r) => s + (r.count || 0), 0);
@@ -554,14 +554,14 @@ export function mountDashboard(root, { navigate }) {
       <div class="grid-3" style="margin-bottom:16px;">${trendHtml}</div>
       <div class="card" style="margin-bottom:16px;">
         <h3>Coverage volume by section · 12 months</h3>
-        <p class="hint">Matched articles per month, stacked by section — this is the competitor/regulatory/economic tracker once sections are configured (Keywords admin screen). The primary chart on this tab.</p>
+        <p class="hint">Matched articles per month, stacked by section. This is the competitor, regulatory and economic tracker once sections are configured (Keywords admin screen). The primary chart on this tab.</p>
         <div class="months-cols">${monthsHtml || `<div class="state-body">No data.</div>`}</div>
         <div class="row wrap" style="gap:16px;margin-top:18px;padding-top:14px;border-top:1px solid var(--line);">${legendHtml}</div>
       </div>
       <div class="grid-2-long" style="margin-bottom:16px;">
         <div class="card">
           <h3>Relevance mix · 12 months</h3>
-          <p class="hint">Share of matched coverage scoring high (8–10) each month, across all sections.</p>
+          <p class="hint">Share of matched coverage scoring high (8 to 10) each month, across all sections.</p>
           <div class="chart-cols">${relMixHtml || `<div class="state-body">No data.</div>`}</div>
         </div>
         <div class="card">

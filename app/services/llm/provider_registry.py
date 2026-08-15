@@ -73,7 +73,7 @@ class ProviderDefinition:
 
     def __post_init__(self) -> None:
         if self.adapter not in KNOWN_ADAPTERS:
-            raise ValidationError(f"unknown adapter {self.adapter!r} — must be one of {KNOWN_ADAPTERS}")
+            raise ValidationError(f"unknown adapter {self.adapter!r}, must be one of {KNOWN_ADAPTERS}")
         if self.adapter == ADAPTER_OPENAI_COMPATIBLE and not self.base_url:
             raise ValidationError(f"provider {self.provider!r} uses adapter=openai_compatible but has no base_url")
 
@@ -170,7 +170,7 @@ DEFAULT_PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
         base_url="https://integrate.api.nvidia.com/v1",
         default_model="meta/llama-3.1-8b-instruct",
         enabled=True,
-        note="No rate-limit headers observed — ceilings unknown, learn from 429s, never hardcode.",
+        note="No rate-limit headers observed, ceilings unknown, learn from 429s, never hardcode.",
     ),
     "cerebras": ProviderDefinition(
         provider="cerebras",
@@ -180,7 +180,7 @@ DEFAULT_PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
         enabled=False,
         note=(
             "Verified 2026-08-07 with a real key: every call returns "
-            "'Payment required to access this resource' — no free tier "
+            "'Payment required to access this resource', no free tier "
             "exists. Do not re-enable without a paid plan."
         ),
     ),

@@ -66,12 +66,12 @@ export function mountSources(root) {
       // to the one fixed in health.js — the two screens were written by
       // copy-paste, which is why the rendering has since been pulled
       // into components/toast.js.
-      s.testResult = `${src.name} — ${
+      s.testResult = `${src.name}: ${
         res.detail || `${res.fetched} fetched, ${res.today} from today (via ${res.method})`
       }`;
       s.testOk = !!res.ok;
     } catch (err) {
-      s.testResult = `${src.name} — ${fmtErr(err)}`;
+      s.testResult = `${src.name}: ${fmtErr(err)}`;
       s.testOk = false;
     }
     s.busyIds.delete(src.id);
@@ -106,7 +106,7 @@ export function mountSources(root) {
     root.innerHTML = `
       <div class="page page-wide">
         <div class="row-between wrap" style="margin-bottom:20px;">
-          <p style="color:var(--tx2);font-size:13.5px;line-height:1.6;margin:0;max-width:58ch;">The outlets feeding the desk. Collection runs every enabled method per source and merges the results — add, edit, disable or test any source without touching code.</p>
+          <p style="color:var(--tx2);font-size:13.5px;line-height:1.6;margin:0;max-width:58ch;">The outlets feeding the desk. Collection runs every enabled method per source and merges the results, add, edit, disable or test any source without touching code.</p>
           <button id="addSourceBtn" class="btn btn-primary" style="padding:11px 18px;white-space:nowrap;">+ Add source</button>
         </div>
 
@@ -253,7 +253,7 @@ export function mountSources(root) {
           // now names the offending field (see app/api/error_handlers.py),
           // so this surfaces "methods: Field required" rather than a
           // generic "couldn't save".
-          showError("Couldn't save — " + fmtErr(err));
+          showError("Couldn't save: " + fmtErr(err));
         } finally {
           saveBtn.disabled = false;
         }

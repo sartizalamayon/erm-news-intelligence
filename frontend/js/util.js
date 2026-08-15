@@ -206,7 +206,7 @@ export function errorBanner(message, { retryAction } = {}) {
 export function notWiredBanner(endpointLabel) {
   return `<div class="banner banner-info"><span>&#9432;</span><div style="flex:1">This screen calls <code class="mono">${escapeHtml(
     endpointLabel
-  )}</code>, which isn't implemented on the API yet. Once ADMIN-API/FE-WIRE ship it, this screen will populate automatically — no frontend change needed.</div></div>`;
+  )}</code>, which isn't implemented on the API yet. Once ADMIN-API/FE-WIRE ship it, this screen will populate automatically, no frontend change needed.</div></div>`;
 }
 
 export function fmtErr(err) {

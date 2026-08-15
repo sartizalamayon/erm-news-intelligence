@@ -132,10 +132,10 @@ export function mountHealth(root) {
       // `res.detail` is already the human sentence ("95 fetched, 95 from
       // today (via daily_star_nodes)") — appending our own rebuild of it
       // printed the same clause twice in one banner.
-      s.testResult = `${src.name} — ${res.detail || `${res.fetched} fetched, ${res.today} from today (via ${res.method})`}`;
+      s.testResult = `${src.name}: ${res.detail || `${res.fetched} fetched, ${res.today} from today (via ${res.method})`}`;
       s.testOk = !!res.ok;
     } catch (err) {
-      s.testResult = `${src.name} — ${fmtErr(err)}`;
+      s.testResult = `${src.name}: ${fmtErr(err)}`;
       s.testOk = false;
     }
     s.busySource = null;
@@ -153,7 +153,7 @@ export function mountHealth(root) {
       // building our own copy and appending it printed every check
       // twice in one banner. Prefer the server's, which also carries
       // the item counts.
-      s.testResult = `Diagnosis: ${src.name} — ${
+      s.testResult = `Diagnosis for ${src.name}: ${
         res.detail ||
         `reachable ${mark(res.reachable)} · feed discovery ${mark(res.feed_discovery_ok)} · article URLs ${mark(
           res.article_url_found
@@ -161,7 +161,7 @@ export function mountHealth(root) {
       }`;
       s.testOk = res.reachable && res.feed_discovery_ok && res.article_url_found && res.date_parse_ok;
     } catch (err) {
-      s.testResult = `${src.name} — ${fmtErr(err)}`;
+      s.testResult = `${src.name}: ${fmtErr(err)}`;
       s.testOk = false;
     }
     s.busySource = null;
@@ -256,7 +256,7 @@ export function mountHealth(root) {
         <div class="table-wrap" style="margin-bottom:16px;">
           <div style="padding:20px 22px 14px;">
             <h3 style="margin-bottom:4px;">Source health</h3>
-            <p class="hint" style="margin:0;">"No articles" can mean a quiet day or a broken parser — the note tells you which.</p>
+            <p class="hint" style="margin:0;">"No articles" can mean a quiet day or a broken parser. The note tells you which.</p>
           </div>
           <div class="table-head-row health-cols" style="border-top:1px solid var(--line);">
             <div class="table-th">Source</div><div class="table-th">Method</div><div class="table-th">Got</div><div class="table-th">Kept</div><div class="table-th">Status</div><div class="table-th" style="text-align:right;">Actions</div>
