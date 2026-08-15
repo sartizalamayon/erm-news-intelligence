@@ -29,9 +29,23 @@ export const ROUTABLE_SCREENS = [
   "sources",
   "keywords",
   "prompts",
-  "health",
   "manual",
 ];
+
+/**
+ * Paths that no longer have a screen of their own, and where they went.
+ *
+ * `/health` was the Source health screen. It is now part of Sources, and
+ * its pipeline-stage controls moved to Run collection. The path stays
+ * resolvable because people bookmark admin pages and paste them to each
+ * other: dropping it outright would send every existing link to the
+ * Dashboard with no explanation. `screenForPath` resolves these to the
+ * new screen, and the shell then rewrites the address bar (replaceState,
+ * so Back does not walk into the dead path).
+ *
+ * Delete an entry once the old link is safely out of circulation.
+ */
+export const LEGACY_PATHS = { health: "sources" };
 
 export const DEFAULT_SCREEN = "dash";
 export const DASH_MODES = ["short", "long"];
@@ -65,6 +79,9 @@ export function screenForPath(pathname) {
     .split("/")
     .filter(Boolean);
   const [head, sub] = parts;
+  if (head && Object.hasOwn(LEGACY_PATHS, head)) {
+    return { screen: LEGACY_PATHS[head], dashMode: DEFAULT_DASH_MODE };
+  }
   if (!head || !ROUTABLE_SCREENS.includes(head)) {
     return { screen: DEFAULT_SCREEN, dashMode: DEFAULT_DASH_MODE };
   }
@@ -88,7 +105,7 @@ export function screenForPath(pathname) {
  * @param {{ is_admin?: boolean } | null} user
  */
 export function canAccess(screen, user) {
-  const adminOnly = new Set(["run", "sources", "keywords", "prompts", "health"]);
+  const adminOnly = new Set(["run", "sources", "keywords", "prompts"]);
   if (!adminOnly.has(screen)) return true;
   return !!(user && user.is_admin);
 }

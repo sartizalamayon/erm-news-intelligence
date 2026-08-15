@@ -60,6 +60,10 @@ button { font-family: inherit; }
 .btn-sm { padding: 5px 11px; border: 1px solid var(--line2); border-radius: 6px; background: var(--raise); color: var(--tx2); font-size: 11px; font-weight: 500; }
 .btn-sm:hover { color: var(--actx); border-color: var(--ac2); }
 .btn-sm-danger:hover { color: var(--red); border-color: var(--red); }
+/* Selected state for a btn-sm used as a filter chip. Without it the
+   active filter is indistinguishable from the others and the table
+   silently hides rows with nothing on screen explaining why. */
+.btn-sm-on { background: var(--acsoft); border-color: var(--acline); color: var(--actx); }
 .icon-btn {
   width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 9px;
   background: var(--panel); color: var(--tx2); cursor: pointer; font-size: 13px;
@@ -115,6 +119,10 @@ button { font-family: inherit; }
 .banner-error { border: 1px solid var(--red); background: var(--redsoft); color: var(--red); }
 .banner-info { border: 1px solid var(--acline); background: var(--acsoft); color: var(--tx2); }
 .banner-ok { border: 1px solid var(--green); background: var(--greensoft); }
+/* Degraded, not failed: one part of a screen is unavailable while the
+   rest still works. Distinct from banner-error, which means the screen
+   has nothing to show. */
+.banner-warn { border: 1px solid var(--amber); background: color-mix(in oklab, var(--amber) 12%, transparent); color: var(--amber); }
 
 /* ── Login ───────────────────────────────────────────────────────── */
 .login-screen {
@@ -368,9 +376,13 @@ button { font-family: inherit; }
 .table-th { font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 1.4px; text-transform: uppercase; color: var(--tx3); }
 .table-row { display: grid; gap: 14px; align-items: center; padding: 12px 22px; border-bottom: 1px solid var(--line); }
 .table-row:hover { background: var(--hover); }
-.sources-cols { grid-template-columns: 1.6fr 2fr .5fr .9fr 1.4fr; }
+/* Sources carries the merged record + health columns (see
+   frontend/js/screens/sources.js): name, methods, lang, last-run counts,
+   status, actions. The old `.health-cols` grid went with the screen it
+   belonged to. Actions are widest because the row now carries five of
+   them (test, diagnose, edit, toggle, delete). */
+.sources-cols { grid-template-columns: 1.5fr 1.5fr .4fr .9fr .9fr 1.9fr; }
 .keywords-cols { grid-template-columns: 1.3fr 1.3fr .8fr .8fr; }
-.health-cols { grid-template-columns: 1.4fr .9fr .6fr .6fr 2fr .9fr; }
 .runs-cols { grid-template-columns: 1.2fr .8fr .6fr .6fr .8fr; }
 
 /* ── Manual / phase strip ────────────────────────────────────────── */

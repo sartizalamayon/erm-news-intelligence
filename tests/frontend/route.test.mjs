@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import {
   DEFAULT_DASH_MODE,
   DEFAULT_SCREEN,
+  LEGACY_PATHS,
   ROUTABLE_SCREENS,
   canAccess,
   pathForScreen,
@@ -75,6 +76,35 @@ test("a null or undefined path does not throw", () => {
   assert.equal(screenForPath(undefined).screen, DEFAULT_SCREEN);
 });
 
+// ── retired paths ────────────────────────────────────────────────────────
+
+test("a retired path resolves to the screen that absorbed it", () => {
+  // /health was Source health. It is now part of Sources. Admin pages
+  // get bookmarked and pasted between people, so the old path has to
+  // land somewhere correct rather than silently on the Dashboard.
+  assert.equal(screenForPath("/health").screen, "sources");
+  assert.equal(screenForPath("/health/").screen, "sources");
+});
+
+test("every retired path points at a screen that still exists", () => {
+  // Guards the rename-and-forget case: retiring a screen twice would
+  // otherwise leave a redirect aimed at nothing, which resolves to the
+  // Dashboard and looks exactly like the bug this map prevents.
+  for (const [from, to] of Object.entries(LEGACY_PATHS)) {
+    assert.ok(ROUTABLE_SCREENS.includes(to), `${from} redirects to unroutable ${to}`);
+    assert.ok(!ROUTABLE_SCREENS.includes(from), `${from} is both retired and routable`);
+  }
+});
+
+test("a retired path is rewritten rather than kept in the address bar", () => {
+  // The shell compares pathForScreen(resolved) with the current path and
+  // replaceState()s when they differ. That only works if the retired
+  // path is NOT what pathForScreen produces for the new screen.
+  for (const [from, to] of Object.entries(LEGACY_PATHS)) {
+    assert.notEqual(pathForScreen(to), `/${from}`);
+  }
+});
+
 // ── canAccess ────────────────────────────────────────────────────────────
 
 test("admin screens are closed to non-admins", () => {
@@ -82,7 +112,7 @@ test("admin screens are closed to non-admins", () => {
   // non-admin typing /sources would mount an admin screen whose API
   // calls then 403, rendering a broken page instead of a redirect.
   const analyst = { is_admin: false };
-  for (const key of ["run", "sources", "keywords", "prompts", "health"]) {
+  for (const key of ["run", "sources", "keywords", "prompts"]) {
     assert.equal(canAccess(key, analyst), false, `analyst must not reach ${key}`);
     assert.equal(canAccess(key, null), false, `signed-out must not reach ${key}`);
     assert.equal(canAccess(key, { is_admin: true }), true, `admin must reach ${key}`);

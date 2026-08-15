@@ -114,6 +114,18 @@ export function mountRun(root) {
       <p class="hint" id="runPanelHint" style="margin:0 0 10px;"></p>
       <div class="stack" style="gap:0;" id="runRows"></div>
     </div>
+
+    <div class="card" style="margin-top:16px;">
+      <h3 style="margin:0 0 4px;">Re-run one AI stage</h3>
+      <p class="hint" style="margin:0 0 12px;">
+        The Enrich phase above runs all five stages in order. Use these when you changed guidance
+        for a single stage and want to redo just that one over today's articles.
+        A single stage runs in the foreground and can take a few minutes on a large day,
+        so the button stays disabled until it finishes.
+      </p>
+      <div id="stageGrid" class="grid-3"></div>
+      <p class="hint" id="stageHint" style="margin:12px 0 0;"></p>
+    </div>
   </div>`;
 
   const runBtn = root.querySelector("#runBtn");
@@ -124,6 +136,8 @@ export function mountRun(root) {
   const elapsedEl = root.querySelector("#runElapsed");
   const hintEl = root.querySelector("#runPanelHint");
   const idleHint = root.querySelector("#runIdleHint");
+  const stageGrid = root.querySelector("#stageGrid");
+  const stageHint = root.querySelector("#stageHint");
 
   root.querySelectorAll("[data-phase]").forEach((cb) => {
     cb.addEventListener("change", () => {
@@ -132,6 +146,97 @@ export function mountRun(root) {
   });
   runBtn.addEventListener("click", startRun);
   resetBtn.addEventListener("click", resetToday);
+
+  // ── single-stage re-runs ─────────────────────────────────────────────
+  //
+  // These moved here from the Source health screen. They were on a page
+  // about OUTLETS, so an admin hunting a broken source had to scroll
+  // past five pipeline controls to reach the source table, and an admin
+  // wanting to redo one stage had to leave the run page to find them.
+  //
+  // The endpoint (POST /health/pipeline/stages/{key}/run) is synchronous
+  // by design: it predates the background runner and blocks until the
+  // stage finishes. The old screen hid that and used window.alert() for
+  // both success and failure, so a judge stage over a large day looked
+  // like a hung page. Here the button says what it is doing and the
+  // outcome lands inline.
+
+  async function loadStages() {
+    try {
+      const o = await api.get("/health/overview");
+      if (!alive) return;
+      renderStages(o.stages || []);
+    } catch (err) {
+      if (!alive) return;
+      stageHint.textContent = "Couldn't load the stage list: " + fmtErr(err);
+    }
+  }
+
+  function renderStages(stages) {
+    stageGrid.innerHTML = "";
+    for (const st of stages) {
+      const card = document.createElement("div");
+      card.dataset.stageKey = st.key;
+      const err = st.status === "error";
+      const done = st.status === "done";
+      card.style.cssText = `display:flex;gap:13px;padding:15px 16px;border:1px solid ${
+        err ? "var(--red)" : "var(--line)"
+      };border-radius:12px;background:var(--panel2);`;
+      card.innerHTML = `
+        <div style="flex:0 0 30px;height:30px;border-radius:9px;display:grid;place-items:center;font-size:12.5px;font-weight:700;color:var(--onac);background:${
+          err ? "var(--red)" : "var(--ac)"
+        };">${escapeHtml(String(st.key || "?")[0].toUpperCase())}</div>
+        <div style="flex:1;min-width:0;">
+          <div class="row" style="gap:8px;">
+            <div style="font-size:13.5px;font-weight:600;letter-spacing:-.2px;">${escapeHtml(st.name)}</div>
+            <span class="mono" style="font-size:9px;letter-spacing:.8px;text-transform:uppercase;padding:2px 7px;border-radius:999px;background:${
+              err ? "var(--redsoft)" : done ? "var(--acsoft)" : "var(--gridline)"
+            };color:${err ? "var(--red)" : done ? "var(--actx)" : "var(--tx3)"};">${escapeHtml(
+              String(st.status || "").replace("_", " ")
+            )}</span>
+          </div>
+          <div style="font-size:11.5px;color:var(--tx3);line-height:1.45;margin-top:4px;">${escapeHtml(st.desc || "")}</div>
+          ${
+            st.detail
+              ? `<div class="mono" style="font-size:10.5px;color:${err ? "var(--red)" : "var(--tx3)"};margin-top:4px;">${escapeHtml(st.detail)}</div>`
+              : ""
+          }
+          <button class="btn-sm" data-run-stage="${escapeHtml(st.key)}" style="margin-top:10px;">${done ? "Run again" : "Run now"}</button>
+        </div>`;
+      stageGrid.appendChild(card);
+    }
+    stageGrid.querySelectorAll("[data-run-stage]").forEach((b) =>
+      b.addEventListener("click", () => runOneStage(b.getAttribute("data-run-stage"), b))
+    );
+    setStageButtonsDisabled(busy);
+  }
+
+  function setStageButtonsDisabled(disabled) {
+    stageGrid.querySelectorAll("[data-run-stage]").forEach((b) => {
+      b.disabled = disabled;
+    });
+  }
+
+  async function runOneStage(key, btn) {
+    if (busy) return;
+    busy = true;
+    setStageButtonsDisabled(true);
+    runBtn.disabled = true;
+    const label = btn.textContent;
+    btn.textContent = "Running…";
+    stageHint.textContent = `${key} is running. This blocks until the stage finishes.`;
+    try {
+      const res = await api.post(`/health/pipeline/stages/${key}/run`);
+      stageHint.textContent = `${key}: ${res.detail || res.status || "done"}`;
+    } catch (err) {
+      stageHint.textContent = `${key} failed: ${fmtErr(err)}`;
+    } finally {
+      btn.textContent = label;
+      busy = false;
+      runBtn.disabled = false;
+      await loadStages();
+    }
+  }
 
   // ── row construction (once per run) ──────────────────────────────────
 
@@ -331,6 +436,10 @@ export function mountRun(root) {
     root.querySelectorAll("[data-phase]").forEach((cb) => {
       cb.disabled = running;
     });
+    // A single-stage re-run against articles a full run is concurrently
+    // rewriting is a race with no useful outcome, so the stage buttons
+    // follow the same lock as everything else on this screen.
+    setStageButtonsDisabled(running);
   }
 
   function tickElapsed() {
@@ -395,6 +504,7 @@ export function mountRun(root) {
   // this screen mid-run shows progress without waiting a tick), then
   // re-draw whenever the shell's poller publishes a new one.
   renderFromState();
+  loadStages();
   unsubscribe = subscribe(renderFromState);
   // Nudge the shared poller once on mount so a stale snapshot isn't
   // shown for up to a full interval. This is one request, not a loop.

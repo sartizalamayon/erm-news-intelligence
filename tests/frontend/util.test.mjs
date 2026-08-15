@@ -10,7 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { escapeHtml, formatNumber, pctOfMax, pctOfTotal, poly, tier } from "../../frontend/js/util.js";
+import { escapeHtml, fmtTimestamp, formatNumber, pctOfMax, pctOfTotal, poly, tier } from "../../frontend/js/util.js";
 
 // ── escapeHtml ───────────────────────────────────────────────────────────
 
@@ -111,4 +111,27 @@ test("poly handles a flat series without dividing by a zero range", () => {
 test("poly handles the empty and single-value cases", () => {
   assert.doesNotThrow(() => poly([], 100, 26, false));
   assert.doesNotThrow(() => poly([1], 100, 26, false));
+});
+
+// ── fmtTimestamp ─────────────────────────────────────────────────────────
+
+test("fmtTimestamp turns an API timestamp into something readable", () => {
+  // The run-history table printed the raw value, so every row read
+  // "2026-08-14T23:36:05.053681+06:00" in a column whose only job is
+  // to say which run this was.
+  const out = fmtTimestamp("2026-08-14T23:36:05.053681+06:00");
+  assert.ok(!out.includes("T"), `still ISO: ${out}`);
+  assert.ok(!out.includes("053681"), `microseconds survived: ${out}`);
+  assert.match(out, /Aug/);
+  assert.match(out, /\d{2}:\d{2}/);
+});
+
+test("fmtTimestamp never renders Invalid Date where a time belongs", () => {
+  // A blank cell is honest. "Invalid Date" looks like a crash.
+  assert.equal(fmtTimestamp(""), "");
+  assert.equal(fmtTimestamp(null), "");
+  assert.equal(fmtTimestamp(undefined), "");
+  for (const junk of ["not-a-date", "0000", "{}"]) {
+    assert.ok(!/Invalid Date/.test(fmtTimestamp(junk)), junk);
+  }
 });

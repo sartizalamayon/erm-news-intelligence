@@ -49,10 +49,9 @@ export const SCREEN_TITLES = {
   search: ["Search archive", "Every article ever collected"],
   manual: ["How it works", "The four phases, explained"],
   run: ["Run collection", "Administration · fetch, match and enrich today's news"],
-  sources: ["Sources", "Administration · outlets and methods"],
+  sources: ["Sources", "Administration · outlets, methods and fetch health"],
   keywords: ["Keywords", "Administration · bilingual search terms"],
   prompts: ["AI prompts", "Administration · scoring guidance and examples"],
-  health: ["Source health", "Administration · fetch status and run history"],
 };
 
 export const NAV_STRUCTURE = [
@@ -73,7 +72,6 @@ export const NAV_STRUCTURE = [
       { key: "sources", label: "Sources", icon: "⌸" },
       { key: "keywords", label: "Keywords", icon: "⌗" },
       { key: "prompts", label: "AI prompts", icon: "◈" },
-      { key: "health", label: "Source health", icon: "⚙" },
     ],
   },
   {

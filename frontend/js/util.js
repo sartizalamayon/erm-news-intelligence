@@ -106,6 +106,31 @@ export function formatNumber(n) {
   return v.toLocaleString("en-US");
 }
 
+/**
+ * A timestamp a person can read, from an ISO string.
+ *
+ * The run-history table printed the API's raw value, so every row read
+ * "2026-08-14T23:36:05.053681+06:00". That is six digits of microsecond
+ * precision and a UTC offset in a column whose only job is to answer
+ * "which run was this". Comparing two rows meant parsing them by eye.
+ *
+ * Returns "" for a missing value and the input unchanged if it will not
+ * parse, because showing something unrecognised beats showing "Invalid
+ * Date" where a timestamp belongs.
+ */
+export function fmtTimestamp(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  return d.toLocaleString("en-GB", {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
 // Real maxima, computed from the actual data set — NOT the prototype's
 // hardcoded-denominator bugs (frontend-contract.md §8 item 4:
 // `standing[].width` / 214 and `candidates[].barWidth` / 12).

@@ -65,7 +65,7 @@ export function mountManual(root) {
       { l: "ID scan", n: 3, w: "17%", note: "Walks article numbers one by one. Slow but misses nothing." },
     ];
     const risks = [
-      { icon: "&#10005;", color: "var(--red)", title: "The site blocks us", note: "Shows as an error on Source health. Usually fixed by switching that source to Google News." },
+      { icon: "&#10005;", color: "var(--red)", title: "The site blocks us", note: "Shows as an error on the Sources page. Usually fixed by switching that source to Google News." },
       { icon: "&#10005;", color: "var(--red)", title: "No readable date", note: "The article is dropped because we can't tell if it's from today. Needs a parser fix." },
       { icon: "&#9680;", color: "var(--amber)", title: "Quiet day", note: "Nothing published, nothing wrong. The page says “no articles today” rather than an error." },
     ];
@@ -103,7 +103,7 @@ export function mountManual(root) {
       </div>
       <div class="banner banner-info" style="margin-bottom:0;">
         <span>i</span>
-        <div style="flex:1;">If a source shows <b style="color:var(--tx);">no articles today</b> on the Source health page, that usually means a quiet news day, not a fault. The page tells you which of the two it is.</div>
+        <div style="flex:1;">If a source shows <b style="color:var(--tx);">no articles today</b> on the Sources page, that usually means a quiet news day, not a fault. The page tells you which of the two it is.</div>
       </div>
     </div>`;
   }

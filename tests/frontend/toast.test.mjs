@@ -12,9 +12,34 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 
 import { resultToast } from "../../frontend/js/components/toast.js";
+
+const SCREENS_DIR = new URL("../../frontend/js/screens/", import.meta.url).pathname;
+
+/**
+ * Every screen that renders a test result, discovered rather than
+ * listed. The original version of these tests hardcoded
+ * ["health.js", "sources.js"]; when those two screens were merged the
+ * tests failed on a missing FILE rather than on a real regression, which
+ * is the wrong failure to get from a guard. Discovery means the rules
+ * below automatically cover whatever screen adopts the toast next.
+ */
+function screensUsingToast() {
+  const out = [];
+  for (const name of readdirSync(SCREENS_DIR)) {
+    if (!name.endsWith(".js")) continue;
+    const src = readFileSync(SCREENS_DIR + name, "utf8");
+    if (src.includes("resultToast(")) out.push([name, src]);
+  }
+  return out;
+}
+
+test("at least one screen actually renders a result toast", () => {
+  // Otherwise the two guards below pass vacuously forever.
+  assert.ok(screensUsingToast().length >= 1, "no screen imports resultToast");
+});
 
 test("renders nothing when there is nothing to say", () => {
   assert.equal(resultToast({ message: null }), "");
@@ -56,15 +81,15 @@ test("is announced to assistive technology", () => {
   assert.match(html, /aria-live="polite"/);
 });
 
-test("both screens that show a test result use the shared component", () => {
+test("no screen hand-rolls the banner alongside the shared component", () => {
   // Guards the actual regression: two hand-written copies drifting, so
-  // a fix landed in one and not the other.
-  for (const rel of ["health.js", "sources.js"]) {
-    const src = readFileSync(new URL(`../../frontend/js/screens/${rel}`, import.meta.url).pathname, "utf8");
-    assert.ok(src.includes("resultToast("), `${rel} must render via the shared toast`);
+  // a fix landed in one and not the other. The two screens have since
+  // been merged into one, which removes the drift at the source, but the
+  // rule still has to hold for whatever adopts the toast next.
+  for (const [rel, src] of screensUsingToast()) {
     assert.ok(
       !/class="banner \$\{s\.testOk/.test(src),
-      `${rel} still hand-rolls the banner — that is how the two copies drifted`
+      `${rel} still hand-rolls the banner, which is how the two copies drifted`
     );
   }
 });
@@ -78,11 +103,11 @@ test("test-result messages prefer the server's sentence instead of rebuilding it
   //
   // The correct shape is `res.detail || <fallback>`. The broken shape
   // concatenates: `... ${res.detail ? " · " + res.detail : ""}`.
-  for (const rel of ["health.js", "sources.js"]) {
-    const src = readFileSync(new URL(`../../frontend/js/screens/${rel}`, import.meta.url).pathname, "utf8");
+  for (const [rel, src] of screensUsingToast()) {
+    if (!src.includes("res.detail")) continue; // screen shows a different kind of result
     assert.ok(
       !/res\.detail\s*\?\s*"\s*·\s*"\s*\+\s*res\.detail/.test(src),
-      `${rel} appends res.detail to a rebuilt sentence — that prints the same clause twice`
+      `${rel} appends res.detail to a rebuilt sentence, which prints the same clause twice`
     );
     assert.match(src, /res\.detail\s*\|\|/, `${rel} should prefer res.detail`);
   }
