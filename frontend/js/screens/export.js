@@ -67,6 +67,7 @@ const FORMATS = [
 export function mountExport(root) {
   let alive = true;
   const s = {
+    presetNaming: false, // inline "name this preset" field, replaces window.prompt
     filter: "topn",
     topN: 25,
     scope: "today",
@@ -176,12 +177,24 @@ export function mountExport(root) {
     render();
   }
 
-  async function savePreset() {
-    const name = window.prompt("Name this preset:");
-    if (!name) return;
+  /**
+   * Save the current selections as a named preset.
+   *
+   * The name used to come from window.prompt(). An unstyled modal that
+   * some embeds suppress outright is a poor fit for the one control on
+   * this screen that creates something persistent, and the screen
+   * already has an inline note slot for every other outcome.
+   */
+  async function savePreset(name) {
+    const trimmed = String(name ?? "").trim();
+    if (!trimmed) {
+      s.note = "Give the preset a name first.";
+      return render();
+    }
     try {
-      await api.post("/export/presets", { name, ...params() });
-      s.note = "✓ Saved as a preset";
+      await api.post("/export/presets", { name: trimmed, ...params() });
+      s.note = "Saved as a preset.";
+      s.presetNaming = false;
       loadPresets();
     } catch (err) {
       s.note = "Couldn't save preset: " + fmtErr(err);
@@ -338,7 +351,15 @@ export function mountExport(root) {
               <button id="doExportBtn" class="btn btn-primary" style="width:100%;margin-top:14px;padding:13px 20px;font-size:14px;" ${
                 !rows || s.exporting ? "disabled" : ""
               }>&#8595; ${s.exporting ? "Preparing…" : "Download " + (s.format === "xlsx" ? "Excel" : "CSV")}</button>
-              <button id="savePresetBtn" class="btn btn-outline" style="width:100%;margin-top:8px;padding:11px 20px;font-size:13px;">Save as a preset</button>
+              ${
+                s.presetNaming
+                  ? `<div class="row" style="gap:6px;margin-top:8px;">
+                      <input id="presetNameInput" class="text-input" style="flex:1;padding:9px 11px;font-size:12.5px;" placeholder="Preset name" aria-label="Preset name" />
+                      <button id="presetSaveBtn" class="btn btn-primary" style="padding:9px 14px;font-size:12.5px;">Save</button>
+                      <button id="presetCancelBtn" class="btn btn-outline" style="padding:9px 12px;font-size:12.5px;">Cancel</button>
+                    </div>`
+                  : `<button id="savePresetBtn" class="btn btn-outline" style="width:100%;margin-top:8px;padding:11px 20px;font-size:13px;">Save as a preset</button>`
+              }
               ${s.note ? `<div style="margin-top:12px;font-size:12px;color:var(--actx);text-align:center;">${escapeHtml(s.note)}</div>` : ""}
             </div>
 
@@ -423,7 +444,30 @@ export function mountExport(root) {
     const doExportBtn = root.querySelector("#doExportBtn");
     if (doExportBtn) doExportBtn.addEventListener("click", doExport);
     const savePresetBtn = root.querySelector("#savePresetBtn");
-    if (savePresetBtn) savePresetBtn.addEventListener("click", savePreset);
+    if (savePresetBtn)
+      savePresetBtn.addEventListener("click", () => {
+        s.presetNaming = true;
+        render();
+        root.querySelector("#presetNameInput")?.focus();
+      });
+    const presetNameInput = root.querySelector("#presetNameInput");
+    if (presetNameInput)
+      presetNameInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") savePreset(e.target.value);
+        if (e.key === "Escape") {
+          s.presetNaming = false;
+          render();
+        }
+      });
+    const presetSaveBtn = root.querySelector("#presetSaveBtn");
+    if (presetSaveBtn)
+      presetSaveBtn.addEventListener("click", () => savePreset(root.querySelector("#presetNameInput").value));
+    const presetCancelBtn = root.querySelector("#presetCancelBtn");
+    if (presetCancelBtn)
+      presetCancelBtn.addEventListener("click", () => {
+        s.presetNaming = false;
+        render();
+      });
     root.querySelectorAll("[data-preset]").forEach((b) => b.addEventListener("click", () => loadPreset(s.presets[Number(b.getAttribute("data-preset"))])));
   }
 

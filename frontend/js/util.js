@@ -270,9 +270,6 @@ export function debounce(fn, ms) {
 export function qs(root, sel) {
   return root.querySelector(sel);
 }
-export function qsa(root, sel) {
-  return Array.from(root.querySelectorAll(sel));
-}
 
 export function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
@@ -309,16 +306,6 @@ export function skeletonRows(n, height = 14) {
   return Array.from({ length: n })
     .map(() => `<div class="skel skel-row" style="height:${height}px;width:${60 + Math.round(Math.random() * 35)}%"></div>`)
     .join("");
-}
-
-export function emptyState(title, body, actionHtml = "") {
-  return `<div class="state-block"><div class="state-title">${escapeHtml(title)}</div><p class="state-body">${escapeHtml(body)}</p>${actionHtml}</div>`;
-}
-
-export function errorBanner(message, { retryAction } = {}) {
-  return `<div class="banner banner-error"><span>&#10005;</span><div style="flex:1">${escapeHtml(message)}</div>${
-    retryAction ? `<button class="btn-ghost" data-action="${retryAction}" style="color:var(--red);text-decoration:underline;">Retry</button>` : ""
-  }</div>`;
 }
 
 // Renders a friendly message for an endpoint that does not exist yet on

@@ -67,3 +67,32 @@ test("no em dash or en dash in user-facing text", () => {
 // programmatic uses that no regex can tell apart from display text.
 // The em/en dash rule above already covers every placeholder that
 // actually rendered, so the extra check bought nothing and cost signal.
+
+// ── modal browser dialogs ────────────────────────────────────────────────
+
+test("no screen collects input or reports failure through a browser dialog", () => {
+  // window.alert and window.prompt are unstyled, modal, and suppressed
+  // outright in some embeds, so a rejected save could look like a dead
+  // button and a rename could look like a no-op. They were also used
+  // inconsistently: the same screens already had inline note slots for
+  // their SUCCESS paths while failures went to an alert.
+  //
+  // window.confirm is deliberately still allowed. It guards destructive
+  // actions (delete a source, delete a key, reset the day), where a
+  // blocking modal that cannot be missed is the point.
+  const offenders = [];
+  for (const { rel, lines } of FILES) {
+    lines.forEach((line, i) => {
+      if (isComment(line)) return;
+      if (/window\.(alert|prompt)\s*\(/.test(line)) {
+        offenders.push(`${rel}:${i + 1}  ${line.trim().slice(0, 90)}`);
+      }
+    });
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    "Use an inline note or an inline field instead. window.confirm is still fine for destructive actions:\n  " +
+      offenders.join("\n  ")
+  );
+});

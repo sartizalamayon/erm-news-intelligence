@@ -55,6 +55,13 @@ export function mountKeywords(root) {
     addFormSectionMode: "existing", // "existing" | "new"
     rematching: false,
     rematchNote: "",
+    // General inline feedback. This screen already had two note slots
+    // (rematchNote, ioNote) while its errors went to window.alert, so
+    // half the outcomes appeared on the page and half in a modal the
+    // browser can suppress. One more slot, and no alerts.
+    note: "",
+    noteOk: true,
+    renaming: false, // inline rename form for the active section
     exporting: false,
     importing: false,
     ioNote: "",
@@ -112,6 +119,17 @@ export function mountKeywords(root) {
     }
   }
 
+  function flash(message, ok = true) {
+    s.note = message;
+    s.noteOk = ok;
+    render();
+    setTimeout(() => {
+      if (!alive) return;
+      s.note = "";
+      render();
+    }, 3200);
+  }
+
   async function remove(row) {
     if (!window.confirm(`Delete "${row.term_en || row.term_bn}"?`)) return;
     try {
@@ -119,7 +137,7 @@ export function mountKeywords(root) {
       loadRows();
       loadSections();
     } catch (err) {
-      window.alert("Couldn't delete: " + fmtErr(err));
+      flash("Couldn't delete: " + fmtErr(err), false);
     }
   }
 
@@ -137,20 +155,33 @@ export function mountKeywords(root) {
     render();
   }
 
-  async function renameActiveSection() {
+  /**
+   * Rename the active section.
+   *
+   * This used window.prompt(). Renaming a section re-files every
+   * keyword under it, which is a bulk data change, and a native prompt
+   * is an unstyled modal that some embeds suppress outright: the button
+   * would then look dead. The name also arrives unvalidated, so a
+   * stray space or an empty string silently became a new section.
+   */
+  async function renameActiveSection(nextRaw) {
     if (!s.activeSection) return;
-    const next = window.prompt(`Rename section "${s.activeSection}" to:`, s.activeSection);
-    if (next === null) return;
-    const trimmed = next.trim();
-    if (trimmed === s.activeSection) return;
+    const trimmed = String(nextRaw ?? "").trim();
+    if (!trimmed) return flash("A section needs a name.", false);
+    if (trimmed === s.activeSection) {
+      s.renaming = false;
+      return render();
+    }
     try {
       const sections = await api.patch(`/keywords/sections/${encodeURIComponent(s.activeSection)}`, { name: trimmed });
       s.sections = sections || [];
       s.activeSection = trimmed === "" ? "Uncategorized" : trimmed;
       if (!s.sections.some((t) => t.section === s.activeSection)) s.activeSection = s.sections[0]?.section || null;
+      s.renaming = false;
       loadRows();
+      flash(`Renamed to "${s.activeSection}".`);
     } catch (err) {
-      window.alert("Couldn't rename section: " + fmtErr(err));
+      flash("Couldn't rename section: " + fmtErr(err), false);
     }
   }
 
@@ -244,6 +275,7 @@ export function mountKeywords(root) {
           </div>
         </div>
 
+        ${s.note ? `<div class="banner ${s.noteOk ? "banner-ok" : "banner-error"}"><span>${s.noteOk ? "&#10003;" : "&#10005;"}</span><div style="flex:1;">${escapeHtml(s.note)}</div></div>` : ""}
         ${s.rematchNote ? `<div class="banner banner-info">${escapeHtml(s.rematchNote)}</div>` : ""}
         ${s.ioNote ? `<div class="banner banner-info">${escapeHtml(s.ioNote)}</div>` : ""}
 
@@ -261,8 +293,18 @@ export function mountKeywords(root) {
                 )
                 .join("")}
               ${
-                s.activeSection
+                s.activeSection && !s.renaming
                   ? `<button id="kwRenameSectionBtn" class="btn-sm" title="Rename this section">rename "${escapeHtml(s.activeSection)}"</button>`
+                  : ""
+              }
+              ${
+                s.activeSection && s.renaming
+                  ? `<span class="row" style="gap:6px;align-items:center;">
+                      <input id="kwRenameInput" class="text-input" style="padding:5px 9px;font-size:12px;width:180px;"
+                             value="${escapeHtml(s.activeSection)}" aria-label="New section name" />
+                      <button id="kwRenameSaveBtn" class="btn-sm btn-sm-on">save</button>
+                      <button id="kwRenameCancelBtn" class="btn-sm">cancel</button>
+                    </span>`
                   : ""
               }
             </div>`
@@ -361,7 +403,35 @@ export function mountKeywords(root) {
     const rematchBtn = root.querySelector("#rematchBtn");
     if (rematchBtn) rematchBtn.addEventListener("click", rematch);
     const renameBtn = root.querySelector("#kwRenameSectionBtn");
-    if (renameBtn) renameBtn.addEventListener("click", renameActiveSection);
+    if (renameBtn)
+      renameBtn.addEventListener("click", () => {
+        s.renaming = true;
+        render();
+        const box = root.querySelector("#kwRenameInput");
+        if (box) {
+          box.focus();
+          box.select();
+        }
+      });
+    const renameInput = root.querySelector("#kwRenameInput");
+    if (renameInput) {
+      renameInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") renameActiveSection(e.target.value);
+        if (e.key === "Escape") {
+          s.renaming = false;
+          render();
+        }
+      });
+    }
+    const renameSave = root.querySelector("#kwRenameSaveBtn");
+    if (renameSave)
+      renameSave.addEventListener("click", () => renameActiveSection(root.querySelector("#kwRenameInput").value));
+    const renameCancel = root.querySelector("#kwRenameCancelBtn");
+    if (renameCancel)
+      renameCancel.addEventListener("click", () => {
+        s.renaming = false;
+        render();
+      });
 
     const exportBtn = root.querySelector("#kwExportBtn");
     if (exportBtn) exportBtn.addEventListener("click", exportXlsx);
@@ -399,8 +469,8 @@ export function mountKeywords(root) {
             : root.querySelector("#kwFormSection").value;
         const term_en = root.querySelector("#kwFormEn").value.trim();
         const term_bn = root.querySelector("#kwFormBn").value.trim();
-        if (!term_en && !term_bn) return window.alert("Enter at least one of English/Bengali.");
-        if (s.addFormSectionMode === "new" && !section) return window.alert("Enter a name for the new section.");
+        if (!term_en && !term_bn) return flash("Enter at least one of English or Bengali.", false);
+        if (s.addFormSectionMode === "new" && !section) return flash("Enter a name for the new section.", false);
         try {
           await api.post("/keywords", { section: section || null, term_en, term_bn, enabled: true });
           s.addingOpen = false;
@@ -409,7 +479,7 @@ export function mountKeywords(root) {
           loadRows();
           loadSections();
         } catch (err) {
-          window.alert("Couldn't save: " + fmtErr(err));
+          flash("Couldn't save: " + fmtErr(err), false);
         }
       });
     const cancelBtn = root.querySelector("#kwFormCancel");
