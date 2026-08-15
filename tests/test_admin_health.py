@@ -82,14 +82,36 @@ def _insert_run(
 
 # ── health_sources / health_overview / health_runs ───────────────────────
 
+def _with_plugin(conn, source: dict) -> dict:
+    """Give a test source a `registry_key`, i.e. a fetch plugin.
+
+    `create_source` cannot assign one: it is the admin "Add source"
+    flow, and there is no plugin in the code registry for an outlet
+    nobody has written a fetcher for yet. Collection iterates the CODE
+    registry and uses the `sources` table only to VETO
+    (app.services.collector.enabled_source_classes), so a row with a
+    NULL registry_key is skipped by every run and can never return an
+    article. health_sources reports that as an error, which is why
+    these fixtures have to say which of their sources are real.
+    """
+    conn.execute(
+        "UPDATE sources SET registry_key = %s WHERE id = %s",
+        (f"test_{source['id']}", source["id"]),
+    )
+    return source
+
+
+
 
 def test_health_sources_maps_run_details_to_status_and_note() -> None:
     with migrated_schema() as conn:
-        admin_service.create_source(conn, name="Healthy Outlet", methods=["sitemap"], enabled=True)
-        admin_service.create_source(conn, name="Quiet Outlet", methods=["rss"], enabled=True)
-        admin_service.create_source(conn, name="Broken Outlet", methods=["api"], enabled=True)
-        admin_service.create_source(conn, name="Off Outlet", methods=["rss"], enabled=False)
-        admin_service.create_source(conn, name="Zero Fetch Outlet", methods=["id_enum"], enabled=True)
+        _with_plugin(conn, admin_service.create_source(conn, name="Healthy Outlet", methods=["sitemap"], enabled=True))
+        _with_plugin(conn, admin_service.create_source(conn, name="Quiet Outlet", methods=["rss"], enabled=True))
+        _with_plugin(conn, admin_service.create_source(conn, name="Broken Outlet", methods=["api"], enabled=True))
+        _with_plugin(conn, admin_service.create_source(conn, name="Off Outlet", methods=["rss"], enabled=False))
+        _with_plugin(
+            conn, admin_service.create_source(conn, name="Zero Fetch Outlet", methods=["id_enum"], enabled=True)
+        )
         _insert_run(
             conn,
             details={
@@ -117,10 +139,58 @@ def test_health_sources_maps_run_details_to_status_and_note() -> None:
         assert rows["Zero Fetch Outlet"]["note"]
 
 
+def test_health_sources_flags_a_source_with_no_fetch_plugin() -> None:
+    """A source with a NULL `registry_key` has no entry in the code
+    registry, and collection iterates that registry
+    (app.services.collector.enabled_source_classes), so the row is
+    skipped by every run and can never return an article.
+
+    It used to fall through to the "no run data yet" default, which is
+    the QUIET-DAY wording. That is exactly the confusion this column
+    exists to resolve: the Sources screen tells the operator that "no
+    articles" means either a quiet day or a broken source, and the note
+    is meant to say which. Six of the seeded rows are in this state, so
+    the KPI strip read "0 need attention" while six sources were
+    structurally incapable of producing anything.
+    """
+    with migrated_schema() as conn:
+        _with_plugin(conn, admin_service.create_source(conn, name="Real Outlet", methods=["rss"], enabled=True))
+        # No _with_plugin: this is the "added via the admin UI, no
+        # fetcher written for it" case, which is how such rows appear.
+        admin_service.create_source(conn, name="Plugin-less Outlet", methods=["rss"], enabled=True)
+        _insert_run(conn, details={"Real Outlet": {"status": "ok", "fetched": 9, "inserted": 4, "error": None}})
+        conn.commit()
+
+        rows = {r["name"]: r for r in admin_service.health_sources(conn)}
+        assert rows["Real Outlet"]["status"] == "healthy"
+
+        broken = rows["Plugin-less Outlet"]
+        assert broken["status"] == "error"
+        assert "no fetch plugin" in broken["note"]
+        assert "no run data yet" not in broken["note"], "must not read like a quiet day"
+
+        # And it has to reach the KPI strip, or the operator never looks.
+        overview = admin_service.health_overview(conn)
+        assert overview["needs_attention"] == 1
+        assert overview["healthy"] == 1
+
+
+def test_health_sources_prefers_disabled_over_missing_plugin() -> None:
+    """A source that is BOTH disabled and plugin-less reads as disabled.
+    An operator who turned something off does not need to be told it
+    also lacks a fetcher; re-enabling it is what would surface that.
+    """
+    with migrated_schema() as conn:
+        admin_service.create_source(conn, name="Off And Plugin-less", methods=["rss"], enabled=False)
+        conn.commit()
+        row = {r["name"]: r for r in admin_service.health_sources(conn)}["Off And Plugin-less"]
+        assert row["status"] == "disabled"
+
+
 def test_health_overview_computes_real_kpis_not_hardcoded() -> None:
     with migrated_schema() as conn:
-        admin_service.create_source(conn, name="A", methods=["rss"], enabled=True)
-        admin_service.create_source(conn, name="B", methods=["rss"], enabled=True)
+        _with_plugin(conn, admin_service.create_source(conn, name="A", methods=["rss"], enabled=True))
+        _with_plugin(conn, admin_service.create_source(conn, name="B", methods=["rss"], enabled=True))
         _insert_run(
             conn,
             details={
@@ -355,7 +425,7 @@ def test_router_health_overview_sources_runs_end_to_end(monkeypatch: pytest.Monk
     with migrated_schema() as conn:
         import app.api.routers.health as health_router_module
 
-        admin_service.create_source(conn, name="A", methods=["rss"])
+        _with_plugin(conn, admin_service.create_source(conn, name="A", methods=["rss"]))
         _insert_run(conn, details={"A": {"status": "ok", "fetched": 5, "inserted": 5, "error": None}}, total_matched=2)
         conn.commit()
 

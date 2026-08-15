@@ -232,13 +232,27 @@ export function mountDashboard(root, { navigate }) {
 
     const funnel = data.funnel || [];
     const funnelFills = ["var(--tx4)", "var(--ac)", "var(--ac3)", "var(--green)"];
-    const phase1 = funnel[0] ? Number(String(funnel[0].value).replace(/,/g, "")) || 1 : 1;
+    // Phase 1 is the denominator for every bar below it.
+    //
+    // This used to read `Number(...) || 1`, meant as a divide-by-zero
+    // guard. But 0 is falsy, so on a day before the first run the
+    // denominator became 1 and "Approved for export: 5" computed
+    // sqrt(5/1) * 100 = 224% — a bar overflowing its track, sitting
+    // next to a label reading "0%". Those 5 approvals are of articles
+    // fetched on EARLIER days, so they are not a fraction of today's
+    // fetch at all; the honest drawing is an empty funnel.
+    const phase1 = funnel[0] ? Number(String(funnel[0].value).replace(/,/g, "")) || 0 : 0;
     const funnelHtml = funnel.length
       ? funnel
           .map((f, i) => {
             const v = Number(String(f.value).replace(/,/g, "")) || 0;
-            const linear = phase1 ? v / phase1 : 0;
-            const width = Math.max(6, Math.round(Math.sqrt(linear) * 100)) + "%";
+            // sqrt keeps the small stages visible in a funnel whose top
+            // is thousands and whose bottom is single digits. Clamped,
+            // because a ratio above 1 is a bug rather than a wide bar,
+            // and a genuine zero draws nothing rather than a stub that
+            // reads as "some".
+            const linear = phase1 > 0 ? Math.min(1, v / phase1) : 0;
+            const width = (v > 0 && phase1 > 0 ? Math.max(6, Math.round(Math.sqrt(linear) * 100)) : 0) + "%";
             return `
         <div>
           <div class="row-between" style="margin-bottom:6px;">

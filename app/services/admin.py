@@ -1858,6 +1858,24 @@ def health_sources(conn: DictConnection) -> list[dict[str, Any]]:
         inserted = int(d.get("inserted", 0))
         if not source["enabled"]:
             status, note = "disabled", "source disabled"
+        elif not source.get("registry_key"):
+            # No fetch plugin is registered for this source, so a
+            # collection run skips it entirely and it can NEVER return an
+            # article. Six enabled sources are in this state
+            # (migrations/0014's own note), and they used to fall through
+            # to the "no run data yet" default below, which is the
+            # quiet-day wording. That is precisely the confusion this
+            # column exists to resolve: the Sources screen tells the
+            # operator that "no articles" means either a quiet day or a
+            # broken source, and the note is supposed to say which.
+            # Reading "no run data yet" against a source that is
+            # structurally incapable of ever producing data is worse than
+            # saying nothing.
+            #
+            # `error`, not `quiet`: it needs fixing, and the dashboard
+            # already excludes these six from its "45 sources ready"
+            # denominator for the same reason.
+            status, note = "error", "no fetch plugin registered, collection runs skip this source"
         elif status_raw == "failed":
             status, note = "error", f"error: {d.get('error', '')}"
         elif status_raw == "ok" and fetched > 0 and inserted == 0:
