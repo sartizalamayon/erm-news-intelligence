@@ -29,6 +29,7 @@ export const ROUTABLE_SCREENS = [
   "sources",
   "keywords",
   "prompts",
+  "models",
   "manual",
 ];
 
@@ -105,7 +106,7 @@ export function screenForPath(pathname) {
  * @param {{ is_admin?: boolean } | null} user
  */
 export function canAccess(screen, user) {
-  const adminOnly = new Set(["run", "sources", "keywords", "prompts"]);
+  const adminOnly = new Set(["run", "sources", "keywords", "prompts", "models"]);
   if (!adminOnly.has(screen)) return true;
   return !!(user && user.is_admin);
 }

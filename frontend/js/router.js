@@ -8,6 +8,7 @@ import { mountSearch } from "./screens/search.js";
 import { mountSources } from "./screens/sources.js";
 import { mountKeywords } from "./screens/keywords.js";
 import { mountPrompts } from "./screens/prompts.js";
+import { mountModels } from "./screens/models.js";
 import { mountManual } from "./screens/manual.js";
 import { mountRun } from "./screens/run.js";
 
@@ -19,6 +20,7 @@ const SCREENS = {
   sources: mountSources,
   keywords: mountKeywords,
   prompts: mountPrompts,
+  models: mountModels,
   manual: mountManual,
   run: mountRun,
 };

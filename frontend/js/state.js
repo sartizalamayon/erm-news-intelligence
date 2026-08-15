@@ -52,6 +52,7 @@ export const SCREEN_TITLES = {
   sources: ["Sources", "Administration · outlets, methods and fetch health"],
   keywords: ["Keywords", "Administration · bilingual search terms"],
   prompts: ["AI prompts", "Administration · scoring guidance and examples"],
+  models: ["AI models", "Administration · providers, keys and per-feature routing"],
 };
 
 export const NAV_STRUCTURE = [
@@ -72,6 +73,7 @@ export const NAV_STRUCTURE = [
       { key: "sources", label: "Sources", icon: "⌸" },
       { key: "keywords", label: "Keywords", icon: "⌗" },
       { key: "prompts", label: "AI prompts", icon: "◈" },
+      { key: "models", label: "AI models", icon: "⌘" },
     ],
   },
   {
