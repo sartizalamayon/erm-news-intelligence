@@ -271,10 +271,28 @@ class SourceFilterOut(BaseModel):
     count: int
 
 
+class DayCountOut(BaseModel):
+    """How many articles match the CURRENT filters on one day.
+
+    The review queue groups by date, and its group headers used to show
+    `group.items.length` — the number of that day's rows inside the
+    loaded page, not the number that exist. With a 200-row page sorted
+    by relevance, 14 August displayed "44" while 543 articles actually
+    matched. The header looked like a fact about the day and was really
+    a fact about pagination.
+    """
+
+    date: str
+    count: int
+
+
 class ArticleListOut(BaseModel):
     items: list[ArticleOut]
     total: int
     sources: list[SourceFilterOut]
+    # True per-day totals for the active filters, independent of
+    # limit/offset. See DayCountOut.
+    days: list[DayCountOut] = Field(default_factory=list)
 
 
 class ArticlePatchIn(BaseModel):

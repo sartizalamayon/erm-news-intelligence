@@ -84,6 +84,7 @@ from app.api.schemas.core import (
     ArticlePatchIn,
     BulkActionIn,
     BulkActionOut,
+    DayCountOut,
     DupOut,
     SourceFilterOut,
     TopicPeerOut,
@@ -477,6 +478,16 @@ def list_articles(
         total_row = conn.execute(f"SELECT count(*) AS n FROM {FROM_LIST} WHERE {full_where}", full_params).fetchone()
         total = total_row["n"] if total_row else 0
 
+        # TRUE per-day counts, same filters as `total`, independent of
+        # paging. The list groups by date, and its headers previously
+        # counted only the rows on the loaded page — "44" on a day that
+        # really had 543. One grouped aggregate, not a per-day query.
+        day_rows = conn.execute(
+            f"SELECT a.day AS d, count(*) AS n FROM {FROM_LIST} WHERE {full_where} GROUP BY a.day ORDER BY a.day DESC",
+            full_params,
+        ).fetchall()
+        days = [DayCountOut(date=r["d"].isoformat() if r["d"] else "", count=r["n"]) for r in day_rows]
+
         rows = _fetch_rows(
             conn,
             status=status,
@@ -496,7 +507,7 @@ def list_articles(
         )
         items = _enrich_and_build(conn, rows, detail=False)
 
-    return ArticleListOut(items=items, total=total, sources=sources)
+    return ArticleListOut(items=items, total=total, sources=sources, days=days)
 
 
 @router.get("/{article_id}", response_model=ArticleOut)

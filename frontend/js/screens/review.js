@@ -60,7 +60,10 @@ export function mountReview(root, { navigate }) {
   let alive = true;
   const s = {
     q: "",
-    sort: "relevance",
+    // Newest-first by default. Relevance ordering interleaves days, so
+    // the date grouping (and its counts) read as noise; sorting by date
+    // makes the groups mean something. Relevance is one click away.
+    sort: "date",
     scoreMin: 1,
     scoreMax: 10,
     dateFrom: "",
@@ -78,6 +81,9 @@ export function mountReview(root, { navigate }) {
     items: [],
     sources: [],
     total: 0,
+    dayCounts: [], // TRUE per-day totals from the API, not the loaded slice
+    collapsedDays: new Set(),
+    detailOpen: true, // the reading pane; collapsible so the queue can use the full width
     loading: true,
     loadingMore: false,
     bulkBusy: false,
@@ -117,6 +123,7 @@ export function mountReview(root, { navigate }) {
       s.items = append ? s.items.concat(newItems) : newItems;
       s.sources = (data && data.sources) || [];
       s.total = (data && data.total) || 0;
+      s.dayCounts = (data && data.days) || [];
       s.loading = false;
       s.loadingMore = false;
       if (s.selId && !s.items.some((a) => a.id === s.selId)) s.selId = null;
@@ -256,7 +263,42 @@ export function mountReview(root, { navigate }) {
     fetchList();
   }
 
+  // Re-rendering replaces the whole subtree, which DESTROYS whatever
+  // element currently has focus. Typing in the queue filter called
+  // fetchList() -> render(), so the input the user was mid-word in was
+  // torn out from under them: focus lost, caret gone, and the field
+  // appearing to "not work". Same root cause as the run panel's scroll
+  // reset. Identity is captured before the swap and restored after.
+  function captureFocus() {
+    const el = document.activeElement;
+    if (!el || !root.contains(el)) return null;
+    const key = el.getAttribute("data-role") || el.id;
+    if (!key) return null;
+    return {
+      key,
+      start: typeof el.selectionStart === "number" ? el.selectionStart : null,
+      end: typeof el.selectionEnd === "number" ? el.selectionEnd : null,
+    };
+  }
+
+  function restoreFocus(snap) {
+    if (!snap) return;
+    const el = root.querySelector(`[data-role="${snap.key}"]`) || root.querySelector(`#${CSS.escape(snap.key)}`);
+    if (!el) return;
+    el.focus({ preventScroll: true });
+    if (snap.start !== null && typeof el.setSelectionRange === "function") {
+      try {
+        el.setSelectionRange(snap.start, snap.end);
+      } catch {
+        // Some input types (date, range) reject setSelectionRange.
+      }
+    }
+  }
+
   function render() {
+    const focusSnap = captureFocus();
+    const listEl = root.querySelector('[data-role="queue-list"]');
+    const listScroll = listEl ? listEl.scrollTop : 0;
     const cur = s.items.find((a) => a.id === s.selId) || null;
     const hasMore = !s.topN && !s.loading && s.items.length < s.total;
     const allShownChecked = s.items.length > 0 && s.items.every((a) => s.checked.has(a.id));
@@ -375,7 +417,7 @@ export function mountReview(root, { navigate }) {
         ${s.error ? errorRow(s.error) : ""}
 
         <div class="review-body">
-          <div class="review-list-pane">
+          <div class="review-list-pane" data-role="queue-list">
             <div class="review-list-head">
               <label style="display:flex;align-items:center;gap:9px;cursor:pointer;">
                 <div class="article-check ${allShownChecked ? "checked" : ""}" data-select-all><span>&#10003;</span></div>
@@ -392,13 +434,43 @@ export function mountReview(root, { navigate }) {
             }
             ${s.items.length && !s.loading && !hasMore ? `<div class="end-of-queue">end of queue</div>` : ""}
           </div>
-          <div class="review-detail-pane">
-            ${renderDetail(cur)}
-          </div>
+          ${
+            s.detailOpen
+              ? `<div class="review-detail-pane" data-role="detail-pane">
+                   <div style="display:flex;justify-content:flex-end;padding:8px 12px 0;">
+                     <button id="collapseDetailBtn" class="btn-ghost" title="Collapse the reading pane"
+                             aria-label="Collapse the reading pane" style="font-size:12px;">&#10005; Hide</button>
+                   </div>
+                   ${renderDetail(cur)}
+                 </div>`
+              : `<button id="expandDetailBtn" class="btn-ghost" title="Show the reading pane"
+                         aria-label="Show the reading pane"
+                         style="align-self:flex-start;margin:10px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;">
+                   &#8592; Show article
+                 </button>`
+          }
         </div>
       </div>
     `;
+    const collapseDetail = root.querySelector("#collapseDetailBtn");
+    if (collapseDetail) collapseDetail.addEventListener("click", () => { s.detailOpen = false; render(); });
+    const expandDetail = root.querySelector("#expandDetailBtn");
+    if (expandDetail) expandDetail.addEventListener("click", () => { s.detailOpen = true; render(); });
+
+    root.querySelectorAll("[data-toggle-day]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const day = btn.getAttribute("data-toggle-day");
+        if (s.collapsedDays.has(day)) s.collapsedDays.delete(day);
+        else s.collapsedDays.add(day);
+        render();
+      });
+    });
     bind();
+    restoreFocus(focusSnap);
+    const newList = root.querySelector('[data-role="queue-list"]');
+    // Without this the list jumps to the top on every poll/patch —
+    // losing your place mid-triage.
+    if (newList && listScroll) newList.scrollTop = listScroll;
   }
 
   function errorRow(err) {
@@ -447,17 +519,37 @@ export function mountReview(root, { navigate }) {
         <button id="resetFiltersBtn" class="btn btn-outline">Reset filters</button>
       </div>`;
     }
+    // `trueCount` comes from the API's per-day aggregate, NOT from the
+    // rows on this page. The header used to print `group.items.length`,
+    // so a 200-row page sorted by relevance showed "42" above a day
+    // that actually held 543 matched articles — a number that looked
+    // like a fact about the day and was really a fact about paging.
+    const trueCounts = new Map((s.dayCounts || []).map((d) => [d.date, d.count]));
     return groupByDate(s.items)
-      .map(
-        (group) => `
+      .map((group) => {
+        const collapsed = s.collapsedDays.has(group.date);
+        const trueCount = trueCounts.get(group.date);
+        const loaded = group.items.length;
+        // Show "42 of 543" whenever the page holds only part of a day,
+        // so the gap is visible instead of silently misleading.
+        const countLabel =
+          trueCount !== undefined && trueCount > loaded
+            ? `${formatNumber(loaded)} of ${formatNumber(trueCount)}`
+            : formatNumber(trueCount ?? loaded);
+        return `
         <div class="date-group">
-          <div class="date-group-header">
-            <span>${escapeHtml(fmtDateHeader(group.date))}</span>
-            <span class="mono" style="font-size:10px;color:var(--tx4);">${group.items.length}</span>
-          </div>
-          ${group.items.map((a) => articleRowHtml(a)).join("")}
-        </div>`
-      )
+          <button class="date-group-header" data-toggle-day="${escapeHtml(group.date)}"
+                  aria-expanded="${collapsed ? "false" : "true"}"
+                  style="width:100%;background:none;border:0;cursor:pointer;font:inherit;color:inherit;text-align:left;">
+            <span style="display:inline-flex;align-items:center;gap:7px;">
+              <span style="display:inline-block;width:9px;transition:transform .15s;transform:rotate(${collapsed ? -90 : 0}deg);">&#9662;</span>
+              ${escapeHtml(fmtDateHeader(group.date))}
+            </span>
+            <span class="mono" style="font-size:10px;color:var(--tx4);">${escapeHtml(countLabel)}</span>
+          </button>
+          ${collapsed ? "" : group.items.map((a) => articleRowHtml(a)).join("")}
+        </div>`;
+      })
       .join("");
   }
 
