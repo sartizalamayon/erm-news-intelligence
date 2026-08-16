@@ -62,6 +62,7 @@ export function mountKeywords(root) {
     note: "",
     noteOk: true,
     renaming: false, // inline rename form for the active section
+    formatOpen: false, // import-format disclosure
     exporting: false,
     importing: false,
     ioNote: "",
@@ -255,6 +256,63 @@ export function mountKeywords(root) {
     render();
   }
 
+  /**
+   * What the importer actually accepts.
+   *
+   * Nothing on this screen said. "Import .xlsx" tells you the file
+   * extension and nothing else: not which columns, not which are
+   * required, not what happens to rows you leave out. The honest
+   * answers all exist in app.services.admin.import_keywords_xlsx and
+   * were simply never surfaced, so the only way to learn the format was
+   * to guess, fail, and read a 422.
+   *
+   * A disclosure panel rather than a title tooltip: a tooltip is
+   * invisible to touch and to keyboard users, and this is reference
+   * text people need to READ while building a file, not a hint they
+   * glance at.
+   */
+  function formatHelp() {
+    const col = (name, req, desc) =>
+      `<tr>
+        <td style="padding:5px 12px 5px 0;"><span class="mono" style="font-size:11.5px;color:var(--actx);">${name}</span></td>
+        <td style="padding:5px 12px 5px 0;font-size:11px;color:${req ? "var(--amber)" : "var(--tx4)"};white-space:nowrap;">${req ? "required" : "optional"}</td>
+        <td style="padding:5px 0;font-size:12px;color:var(--tx2);line-height:1.5;">${desc}</td>
+      </tr>`;
+    return `<div id="kwFormatHelp" class="card" style="margin-bottom:16px;">
+      <div class="row-between" style="margin-bottom:4px;">
+        <h3 style="margin:0;">Import format</h3>
+        <button id="kwFormatClose" class="btn-sm">close</button>
+      </div>
+      <p class="hint" style="margin:0 0 14px;">
+        One sheet, one keyword per row, with a header row naming the columns. The quickest way to
+        get a correct file is Export .xlsx, edit it, and import it back: the export is exactly this shape.
+      </p>
+      <div style="overflow-x:auto;">
+        <table style="border-collapse:collapse;width:100%;">
+          <thead>
+            <tr style="border-bottom:1px solid var(--line);">
+              <th class="mono" style="text-align:left;padding:0 12px 7px 0;font-size:9px;letter-spacing:1.3px;text-transform:uppercase;color:var(--tx3);font-weight:400;">Column</th>
+              <th class="mono" style="text-align:left;padding:0 12px 7px 0;font-size:9px;letter-spacing:1.3px;text-transform:uppercase;color:var(--tx3);font-weight:400;">Needed</th>
+              <th class="mono" style="text-align:left;padding:0 0 7px;font-size:9px;letter-spacing:1.3px;text-transform:uppercase;color:var(--tx3);font-weight:400;">Meaning</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${col("term_en", true, "The English term. May be left blank on a row that has a Bengali term, but the column itself must exist.")}
+            ${col("term_bn", true, "The Bengali term. Same rule as above.")}
+            ${col("section", false, "Risk section, for example Geopolitical. A blank lands the keyword in Uncategorized.")}
+            ${col("enabled", false, "Blank counts as on. Only <span class=\"mono\">false</span>, <span class=\"mono\">0</span>, <span class=\"mono\">no</span>, <span class=\"mono\">n</span> or <span class=\"mono\">off</span> turn a keyword off.")}
+            ${col("id", false, "Leave it alone if the row came from an export. It is how an existing keyword is matched and updated in place.")}
+          </tbody>
+        </table>
+      </div>
+      <div style="margin-top:14px;padding-top:13px;border-top:1px solid var(--line);font-size:12px;color:var(--tx2);line-height:1.65;">
+        <div style="margin-bottom:5px;"><b style="color:var(--tx);">Nothing is ever deleted by an import.</b> A keyword missing from your sheet stays exactly as it is, so a filtered or partial file cannot wipe the rest of the list.</div>
+        <div style="margin-bottom:5px;">A row is matched by <span class="mono">id</span> first, then by the combination of section, English term and Bengali term. A match updates that keyword; no match adds a new one.</div>
+        <div>A bad row is reported and skipped rather than failing the whole file. Only a file that is not a real .xlsx, or one missing the two required columns, is rejected outright.</div>
+      </div>
+    </div>`;
+  }
+
   function render() {
     root.innerHTML = `
       <div class="page page-md" style="max-width:1080px;">
@@ -265,6 +323,8 @@ export function mountKeywords(root) {
             <button id="kwImportBtn" class="btn btn-outline" style="padding:11px 16px;white-space:nowrap;" ${s.importing ? "disabled" : ""}>&#8593; ${
       s.importing ? "Importing…" : "Import .xlsx"
     }</button>
+            <button id="kwFormatBtn" class="icon-btn" aria-expanded="${s.formatOpen ? "true" : "false"}"
+                    aria-controls="kwFormatHelp" title="What file format does import expect?">i</button>
             <button id="kwExportBtn" class="btn btn-outline" style="padding:11px 16px;white-space:nowrap;" ${s.exporting ? "disabled" : ""}>&#8595; ${
       s.exporting ? "Exporting…" : "Export .xlsx"
     }</button>
@@ -275,6 +335,7 @@ export function mountKeywords(root) {
           </div>
         </div>
 
+        ${s.formatOpen ? formatHelp() : ""}
         ${s.note ? `<div class="banner ${s.noteOk ? "banner-ok" : "banner-error"}"><span>${s.noteOk ? "&#10003;" : "&#10005;"}</span><div style="flex:1;">${escapeHtml(s.note)}</div></div>` : ""}
         ${s.rematchNote ? `<div class="banner banner-info">${escapeHtml(s.rematchNote)}</div>` : ""}
         ${s.ioNote ? `<div class="banner banner-info">${escapeHtml(s.ioNote)}</div>` : ""}
@@ -402,6 +463,24 @@ export function mountKeywords(root) {
     if (addBtn) addBtn.addEventListener("click", () => { s.addingOpen = true; s.addFormSectionMode = "existing"; render(); });
     const rematchBtn = root.querySelector("#rematchBtn");
     if (rematchBtn) rematchBtn.addEventListener("click", rematch);
+    const formatBtn = root.querySelector("#kwFormatBtn");
+    if (formatBtn)
+      formatBtn.addEventListener("click", () => {
+        s.formatOpen = !s.formatOpen;
+        render();
+        // Move focus to the panel that just appeared, or back to the
+        // trigger when it closes, so a keyboard user is never stranded.
+        const target = s.formatOpen ? root.querySelector("#kwFormatClose") : root.querySelector("#kwFormatBtn");
+        if (target) target.focus();
+      });
+    const formatClose = root.querySelector("#kwFormatClose");
+    if (formatClose)
+      formatClose.addEventListener("click", () => {
+        s.formatOpen = false;
+        render();
+        root.querySelector("#kwFormatBtn")?.focus();
+      });
+
     const renameBtn = root.querySelector("#kwRenameSectionBtn");
     if (renameBtn)
       renameBtn.addEventListener("click", () => {
