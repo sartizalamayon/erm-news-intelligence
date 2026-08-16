@@ -1285,6 +1285,74 @@ def save_provider_definition(
     return _definition_to_dict(definitions[provider])
 
 
+def delete_provider_definition(conn: DictConnection, provider: str) -> bool:
+    """Remove a provider entirely, along with any API keys stored for it.
+
+    Two refusals, both of which produce silent breakage otherwise:
+
+    ROUTED. `load_provider_definitions` returning nothing for a provider
+    makes `_resolve_choice` drop that candidate
+    (app/services/llm/registry.py). Delete one that a feature routes to
+    and the stage keeps "working" right up until it runs, then fails
+    inside a background thread with no candidates. The caller has to
+    re-point the route first.
+
+    THE LAST ONE. `load_provider_definitions` ends with
+    `return out or dict(DEFAULT_PROVIDER_DEFINITIONS)`, so an empty
+    stored map falls back to the five built-in definitions. Deleting the
+    final provider would therefore appear to succeed and then resurrect
+    everything on the next read, which looks like the delete silently
+    failed. Refused explicitly rather than left as a trap.
+
+    Keys go with the definition. Leaving `llm_provider_credentials:x`
+    behind after removing `x` orphans encrypted secrets in the settings
+    table that nothing reads and no screen can show, so nobody would
+    ever know to rotate them.
+    """
+    from app.services.llm.provider_registry import remove_all_provider_credentials as _remove_creds
+    from app.services.llm.provider_registry import save_provider_definitions as _save
+
+    definitions = load_provider_definitions(conn)
+    # False, not an exception: `update_source` above sets the convention
+    # that "no such row" is a return value the router turns into a 404,
+    # while ValidationError means "the row exists but this is not
+    # allowed" and maps to 422 (app/api/error_handlers.py).
+    if provider not in definitions:
+        return False
+
+    routed = _features_routed_to(conn, provider)
+    if routed:
+        raise ValidationError(
+            f"{provider} still handles " + ", ".join(routed) + ". Point those at another provider first."
+        )
+    if len(definitions) <= 1:
+        raise ValidationError(
+            f"{provider} is the only provider left. Removing it would restore the built-in defaults, "
+            "so add a replacement first."
+        )
+
+    _remove_creds(conn, provider)
+    del definitions[provider]
+    _save(conn, definitions)
+    conn.commit()
+    return True
+
+
+def _features_routed_to(conn: DictConnection, provider: str) -> list[str]:
+    """Feature names whose primary or fallback points at `provider`."""
+    from app.services.llm.routing import FEATURES, load_routing_config
+
+    config = load_routing_config(conn)
+    hits = []
+    for feature in FEATURES:
+        route = config.route_for(feature)
+        for choice in (route.primary, route.secondary):
+            if choice is not None and choice.provider == provider:
+                hits.append(feature.replace("_", " "))
+                break
+    return hits
+
+
 def list_provider_credentials(conn: DictConnection, provider: str) -> list[dict[str, Any]]:
     """Masked suffix only (ADR §9.1) — `load_provider_credentials`
     returns DECRYPTED keys for the LLM client's own use; this admin-facing

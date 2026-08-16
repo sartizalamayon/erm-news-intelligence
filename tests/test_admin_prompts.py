@@ -456,6 +456,98 @@ def test_save_provider_definition_adds_a_brand_new_provider_with_no_code_change(
         assert "groq" in reloaded  # existing defaults are preserved, not wiped
 
 
+def test_delete_provider_definition_removes_it_and_its_stored_keys() -> None:
+    """Deleting a provider takes its API keys with it.
+
+    Leaving `llm_provider_credentials:<provider>` behind after the
+    definition is gone orphans encrypted secrets in the settings table
+    that nothing reads and no screen can show, so nobody would ever know
+    to rotate them.
+    """
+    with migrated_schema() as conn:
+        _reset_llm_settings(conn)
+        admin_service.save_provider_definition(
+            conn, "spare_vendor", adapter="openai_compatible", base_url="https://x/v1", default_model="m"
+        )
+        admin_service.save_provider_credential(conn, "spare_vendor", "k1", "secret-value-1")
+        assert admin_service.list_provider_credentials(conn, "spare_vendor") != []
+
+        assert admin_service.delete_provider_definition(conn, "spare_vendor") is True
+
+        names = {d["provider"] for d in admin_service.list_provider_definitions(conn)}
+        assert "spare_vendor" not in names
+        assert "mistral" in names, "deleting one provider must not disturb the others"
+        assert admin_service.list_provider_credentials(conn, "spare_vendor") == []
+
+        # The settings ROW must be gone, not left holding "[]". Removing
+        # the keys one at a time would blank it instead, and the table
+        # would then accrete a dead row per provider ever deleted.
+        row = conn.execute(
+            "SELECT count(*) AS n FROM settings WHERE key = %s",
+            ("llm_provider_credentials:spare_vendor",),
+        ).fetchone()
+        assert row["n"] == 0
+
+
+def test_delete_provider_definition_refuses_while_a_feature_still_routes_to_it() -> None:
+    """A missing definition makes `_resolve_choice` drop that candidate
+    silently, so the stage keeps looking fine until it runs and then
+    fails inside a background thread with no candidates left.
+    """
+    with migrated_schema() as conn:
+        _reset_llm_settings(conn)
+        routed = admin_service.get_routing_config(conn)["scoring"]["primary"]["provider"]
+
+        with pytest.raises(ValidationError) as exc:
+            admin_service.delete_provider_definition(conn, routed)
+        assert "scoring" in str(exc.value)
+        assert routed in {d["provider"] for d in admin_service.list_provider_definitions(conn)}
+
+
+def test_delete_provider_definition_refuses_to_remove_the_last_one() -> None:
+    """`load_provider_definitions` ends with
+    `return out or dict(DEFAULT_PROVIDER_DEFINITIONS)`, so an empty
+    stored map silently resurrects all five built-ins. Deleting the last
+    provider would look like it worked and then undo itself.
+
+    Reaching this state through the UI is close to impossible, because
+    routing always names five providers and the routed-guard fires
+    first. It is written directly here for that exact reason: an
+    unreachable guard is still the thing standing between a future
+    caller and a delete that silently reverts.
+    """
+    from app.services.llm.provider_registry import ProviderDefinition, save_provider_definitions
+
+    with migrated_schema() as conn:
+        _reset_llm_settings(conn)
+        save_provider_definitions(
+            conn,
+            {
+                "solo_vendor": ProviderDefinition(
+                    provider="solo_vendor",
+                    adapter="openai_compatible",
+                    base_url="https://x/v1",
+                    default_model="m",
+                    enabled=True,
+                    note="",
+                )
+            },
+        )
+        conn.commit()
+        remaining = [d["provider"] for d in admin_service.list_provider_definitions(conn)]
+        assert remaining == ["solo_vendor"]
+
+        with pytest.raises(ValidationError) as exc:
+            admin_service.delete_provider_definition(conn, "solo_vendor")
+        assert "only provider left" in str(exc.value)
+
+
+def test_delete_provider_definition_reports_an_unknown_name() -> None:
+    with migrated_schema() as conn:
+        _reset_llm_settings(conn)
+        assert admin_service.delete_provider_definition(conn, "never_existed") is False
+
+
 def test_save_provider_definition_openai_compatible_requires_base_url() -> None:
     with migrated_schema() as conn:
         with pytest.raises(ValidationError):

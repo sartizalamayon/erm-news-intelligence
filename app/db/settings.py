@@ -46,3 +46,18 @@ def set_setting(conn: DictConnection, key: str, value: str) -> None:
         """,
         (key, value),
     )
+
+
+def delete_setting(conn: DictConnection, key: str) -> None:
+    """Remove a row outright, rather than blanking its value.
+
+    Needed by deletes over the per-entity keys this table holds
+    (`llm_provider_credentials:<provider>` and friends). Emptying such a
+    row leaves `key = '[]'` behind forever, so the table accretes one
+    dead row per entity ever deleted, and re-creating an entity with the
+    same name silently inherits the stale row.
+
+    A missing key is not an error: delete is idempotent, and callers
+    removing a whole entity should not have to check first.
+    """
+    conn.execute("DELETE FROM settings WHERE key = %s", (key,))

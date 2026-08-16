@@ -231,6 +231,21 @@ def put_provider_definition(
     return ProviderDefinitionOut(**row)
 
 
+@router.delete("/provider-definitions/{provider}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_provider_definition(provider: str, admin: AuthenticatedUser = Depends(require_admin)) -> None:
+    """Remove a provider and its stored API keys.
+
+    Refuses (422, via app.errors.ValidationError) when the provider still
+    handles a routed feature, or when it is the last one left — see
+    `admin_service.delete_provider_definition` for why each of those is a
+    silent-breakage trap rather than a matter of taste.
+    """
+    with get_connection() as conn:
+        existed = admin_service.delete_provider_definition(conn, provider)
+    if not existed:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="provider not found")
+
+
 @router.get("/provider-definitions/{provider}/credentials", response_model=list[ProviderCredentialOut])
 def list_provider_credentials(
     provider: str, admin: AuthenticatedUser = Depends(require_admin)

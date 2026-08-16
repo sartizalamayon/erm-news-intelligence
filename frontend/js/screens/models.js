@@ -13,6 +13,7 @@
 //     { routes: { <feature>: { primary:{provider,model}, secondary:{provider,model}|null } } }
 //   GET  /prompts/provider-definitions
 //   PUT  /prompts/provider-definitions/{provider}     upsert
+//   DELETE   /prompts/provider-definitions/{provider}     removes it + its keys
 //   GET/POST /prompts/provider-definitions/{provider}/credentials
 //   DELETE   /prompts/provider-definitions/{provider}/credentials/{key_id}
 //
@@ -255,6 +256,45 @@ export function mountModels(root) {
     }
   }
 
+  /**
+   * Which routed features point at this provider, if any.
+   *
+   * The server refuses the delete in that case, but saying so BEFORE
+   * the click is what stops the operator from having to guess which of
+   * five features to re-point. Same data the routing warnings use.
+   */
+  function featuresRoutedTo(name) {
+    if (!s.routingDraft) return [];
+    return FEATURES.filter((f) => {
+      const route = s.routingDraft[f];
+      if (!route) return false;
+      return [route.primary, route.secondary].some((t) => t && t.provider === name);
+    }).map(label);
+  }
+
+  async function deleteProvider(p) {
+    const routed = featuresRoutedTo(p.provider);
+    if (routed.length) {
+      return flash(
+        `${p.provider} still handles ${routed.join(", ")}. Point those at another provider first.`,
+        false
+      );
+    }
+    const keys = keyCount(p.provider);
+    const warning =
+      `Delete ${p.provider}?` +
+      (keys ? `\n\nIts ${keys} stored API key${keys === 1 ? "" : "s"} will be deleted too.` : "") +
+      "\n\nThis cannot be undone.";
+    if (!window.confirm(warning)) return;
+    try {
+      await api.delete(`/prompts/provider-definitions/${encodeURIComponent(p.provider)}`);
+      await loadAll();
+      flash(`Deleted ${p.provider}.`, true);
+    } catch (err) {
+      flash(`Couldn't delete ${p.provider}: ` + fmtErr(err), false);
+    }
+  }
+
   async function toggleProviderEnabled(p) {
     try {
       await api.put(`/prompts/provider-definitions/${encodeURIComponent(p.provider)}`, {
@@ -413,6 +453,10 @@ export function mountModels(root) {
   function providerRow(p) {
     if (s.editingProvider === p.provider) return providerForm(p);
     const expanded = s.expandedProvider === p.provider;
+    // Disabled with a reason on hover, rather than enabled and then
+    // rejected by the server: the operator needs to know WHICH features
+    // to re-point, and a 422 after the click does not say.
+    const routedHere = featuresRoutedTo(p.provider);
     return `<div style="border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:13px 15px;">
       <div class="row-between wrap" style="gap:10px;">
         <div style="min-width:0;">
@@ -425,6 +469,8 @@ export function mountModels(root) {
           <button class="btn-sm" data-edit-provider="${escapeHtml(p.provider)}">edit</button>
           <button class="btn-sm" data-toggle-provider="${escapeHtml(p.provider)}">${p.enabled ? "disable" : "enable"}</button>
           <button class="btn-sm" data-credentials-provider="${escapeHtml(p.provider)}">${expanded ? "close" : "keys"}</button>
+          <button class="btn-sm btn-sm-danger" data-delete-provider="${escapeHtml(p.provider)}"
+                  ${routedHere.length ? `disabled title="Still handles ${escapeHtml(routedHere.join(", "))}"` : ""}>delete</button>
         </div>
       </div>
       ${p.base_url ? `<div class="mono" style="font-size:10.5px;color:var(--tx4);margin-top:5px;">${escapeHtml(p.base_url)}</div>` : ""}
@@ -636,6 +682,9 @@ export function mountModels(root) {
     );
     root.querySelectorAll("[data-toggle-provider]").forEach((b) =>
       b.addEventListener("click", () => toggleProviderEnabled(providerByName(b.getAttribute("data-toggle-provider"))))
+    );
+    root.querySelectorAll("[data-delete-provider]").forEach((b) =>
+      b.addEventListener("click", () => deleteProvider(providerByName(b.getAttribute("data-delete-provider"))))
     );
     root.querySelectorAll("[data-credentials-provider]").forEach((b) =>
       b.addEventListener("click", () => {

@@ -43,7 +43,7 @@ from dataclasses import dataclass
 
 from app.db.connection import DictConnection
 from app.db.crypto import decrypt_api_key, encrypt_api_key
-from app.db.settings import get_setting, set_setting
+from app.db.settings import delete_setting, get_setting, set_setting
 from app.errors import ValidationError
 
 PROVIDER_DEFINITIONS_SETTINGS_KEY = "llm_provider_definitions"
@@ -325,3 +325,16 @@ def remove_provider_credential(conn: DictConnection, provider: str, key_id: str)
     stored.pop(key_id, None)
     payload = [{"key_id": k, "ciphertext_hex": v} for k, v in stored.items()]
     set_setting(conn, _credentials_key(provider), json.dumps(payload))
+
+
+def remove_all_provider_credentials(conn: DictConnection, provider: str) -> None:
+    """Drop the whole credentials ROW for `provider`.
+
+    Distinct from calling `remove_provider_credential` for each key,
+    which leaves `llm_provider_credentials:<provider>` behind holding
+    `[]`. That is harmless on its own, but the settings table would
+    accrete one dead row per provider ever deleted, and re-adding a
+    provider of the same name later would silently inherit it. Used when
+    the provider itself is being deleted, never when removing one key.
+    """
+    delete_setting(conn, _credentials_key(provider))
