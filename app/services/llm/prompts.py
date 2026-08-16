@@ -26,6 +26,9 @@ from typing import Any
 
 from app.db.connection import DictConnection
 from app.db.settings import get_setting
+from app.logging import get_logger
+
+logger = get_logger(__name__)
 
 FIXED_GUIDE = (
     "You are a risk analyst at Grameenphone (GP), Bangladesh's largest telecom "
@@ -231,6 +234,23 @@ def build_system_guide(examples: str, guidance: str) -> str:
     return system
 
 
+def _stage_body(instructions: str | None, default: str) -> str:
+    """The editable half of a per-stage system prompt.
+
+    `None` (no DB, or nothing usable stored) means "use the built-in",
+    which is what keeps every stage byte-identical to the frozen contract
+    until somebody actually edits it. A stored value is stripped, and a
+    value that strips to nothing is treated as absent rather than as an
+    instruction to send an empty system prompt — the last-ditch guard
+    behind `stage_prompt_problem`, for the case where a blank slips past
+    it (a stored string of only newlines, say).
+    """
+    if instructions is None:
+        return default
+    stripped = instructions.strip()
+    return stripped or default
+
+
 # ── 1.1 judge() — single-item relevance score. DEAD IN PRODUCTION ──────
 # (p3-contract.md §1.1 / §7 — judge_batch() is the live call site) but
 # documented and implemented in full per the "extract everything
@@ -273,8 +293,25 @@ def judge_batch_prompt(items: list[dict[str, Any]]) -> str:
 
 CLUSTER_TOPICS_NUM_PREDICT = 4096  # llm.py:466-467
 
+# The EDITABLE half of this stage's system prompt (see "Per-stage
+# editable prompts" at the foot of this module). Everything after it —
+# the running list of topics already in use, and the JSON envelope the
+# parser reads — is assembled by code and is NOT editable, because a
+# well-meant rewrite that drops the `{"labels": [...]}` contract does not
+# produce worse topics, it produces NO topics.
+DEFAULT_TOPIC_CLUSTERING_PROMPT = (
+    "You group news headlines by TOPIC for a Bangladesh risk-analysis "
+    "desk. A topic is a real-world theme, BROADER than a single event: "
+    "different events in the same ongoing situation share one topic (e.g. "
+    "a strike, a shipping-lane closure, and an LNG-supply cut during one "
+    "Middle East crisis are ALL \'Middle East / oil\'). Keep genuinely "
+    "unrelated stories in separate topics — do NOT over-merge. Labels are "
+    "SHORT (2-4 words, e.g. \'Middle East / oil\', \'Banking / NPLs\', "
+    "\'GP / spectrum\', \'RMG exports\')."
+)
 
-def cluster_topics_system(known_labels: list[str], n: int) -> str:
+
+def cluster_topics_system(known_labels: list[str], n: int, instructions: str | None = None) -> str:
     known_block = ""
     if known_labels:
         known_block = (
@@ -282,15 +319,9 @@ def cluster_topics_system(known_labels: list[str], n: int) -> str:
             "fits one of these; only invent a new label when none fits):\n"
             + "\n".join(f"- {label}" for label in known_labels)
         )
+    body = _stage_body(instructions, DEFAULT_TOPIC_CLUSTERING_PROMPT)
     return (
-        "You group news headlines by TOPIC for a Bangladesh risk-analysis "
-        "desk. A topic is a real-world theme, BROADER than a single event: "
-        "different events in the same ongoing situation share one topic (e.g. "
-        "a strike, a shipping-lane closure, and an LNG-supply cut during one "
-        "Middle East crisis are ALL \'Middle East / oil\'). Keep genuinely "
-        "unrelated stories in separate topics — do NOT over-merge. Labels are "
-        "SHORT (2-4 words, e.g. \'Middle East / oil\', \'Banking / NPLs\', "
-        "\'GP / spectrum\', \'RMG exports\')." + known_block + "\n\n"
+        body + known_block + "\n\n"
         "Assign EVERY numbered headline a topic label. Return ONLY JSON: "
         '{"labels": [{"n": <number>, "label": "<short label>"}, ...]} '
         f"with one entry per headline ({n} total), no preamble."
@@ -453,14 +484,19 @@ def translate_title_system() -> str:
 # its own terms, just in one request.
 
 
-def translate_titles_batch_system(n: int) -> str:
+DEFAULT_TRANSLATION_PROMPT = (
+    "You translate news headlines to natural English for a "
+    "Bangladesh risk-analysis desk.\n\n"
+    "You will receive a numbered list of headlines in mixed languages "
+    "(mostly Bengali, some already English). Translate EACH one to "
+    "natural English. If a headline is already English, return it "
+    "unchanged."
+)
+
+
+def translate_titles_batch_system(n: int, instructions: str | None = None) -> str:
     return (
-        "You translate news headlines to natural English for a "
-        "Bangladesh risk-analysis desk.\n\n"
-        "You will receive a numbered list of headlines in mixed languages "
-        "(mostly Bengali, some already English). Translate EACH one to "
-        "natural English. If a headline is already English, return it "
-        "unchanged.\n\n"
+        _stage_body(instructions, DEFAULT_TRANSLATION_PROMPT) + "\n\n"
         'Respond ONLY with JSON: {"translations": [{"n": <number>, '
         '"text": "<english headline>"}, ...]} with exactly '
         f"{n} entries, one per input headline, numbered to match. "
@@ -480,23 +516,31 @@ def translate_titles_batch_prompt(titles: list[str]) -> str:
 # surface needing a "summarization" feature slot.
 
 
-def draft_bullet_system() -> str:
-    return (
-        "You write bullets for a Grameenphone Daily Risk Insights brief. "
-        "Rewrite the item as ONE bullet in this exact style: a short bold "
-        "hook of 2-5 words, then \' \u2013 \' (space-endash-space), then ONE "
-        "sentence explaining the RISK SIGNAL for Bangladesh\'s telecom/macro "
-        "environment. If the article text below contains specific NUMBERS, "
-        "FIGURES, or NAMED ENTITIES (amounts, percentages, dates, "
-        "institutions), cite the most important one — don\'t write a vague "
-        "generality when a concrete figure is available. Draw out the "
-        "implication (use framing like \'signalling\', \'indicating\', "
-        "\'reflecting\' where natural). Be concise and analytical. Do NOT "
-        "start with a bullet character. Output only the bullet text.\n"
-        "Example: \'Port policy tension \u2013 Chattogram committee calls to halt "
-        "leasing of two terminals (NCT, CCT), signalling potential delays "
-        "in port modernisation.\'"
-    )
+# Fully editable: unlike every other stage prompt, this one carries no
+# machine-readable envelope - the response is prose. `app.services.brief`
+# splits on the endash separator and, when it is absent, keeps the whole
+# line as the bullet's lead, so even a rewrite that drops the format
+# instruction degrades to a plain bullet rather than an empty brief.
+DEFAULT_SUMMARIZATION_PROMPT = (
+    "You write bullets for a Grameenphone Daily Risk Insights brief. "
+    "Rewrite the item as ONE bullet in this exact style: a short bold "
+    "hook of 2-5 words, then \' \u2013 \' (space-endash-space), then ONE "
+    "sentence explaining the RISK SIGNAL for Bangladesh\'s telecom/macro "
+    "environment. If the article text below contains specific NUMBERS, "
+    "FIGURES, or NAMED ENTITIES (amounts, percentages, dates, "
+    "institutions), cite the most important one — don\'t write a vague "
+    "generality when a concrete figure is available. Draw out the "
+    "implication (use framing like \'signalling\', \'indicating\', "
+    "\'reflecting\' where natural). Be concise and analytical. Do NOT "
+    "start with a bullet character. Output only the bullet text.\n"
+    "Example: \'Port policy tension \u2013 Chattogram committee calls to halt "
+    "leasing of two terminals (NCT, CCT), signalling potential delays "
+    "in port modernisation.\'"
+)
+
+
+def draft_bullet_system(instructions: str | None = None) -> str:
+    return _stage_body(instructions, DEFAULT_SUMMARIZATION_PROMPT)
 
 
 def draft_bullet_prompt(title: str, body: str, section: str) -> str:
@@ -538,19 +582,29 @@ def suggest_guidance_prompt(approved: list[str], rejected: list[str]) -> str:
 # ── 1.10 verify_group() — same-event verification ──────────────────────
 
 
-def verify_group_system() -> str:
+# The EDITABLE half of the duplicate-verification system prompt. The
+# JSON envelope below it is appended by `verify_group_system` and is
+# deliberately out of reach: `parse_verify_group` needs the
+# {"groups": [...]} shape, and without it every article in a proposed
+# group is left ungrouped rather than merely grouped badly.
+DEFAULT_DEDUP_VERIFICATION_PROMPT = (
+    "You decide which news headlines report the EXACT SAME specific event "
+    "(same who, what, and when) — i.e. the same story carried by different "
+    "outlets. Headlines may be English or Bengali; read both carefully.\n\n"
+    "BE CONSERVATIVE. Only group two headlines together if you are confident "
+    "they describe the SAME single event. When in doubt, keep them SEPARATE.\n"
+    "Do NOT group merely because headlines:\n"
+    "- share a topic or theme (e.g. both about the economy, both about Iran),\n"
+    "- mention the same country, person, or organisation,\n"
+    "- use similar words or are both in Bengali.\n"
+    "Different companies, different incidents, different announcements, or "
+    "different days = DIFFERENT events = different groups."
+)
+
+
+def verify_group_system(instructions: str | None = None) -> str:
     return (
-        "You decide which news headlines report the EXACT SAME specific event "
-        "(same who, what, and when) — i.e. the same story carried by different "
-        "outlets. Headlines may be English or Bengali; read both carefully.\n\n"
-        "BE CONSERVATIVE. Only group two headlines together if you are confident "
-        "they describe the SAME single event. When in doubt, keep them SEPARATE.\n"
-        "Do NOT group merely because headlines:\n"
-        "- share a topic or theme (e.g. both about the economy, both about Iran),\n"
-        "- mention the same country, person, or organisation,\n"
-        "- use similar words or are both in Bengali.\n"
-        "Different companies, different incidents, different announcements, or "
-        "different days = DIFFERENT events = different groups.\n\n"
+        _stage_body(instructions, DEFAULT_DEDUP_VERIFICATION_PROMPT) + "\n\n"
         "Assign each headline an integer group id. Headlines that match no other "
         "get their own unique id. Respond ONLY with JSON: "
         '{"groups": [one integer per headline]}. '
@@ -565,3 +619,121 @@ def verify_group_prompt(headlines: list[str]) -> str:
         f"Headlines:\n{numbered}\n\n"
         "Group ONLY headlines that are clearly the same specific event. Default to separate."
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Per-stage editable prompts
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Scoring has had two admin-editable slots (guidance, examples) since
+# legacy. The other four AI stages had their instructions frozen in this
+# file, which meant the only way to change how headlines are translated,
+# how duplicates are judged, how topics are named, or how brief bullets
+# are written was a code deploy.
+#
+# The storage shape here is deliberately the SAME one guidance/examples
+# already use, not a new one: the ACTIVE text lives in a plain
+# `settings` key (below), version history is JSON alongside it under
+# `prompt_versions:{field}`, and `app.services.admin` drives both. So a
+# stage prompt gets version history and "activate a previous version"
+# for free, and there is exactly one mechanism to understand.
+#
+# What is editable is the INSTRUCTION half only. Every stage except
+# summarization appends a machine-readable envelope (the JSON shape its
+# parser reads) that no edit can reach — see each DEFAULT_* constant's
+# own note. The distinction matters: an analyst rewriting the prose gets
+# different judgements, which is the point; an analyst deleting
+# `Return ONLY JSON: {"labels": ...}` would get NO judgements, which is
+# an outage.
+
+TRANSLATION_PROMPT_KEY = "stage_prompt:translation"
+DEDUP_VERIFICATION_PROMPT_KEY = "stage_prompt:dedup_verification"
+TOPIC_CLUSTERING_PROMPT_KEY = "stage_prompt:topic_clustering"
+SUMMARIZATION_PROMPT_KEY = "stage_prompt:summarization"
+
+# Keyed by `app.services.llm.routing`'s feature names, so a stage's
+# prompt and its provider routing are looked up under the same word.
+STAGE_PROMPT_KEYS: dict[str, str] = {
+    "translation": TRANSLATION_PROMPT_KEY,
+    "dedup_verification": DEDUP_VERIFICATION_PROMPT_KEY,
+    "topic_clustering": TOPIC_CLUSTERING_PROMPT_KEY,
+    "summarization": SUMMARIZATION_PROMPT_KEY,
+}
+
+DEFAULT_STAGE_PROMPTS: dict[str, str] = {
+    "translation": DEFAULT_TRANSLATION_PROMPT,
+    "dedup_verification": DEFAULT_DEDUP_VERIFICATION_PROMPT,
+    "topic_clustering": DEFAULT_TOPIC_CLUSTERING_PROMPT,
+    "summarization": DEFAULT_SUMMARIZATION_PROMPT,
+}
+
+# A ceiling, not a style rule. Every one of these prompts is prepended to
+# a batch of headlines and sent on EVERY call of its stage, so a prompt
+# that ran away (a paste of an entire article archive, a runaway edit)
+# would blow the context window on every request for the rest of the day
+# and cost real quota doing it. The built-ins are all under 2,000
+# characters; 20,000 leaves room to be genuinely verbose first.
+MAX_STAGE_PROMPT_CHARS = 20_000
+
+
+def is_stage_prompt_field(field: str) -> bool:
+    return field in STAGE_PROMPT_KEYS
+
+
+def stage_prompt_problem(value: object) -> str:
+    """Why `value` cannot be used as a stage prompt, in words an analyst
+    can act on, or `""` when it is fine.
+
+    Empty is the failure that actually happens: somebody selects all,
+    deletes, and saves before pasting the replacement. Sending an empty
+    system prompt does not degrade the stage, it unmoors it completely,
+    and the damage is silent because the model still answers.
+    """
+    if not isinstance(value, str):
+        return "the saved prompt is not text"
+    if not value.strip():
+        return "the saved prompt is empty"
+    if len(value) > MAX_STAGE_PROMPT_CHARS:
+        return f"the saved prompt is longer than {MAX_STAGE_PROMPT_CHARS:,} characters"
+    return ""
+
+
+def resolve_stage_prompt(conn: DictConnection | None, field: str) -> tuple[str, str]:
+    """`(prompt_text, fallback_reason)` for one stage.
+
+    `fallback_reason` is `""` on the happy path (stored text is usable,
+    or nothing is stored and the built-in is the intended answer) and a
+    plain-English reason when a stored value had to be REJECTED in favour
+    of the built-in. The caller surfaces it; the admin console shows it
+    on the stage's card so a broken save is visible without reading logs.
+    """
+    if not is_stage_prompt_field(field):
+        raise KeyError(f"unknown stage prompt field {field!r}")
+    default = DEFAULT_STAGE_PROMPTS[field]
+    if conn is None:
+        return default, ""
+    stored = get_setting(conn, STAGE_PROMPT_KEYS[field], default="")
+    if not stored:
+        # No row, or a row explicitly cleared to "" — which this codebase
+        # treats as identical to "never configured" everywhere else
+        # (`get_setting`'s own contract; see `_reset_llm_settings` in
+        # tests/test_admin_prompts.py). Not a fallback, just the shipped
+        # default, so it reports no problem: a warning here would appear
+        # on every stage of a fresh install.
+        #
+        # Whitespace, by contrast, is a real save of nothing and falls
+        # through to `stage_prompt_problem` below.
+        return default, ""
+    problem = stage_prompt_problem(stored)
+    if problem:
+        logger.warning(
+            "stage_prompt_fell_back_to_builtin",
+            extra={"field": field, "reason": problem, "stored_length": len(stored)},
+        )
+        return default, problem
+    return stored, ""
+
+
+def get_stage_prompt(conn: DictConnection | None, field: str) -> str:
+    """The text a stage should actually send, built-in or stored."""
+    return resolve_stage_prompt(conn, field)[0]

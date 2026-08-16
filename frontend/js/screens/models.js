@@ -72,6 +72,8 @@ export function mountModels(root) {
     providersError: null,
     credentials: {}, // provider -> [{key_id, api_key_last4}]
     addingProvider: false,
+    probing: null, // provider name currently being probed
+    probeResult: null, // { provider, ok, detail }
     editingProvider: null, // provider name being edited
     expandedProvider: null,
     forbidden: false,
@@ -167,6 +169,7 @@ export function mountModels(root) {
     const p = providerByName(target.provider);
     if (!p) return `provider "${target.provider}" is not defined`;
     if (!p.enabled) return `provider "${target.provider}" is disabled`;
+    if (p.config_problem) return `provider "${target.provider}" is misconfigured`;
     if (keyCount(target.provider) === 0) return `provider "${target.provider}" has no API keys stored`;
     return "";
   }
@@ -270,6 +273,28 @@ export function mountModels(root) {
       if (!route) return false;
       return [route.primary, route.secondary].some((t) => t && t.provider === name);
     }).map(label);
+  }
+
+  /**
+   * Make one real call through this provider and say what happened.
+   *
+   * Until this existed, the only way to discover a broken provider was
+   * to run the pipeline and read the articles. A base_url that 404'd
+   * therefore went unnoticed across a whole day's translation, because
+   * every stage substitutes a neutral default on failure.
+   */
+  async function probeProvider(p) {
+    s.probing = p.provider;
+    s.probeResult = null;
+    render();
+    try {
+      const res = await api.post(`/prompts/provider-definitions/${encodeURIComponent(p.provider)}/probe`);
+      s.probeResult = { provider: p.provider, ok: !!res.ok, detail: res.detail || "" };
+    } catch (err) {
+      s.probeResult = { provider: p.provider, ok: false, detail: fmtErr(err) };
+    }
+    s.probing = null;
+    render();
   }
 
   async function deleteProvider(p) {
@@ -465,6 +490,9 @@ export function mountModels(root) {
         </div>
         <div class="row" style="gap:8px;align-items:center;">
           ${keyBadge(p.provider)}
+          <button class="btn-sm" data-probe-provider="${escapeHtml(p.provider)}" ${s.probing ? "disabled" : ""}>${
+            s.probing === p.provider ? "testing…" : "test"
+          }</button>
           <span class="pill" style="background:${p.enabled ? "var(--acsoft)" : "var(--gridline)"};color:${p.enabled ? "var(--actx)" : "var(--tx3)"};"><span class="pill-dot" style="background:${p.enabled ? "var(--ac2)" : "var(--tx4)"}"></span>${p.enabled ? "enabled" : "disabled"}</span>
           <button class="btn-sm" data-edit-provider="${escapeHtml(p.provider)}">edit</button>
           <button class="btn-sm" data-toggle-provider="${escapeHtml(p.provider)}">${p.enabled ? "disable" : "enable"}</button>
@@ -474,7 +502,20 @@ export function mountModels(root) {
         </div>
       </div>
       ${p.base_url ? `<div class="mono" style="font-size:10.5px;color:var(--tx4);margin-top:5px;">${escapeHtml(p.base_url)}</div>` : ""}
+      ${
+        p.config_problem
+          ? `<div class="banner banner-error" style="margin:8px 0 0;"><span>&#10005;</span><div style="flex:1;font-size:12px;">${escapeHtml(p.config_problem)}</div></div>`
+          : ""
+      }
       ${p.note ? `<div style="font-size:11.5px;color:var(--tx3);margin-top:6px;line-height:1.5;">${escapeHtml(p.note)}</div>` : ""}
+      ${
+        s.probeResult && s.probeResult.provider === p.provider
+          ? `<div class="banner ${s.probeResult.ok ? "banner-ok" : "banner-error"}" style="margin:10px 0 0;">
+              <span>${s.probeResult.ok ? "&#10003;" : "&#10005;"}</span>
+              <div style="flex:1;font-size:12px;word-break:break-word;">${escapeHtml(s.probeResult.detail)}</div>
+            </div>`
+          : ""
+      }
       ${expanded ? credentialsPanel(p.provider) : ""}
     </div>`;
   }
@@ -529,8 +570,13 @@ export function mountModels(root) {
           ).join("")}</select>
         </div>
         <div>
-          <label class="field-label" for="pdBaseUrl">Base URL, optional</label>
-          <input id="pdBaseUrl" class="text-input" style="padding:8px 11px;font-size:12.5px;" value="${existing ? escapeHtml(existing.base_url || "") : ""}" />
+          <label class="field-label" for="pdBaseUrl">Base URL, the API root</label>
+          <input id="pdBaseUrl" class="text-input" style="padding:8px 11px;font-size:12.5px;"
+                 placeholder="https://api.example.com/v1"
+                 value="${existing ? escapeHtml(existing.base_url || "") : ""}" />
+          <div style="font-size:11px;color:var(--tx4);margin-top:4px;line-height:1.45;">
+            The root only. <span class="mono">/chat/completions</span> is added for you, so pasting a full endpoint from a vendor's docs will 404.
+          </div>
         </div>
         <div>
           <label class="field-label" for="pdModel">Default model, free text</label>
@@ -682,6 +728,9 @@ export function mountModels(root) {
     );
     root.querySelectorAll("[data-toggle-provider]").forEach((b) =>
       b.addEventListener("click", () => toggleProviderEnabled(providerByName(b.getAttribute("data-toggle-provider"))))
+    );
+    root.querySelectorAll("[data-probe-provider]").forEach((b) =>
+      b.addEventListener("click", () => probeProvider(providerByName(b.getAttribute("data-probe-provider"))))
     );
     root.querySelectorAll("[data-delete-provider]").forEach((b) =>
       b.addEventListener("click", () => deleteProvider(providerByName(b.getAttribute("data-delete-provider"))))

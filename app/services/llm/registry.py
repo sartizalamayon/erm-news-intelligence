@@ -275,3 +275,25 @@ def build_client_for_feature(conn: DictConnection, feature: str) -> LLMClient:
     failover = FailoverTransport(quota=quota, candidates=transport_candidates)
     display_name = " -> ".join(display for _, _, display in candidates)
     return LLMClient(transport=failover, name=display_name, conn=conn)
+
+
+def build_probe_client(conn: DictConnection, provider: str) -> LLMClient:
+    """An LLMClient for ONE named provider, bypassing feature routing.
+
+    `build_client_for_feature` answers "who handles scoring". A probe
+    asks a different question: "does THIS provider work". It therefore
+    resolves the provider directly, and deliberately reuses
+    `_resolve_choice` so the transport, adapter, model and credentials
+    are byte-for-byte what a real stage would use. A probe that builds
+    its own request proves nothing about the code path that runs.
+    """
+    from app.services.llm.routing import ProviderChoice
+
+    quota = QuotaTracker(store=SettingsQuotaStore(conn=conn), limits=load_provider_limits(conn))
+    candidates = _resolve_choice(conn, ProviderChoice(provider=provider, model=None), quota)
+    if not candidates:
+        raise ConfigurationError(f"{provider} has no usable credentials or is not enabled")
+    transport_candidates = [(identity, transport) for identity, transport, _ in candidates]
+    failover = FailoverTransport(quota=quota, candidates=transport_candidates)
+    display_name = " -> ".join(display for _, _, display in candidates)
+    return LLMClient(transport=failover, name=display_name, conn=conn)

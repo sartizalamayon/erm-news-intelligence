@@ -25,7 +25,7 @@ from dataclasses import dataclass
 
 from app.db.connection import DictConnection
 from app.logging import get_logger
-from app.services.llm import parsing, prompts
+from app.services.llm import parsing, prompts, routing
 from app.services.llm.transport import Transport
 from app.services.llm.types import Judgment, Summary
 
@@ -50,6 +50,25 @@ def _current_base_system(conn: DictConnection | None) -> str:
     return prompts.build_system_guide(examples, guidance)
 
 
+def _stage_prompt(conn: DictConnection | None, field: str) -> str | None:
+    """The admin-editable instruction half of one stage's system prompt,
+    or `None` when there is no DB to read it from.
+
+    Re-read per call for the same reason `_current_base_system` is: an
+    edit saved mid-run must take effect on the next batch, not the next
+    deploy. `None` (rather than the built-in text) is returned for the
+    no-connection case so the prompt builders keep their own defaults as
+    the single source of truth — a unit test constructing `LLMClient`
+    with `conn=None` gets exactly the frozen prompt, unchanged.
+
+    A stored prompt that is empty or oversized never reaches the model:
+    `resolve_stage_prompt` substitutes the built-in and logs why.
+    """
+    if conn is None:
+        return None
+    return prompts.get_stage_prompt(conn, field)
+
+
 @dataclass
 class LLMClient:
     """`transport` does the actual network call; `name` is a
@@ -63,6 +82,21 @@ class LLMClient:
     transport: Transport
     name: str
     conn: DictConnection | None = None
+
+    def probe(self) -> str:
+        """Smallest possible real call, for the admin "test provider"
+        button. Not a mock and not a HEAD request: a misconfigured
+        provider usually answers the connection fine and fails on the
+        actual generation, so only a generation proves anything.
+
+        Kept tiny on purpose (a two-word answer, 16 predicted tokens) so
+        testing a provider costs effectively nothing.
+        """
+        return self.transport._generate(
+            "Reply with the single word: ready",
+            system="You are a connectivity check. Answer in one word.",
+            num_predict=16,
+        )
 
     # ── 1.1 judge() — DEAD IN PRODUCTION, documented per the "extract
     # everything verbatim" mandate (p3-contract.md §1.1, §7). ──────────
@@ -94,7 +128,9 @@ class LLMClient:
     def cluster_topics_chunk(self, items: list[dict], known_labels: list[str]) -> list[str]:
         if not items:
             return []
-        system = prompts.cluster_topics_system(known_labels, len(items))
+        system = prompts.cluster_topics_system(
+            known_labels, len(items), _stage_prompt(self.conn, routing.TOPIC_CLUSTERING)
+        )
         prompt = prompts.cluster_topics_prompt(items)
         try:
             raw = self.transport._generate(
@@ -184,7 +220,9 @@ class LLMClient:
         """
         if not titles:
             return []
-        system = prompts.translate_titles_batch_system(len(titles))
+        system = prompts.translate_titles_batch_system(
+            len(titles), _stage_prompt(self.conn, routing.TRANSLATION)
+        )
         prompt = prompts.translate_titles_batch_prompt(titles)
         try:
             raw = self.transport._generate(prompt, system=system, fmt="json")
@@ -208,7 +246,7 @@ class LLMClient:
     # ── 1.8 draft_bullet() — report-bullet drafting ─────────────────────
 
     def draft_bullet(self, title: str, body: str, section: str) -> str:
-        system = prompts.draft_bullet_system()
+        system = prompts.draft_bullet_system(_stage_prompt(self.conn, routing.SUMMARIZATION))
         prompt = prompts.draft_bullet_prompt(title, body, section)
         try:
             raw = self.transport._generate(prompt, system=system)
@@ -232,7 +270,7 @@ class LLMClient:
     def verify_group(self, headlines: list[str]) -> list[int]:
         if len(headlines) <= 1:
             return [0] * len(headlines)
-        system = prompts.verify_group_system()
+        system = prompts.verify_group_system(_stage_prompt(self.conn, routing.DEDUP_VERIFICATION))
         prompt = prompts.verify_group_prompt(headlines)
         try:
             raw = self.transport._generate(prompt, system=system, fmt="json")

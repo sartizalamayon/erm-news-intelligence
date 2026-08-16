@@ -77,6 +77,56 @@ class ProviderDefinition:
         if self.adapter == ADAPTER_OPENAI_COMPATIBLE and not self.base_url:
             raise ValidationError(f"provider {self.provider!r} uses adapter=openai_compatible but has no base_url")
 
+    def config_problem(self) -> str:
+        """A misconfiguration this row can be LOADED with, or "".
+
+        Deliberately NOT raised from `__post_init__`. Raising there made
+        `load_provider_definitions` (which skips rows that fail to
+        construct) drop an already-stored bad row from the admin list
+        entirely: the provider vanished from the screen with no
+        explanation and no way to fix it, which is a worse version of
+        the bug this check exists to prevent.
+
+        So: refused on SAVE (app.services.admin.save_provider_definition),
+        reported on READ. A stored bad row stays visible and editable,
+        and says what is wrong with it.
+        """
+        if self.adapter == ADAPTER_OPENAI_COMPATIBLE and self.base_url:
+            return endpoint_suffix_problem(self.provider, self.base_url)
+        return ""
+
+
+# `OpenAICompatibleTransport` builds its request as
+# `f"{base_url}/chat/completions"`. A base_url that ALREADY ends in that
+# path therefore produces `.../chat/completions/chat/completions`, which
+# every vendor answers with a 404.
+#
+# This is not hypothetical. An admin pasted OpenRouter's documented
+# endpoint (which IS the full .../chat/completions URL, because that is
+# what their docs show you to curl) into a field labelled only "Base
+# URL, optional". Nothing objected. Every translation call 404'd, and
+# because the stage substitutes the original title on failure, 578
+# articles silently went untranslated while the run reported success.
+#
+# Rejected rather than silently trimmed: quietly rewriting what someone
+# typed teaches them nothing and hides the difference between an
+# endpoint and a base.
+_ENDPOINT_SUFFIXES = ("/chat/completions", "/completions", "/v1/chat/completions")
+
+
+def endpoint_suffix_problem(provider: str, base_url: str) -> str:
+    """The problem with this base_url, or "" if there is none."""
+    trimmed = base_url.rstrip("/")
+    for suffix in _ENDPOINT_SUFFIXES:
+        if trimmed.endswith(suffix):
+            root = trimmed[: -len(suffix)] or "/"
+            return (
+                f"base_url must be the API root, not a full endpoint. "
+                f"The request path is added automatically, so this would be called as "
+                f"{trimmed}/chat/completions and return 404. Use {root} instead."
+            )
+    return ""
+
 
 # Documented STARTING POINT only (same pattern as
 # `app.services.llm.quota.DEFAULT_LIMITS`) — never consulted directly by

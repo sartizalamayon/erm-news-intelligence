@@ -33,6 +33,7 @@ import io
 import json
 import re
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -48,10 +49,15 @@ from app.services.data_transfer import ExportManifest, ImportReport, export_to_j
 from app.services.llm import quota as llm_quota
 from app.services.llm import routing as llm_routing
 from app.services.llm.prompts import (
+    DEFAULT_STAGE_PROMPTS,
     RELEVANCE_EXAMPLES_KEY,
     RELEVANCE_GUIDANCE_KEY,
+    STAGE_PROMPT_KEYS,
     get_relevance_examples,
     get_relevance_guidance,
+    is_stage_prompt_field,
+    resolve_stage_prompt,
+    stage_prompt_problem,
 )
 from app.services.matching import is_bengali, load_patterns, match_article
 from app.services.storage import (
@@ -768,9 +774,18 @@ def import_keywords_xlsx(conn: DictConnection, content: bytes) -> dict[str, Any]
 # read path (get_relevance_guidance/get_relevance_examples) consults —
 # versioning must never require a change to that frozen read path.
 
+# Six editable fields, one mechanism. `guidance`/`examples` are the two
+# halves of the SCORING stage's prompt and predate everything else; the
+# other four are one whole system prompt each, for the four AI stages
+# that used to have theirs frozen in Python (app.services.llm.prompts'
+# "Per-stage editable prompts"). They differ only in which `settings`
+# key mirrors the active version — version history, activation, and this
+# module's entire code path below are identical for all six, which is
+# the point: a seventh editable prompt should be one line here.
 PROMPT_FIELDS: dict[str, str] = {
     "guidance": RELEVANCE_GUIDANCE_KEY,
     "examples": RELEVANCE_EXAMPLES_KEY,
+    **STAGE_PROMPT_KEYS,
 }
 
 
@@ -781,6 +796,25 @@ def _validate_prompt_field(field: str) -> None:
 
 def _versions_settings_key(field: str) -> str:
     return f"prompt_versions:{field}"
+
+
+def _current_prompt_content(conn: DictConnection, field: str) -> str:
+    """Whatever the RUNTIME would send for `field` right now — used to
+    seed version 1 so history never starts empty, and so an installation
+    that has been running on a hand-set `settings` row keeps that text as
+    its first version rather than silently losing it.
+
+    Each branch defers to the stage's own read path (including its
+    fallback rules), so this can never disagree with what the model
+    actually receives.
+    """
+    if field == "guidance":
+        return get_relevance_guidance(conn)
+    if field == "examples":
+        return get_relevance_examples(conn)
+    if is_stage_prompt_field(field):
+        return resolve_stage_prompt(conn, field)[0]
+    raise ValidationError(f"unknown prompt field {field!r}, must be one of {sorted(PROMPT_FIELDS)}")
 
 
 def _load_prompt_versions(conn: DictConnection, field: str) -> dict[str, Any]:
@@ -796,7 +830,7 @@ def _load_prompt_versions(conn: DictConnection, field: str) -> dict[str, Any]:
     # path would currently return (get_relevance_guidance/_examples's own
     # fallback semantics), so there is always at least one real,
     # retrievable version rather than an empty list.
-    current = get_relevance_guidance(conn) if field == "guidance" else get_relevance_examples(conn)
+    current = _current_prompt_content(conn, field)
     seed = {
         "active": 1,
         "versions": [
@@ -866,20 +900,60 @@ def activate_prompt_version(conn: DictConnection, field: str, version: int) -> d
     return {**match, "active": True}
 
 
+def _active_version_entry(conn: DictConnection, field: str) -> dict[str, Any]:
+    data = _load_prompt_versions(conn, field)
+    return next(v for v in data["versions"] if v["version"] == data["active"])
+
+
+def get_stage_prompt_config(conn: DictConnection) -> list[dict[str, Any]]:
+    """One row per per-stage prompt, in PIPELINE order (translate, group
+    duplicates, group topics, write bullets) rather than alphabetically —
+    the console renders them in this order, and the order a person reads
+    them in should be the order they run in.
+
+    `effective` is what the model would actually be sent right now, which
+    is NOT always `content`: when a saved prompt is unusable
+    (`fallback_reason` non-empty) the built-in is substituted. Returning
+    both is what lets the console say "this is saved, but THIS is
+    running" instead of showing a broken prompt as if it were live.
+    """
+    rows: list[dict[str, Any]] = []
+    for field in STAGE_PROMPT_KEYS:
+        entry = _active_version_entry(conn, field)
+        effective, _ = resolve_stage_prompt(conn, field)
+        # The runtime read is deliberately quiet about a cleared value
+        # (it cannot tell "" from an absent row, and treating those
+        # differently would warn on a fresh install). The console CAN
+        # tell, because it has the active version: if what is saved is
+        # not what is running, the saved text is the thing to explain.
+        fallback_reason = "" if effective == entry["content"] else stage_prompt_problem(entry["content"])
+        rows.append(
+            {
+                "field": field,
+                "content": entry["content"],
+                "version": entry["version"],
+                "effective": effective,
+                "default_content": DEFAULT_STAGE_PROMPTS[field],
+                "is_default": effective == DEFAULT_STAGE_PROMPTS[field],
+                "fallback_reason": fallback_reason,
+            }
+        )
+    return rows
+
+
 def get_prompt_config(conn: DictConnection) -> dict[str, Any]:
-    guidance_data = _load_prompt_versions(conn, "guidance")
-    examples_data = _load_prompt_versions(conn, "examples")
-    guidance_active = next(v for v in guidance_data["versions"] if v["version"] == guidance_data["active"])
-    examples_active = next(v for v in examples_data["versions"] if v["version"] == examples_data["active"])
+    guidance_active = _active_version_entry(conn, "guidance")
+    examples_active = _active_version_entry(conn, "examples")
     approved_row = conn.execute("SELECT count(*) AS n FROM articles WHERE review_status = 'approved'").fetchone()
     rejected_row = conn.execute("SELECT count(*) AS n FROM articles WHERE review_status = 'rejected'").fetchone()
     return {
         "guidance": guidance_active["content"],
         "examples": examples_active["content"],
-        "guidance_version": guidance_data["active"],
-        "examples_version": examples_data["active"],
+        "guidance_version": guidance_active["version"],
+        "examples_version": examples_active["version"],
         "approved_count": approved_row["n"] if approved_row else 0,
         "rejected_count": rejected_row["n"] if rejected_row else 0,
+        "stages": get_stage_prompt_config(conn),
     }
 
 
@@ -1242,6 +1316,10 @@ def _definition_to_dict(definition: Any) -> dict[str, Any]:
         "default_model": definition.default_model,
         "enabled": definition.enabled,
         "note": definition.note,
+        # A stored row can be loaded while still being unusable. Carried
+        # to the UI so a bad provider is visible and fixable rather than
+        # dropped or silently failing at run time.
+        "config_problem": definition.config_problem() if hasattr(definition, "config_problem") else "",
     }
 
 
@@ -1273,6 +1351,18 @@ def save_provider_definition(
     """
     if not provider.strip():
         raise ValidationError("provider must be non-empty")
+    from app.services.llm.provider_registry import endpoint_suffix_problem
+
+    # Refused HERE, on the write, rather than in ProviderDefinition's
+    # constructor. Raising at construction time meant
+    # load_provider_definitions silently dropped an already-stored bad
+    # row, so the provider disappeared from the admin screen with no
+    # explanation. Bad input is refused; bad stored data stays visible.
+    if base_url:
+        problem = endpoint_suffix_problem(provider, base_url)
+        if problem:
+            raise ValidationError(problem)
+
     from app.services.llm.provider_registry import ProviderDefinition
     from app.services.llm.provider_registry import save_provider_definitions as _save
 
@@ -1283,6 +1373,57 @@ def save_provider_definition(
     _save(conn, definitions)
     conn.commit()
     return _definition_to_dict(definitions[provider])
+
+
+def probe_provider(conn: DictConnection, provider: str) -> dict[str, Any]:
+    """Make ONE real, tiny LLM call and report exactly what came back.
+
+    Without this, the only way to find out whether a provider works is
+    to run the whole pipeline and read the results, which is how a
+    404'ing base_url went unnoticed across 578 articles. Configuration
+    should be verifiable at the moment it is configured.
+
+    Deliberately uses the SAME resolution path a real stage uses
+    (definitions, credentials, adapter, transport), because a probe that
+    tests something else proves nothing about the thing that runs.
+
+    Never raises: a probe reporting a failure IS the useful outcome.
+    """
+    from app.services.llm.provider_registry import load_provider_definitions as _load_defs
+
+    definition = _load_defs(conn).get(provider)
+    if definition is None:
+        return {"provider": provider, "ok": False, "detail": f"no provider named {provider!r}"}
+    if not definition.enabled:
+        return {"provider": provider, "ok": False, "detail": f"{provider} is disabled, so nothing is routed to it"}
+
+    credentials = list_provider_credentials(conn, provider)
+    if not credentials:
+        return {"provider": provider, "ok": False, "detail": f"no API key is stored for {provider}"}
+
+    from app.services.llm.registry import build_probe_client
+
+    started = time.monotonic()
+    try:
+        client = build_probe_client(conn, provider)
+        reply = client.probe()
+    except Exception as exc:  # noqa: BLE001 - the failure text IS the answer here
+        elapsed = int((time.monotonic() - started) * 1000)
+        return {
+            "provider": provider,
+            "ok": False,
+            "detail": f"{type(exc).__name__}: {str(exc)[:400]}",
+            "model": definition.default_model,
+            "elapsed_ms": elapsed,
+        }
+    elapsed = int((time.monotonic() - started) * 1000)
+    return {
+        "provider": provider,
+        "ok": True,
+        "detail": f"replied in {elapsed} ms: {reply[:120]}",
+        "model": definition.default_model,
+        "elapsed_ms": elapsed,
+    }
 
 
 def delete_provider_definition(conn: DictConnection, provider: str) -> bool:
@@ -1676,14 +1817,52 @@ def run_pipeline_stage(
             from app.services import enrichment
 
             enrichment_result = enrichment.run_llm_enrichment(conn, stages={stage_key}, progress=progress)
-            detail = f"processed {enrichment_result.enriched} article(s)"
-            if enrichment_result.skipped_stages:
-                detail += f"; skipped (no provider configured): {', '.join(enrichment_result.skipped_stages)}"
+            detail = _enrichment_detail(enrichment_result)
+            # A stage that attempted LLM work and got NOTHING back is a
+            # FAILED stage, not a done one. It used to report "done ·
+            # processed 578 article(s)" while all 578 kept their
+            # untranslated titles, because every stage substitutes a
+            # neutral default on a failed call and nothing counted the
+            # substitutions. See enrichment.StageCalls.
+            dead = (
+                enrichment_result.wholly_failed_stages()
+                if hasattr(enrichment_result, "wholly_failed_stages")
+                else ()
+            )
+            if dead:
+                _record_stage_status(conn, stage_key, status="error", detail=detail)
+                return {"stage": stage_key, "status": "error", "detail": detail}
     except Exception as exc:
         _record_stage_status(conn, stage_key, status="error", detail=str(exc))
         raise
     _record_stage_status(conn, stage_key, status="done", detail=detail)
     return {"stage": stage_key, "status": "done", "detail": detail}
+
+
+def _enrichment_detail(result: Any) -> str:
+    """One line describing what a stage actually achieved.
+
+    "processed N article(s)" counted articles the stage LOOKED AT, which
+    is identical whether the model answered or every call 404'd. The
+    call accounting is what distinguishes them, so it leads.
+    """
+    parts = [f"processed {result.enriched} article(s)"]
+    # getattr, not attribute access: this helper formats anything
+    # EnrichmentResult-shaped, including the lighter stand-ins used by
+    # tests and any older caller. A reporting function must never be the
+    # thing that raises.
+    for name, calls in sorted(getattr(result, "calls", {}).items()):
+        if calls.attempted == 0:
+            continue
+        if calls.failed == 0:
+            parts.append(f"{name}: {calls.succeeded}/{calls.attempted} calls ok")
+            continue
+        parts.append(f"{name}: {calls.failed} of {calls.attempted} calls FAILED")
+        if calls.first_error:
+            parts.append(f"first error: {calls.first_error}")
+    if getattr(result, "skipped_stages", ()):
+        parts.append(f"skipped (no provider configured): {', '.join(result.skipped_stages)}")
+    return " · ".join(parts)
 
 
 def run_pipeline_all(conn: DictConnection) -> list[dict[str, str]]:
@@ -2253,7 +2432,12 @@ def _run_one_enrich_stage(stage_key: str) -> bool:
             entry = _stage_entry(stage_key)
             if entry is not None:
                 entry.update(status=result["status"], detail=result["detail"], finished_at=_now_iso())
-        return True
+        # Not `return True`. `run_pipeline_stage` now reports status
+        # "error" WITHOUT raising when a stage's every LLM call failed
+        # (see enrichment.StageCalls), and returning True there would
+        # leave the whole run's `any_error` flag clear — so the run
+        # would finish green over a stage that achieved nothing.
+        return result["status"] != "error"
     except Exception as exc:  # noqa: BLE001 - per-stage isolation
         logger.warning("enrich_stage_failed", extra={"stage": stage_key, "error": str(exc)[:300]})
         with _run_lock:

@@ -122,6 +122,54 @@ def activate_examples_version(version: int, admin: AuthenticatedUser = Depends(r
     return PromptVersionOut(**result)
 
 
+# ── Per-stage prompts: one generic surface for all six fields ───────────
+#
+# `/prompts/guidance` and `/prompts/examples` above are kept exactly as
+# they are (they are the documented contract and have callers); these
+# routes are the SAME operations addressed by field name, so the console
+# can drive six editors through one code path instead of six pairs of
+# hardcoded routes. `guidance`/`examples` are valid `field` values here
+# too — `admin_service.PROMPT_FIELDS` is the single list of what is
+# editable, and an unknown name is a 422 from `_validate_prompt_field`,
+# not a 404 on a route that happens not to exist.
+#
+# The sub-prefix is deliberate. A bare `PUT /prompts/{field}` would sit
+# in the same path space as `/prompts/routing` and `/prompts/quota`,
+# where the only thing keeping a typo from being routed as a prompt save
+# is declaration order in this file.
+
+
+@router.put("/stages/{field}", response_model=PromptVersionOut)
+def save_stage_prompt(
+    field: str, body: PromptSaveBody, admin: AuthenticatedUser = Depends(require_admin)
+) -> PromptVersionOut:
+    with get_connection() as conn:
+        version = admin_service.save_prompt_content(
+            conn, field, body.content, actor_email=admin.email, note=body.note
+        )
+    return PromptVersionOut(**version)
+
+
+@router.get("/stages/{field}/versions", response_model=list[PromptVersionOut])
+def list_stage_prompt_versions(
+    field: str, admin: AuthenticatedUser = Depends(require_admin)
+) -> list[PromptVersionOut]:
+    with get_connection() as conn:
+        versions = admin_service.list_prompt_versions(conn, field)
+    return [PromptVersionOut(**v) for v in versions]
+
+
+@router.post("/stages/{field}/versions/{version}/activate", response_model=PromptVersionOut)
+def activate_stage_prompt_version(
+    field: str, version: int, admin: AuthenticatedUser = Depends(require_admin)
+) -> PromptVersionOut:
+    with get_connection() as conn:
+        result = admin_service.activate_prompt_version(conn, field, version)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"{field} version not found")
+    return PromptVersionOut(**result)
+
+
 @router.get("/candidates", response_model=list[PromptCandidateOut])
 def get_candidates(admin: AuthenticatedUser = Depends(require_admin)) -> list[PromptCandidateOut]:
     with get_connection() as conn:
@@ -229,6 +277,21 @@ def put_provider_definition(
             note=body.note,
         )
     return ProviderDefinitionOut(**row)
+
+
+@router.post("/provider-definitions/{provider}/probe")
+def probe_provider(provider: str, admin: AuthenticatedUser = Depends(require_admin)) -> dict[str, object]:
+    """Make one real, tiny LLM call and report what came back.
+
+    Configuration should be verifiable when it is configured. Without
+    this the only way to learn that a provider is misconfigured was to
+    run the pipeline and read the output, which is how a base_url that
+    404'd went unnoticed across 578 articles.
+
+    Always 200: a probe that reports a failure is a successful probe.
+    """
+    with get_connection() as conn:
+        return admin_service.probe_provider(conn, provider)
 
 
 @router.delete("/provider-definitions/{provider}", status_code=status.HTTP_204_NO_CONTENT)

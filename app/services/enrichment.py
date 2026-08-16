@@ -110,9 +110,64 @@ TRANSLATE_PERSIST_CHUNK = 50
 
 
 @dataclass
+class StageCalls:
+    """How many LLM calls a stage made, and how many came back.
+
+    THE BUG THIS EXISTS TO KILL:
+
+    Every stage below catches a failed LLM call and substitutes a
+    neutral default — translate writes the ORIGINAL title into
+    `title_en`, dedup leaves a group unverified, judge leaves a score
+    unset. Individually that is correct: p3-contract.md §7 says never
+    silently drop an article, and one flaky call should not lose a
+    story.
+
+    But nothing counted those substitutions, so a stage whose calls
+    ALL failed returned normally and the run panel printed
+    "done · processed 578 article(s)". That is exactly what happened:
+    a provider was configured with a base_url that 404'd, all 578
+    articles kept their Bengali headlines, and the pipeline reported
+    success. The operator had no way to know until reading the queue.
+
+    "processed" counted articles the stage LOOKED AT. What matters is
+    how many the model actually answered for.
+    """
+
+    attempted: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    # One representative error, so the operator gets a cause and not
+    # just a count. First failure wins: later ones are usually the same
+    # root cause repeated N times.
+    first_error: str = ""
+
+    def record(self, *, ok: bool, error: str = "") -> None:
+        self.attempted += 1
+        if ok:
+            self.succeeded += 1
+            return
+        self.failed += 1
+        if not self.first_error and error:
+            self.first_error = error[:300]
+
+
+@dataclass
 class EnrichmentResult:
     enriched: int
     skipped_stages: tuple[str, ...] = field(default_factory=tuple)
+    # Per-stage LLM call accounting. See StageCalls.
+    calls: dict[str, StageCalls] = field(default_factory=dict)
+
+    @property
+    def total_failed_calls(self) -> int:
+        return sum(c.failed for c in self.calls.values())
+
+    def wholly_failed_stages(self) -> tuple[str, ...]:
+        """Stages that attempted LLM work and got NOTHING back.
+
+        This is the signal that used to be invisible. See StageCalls.
+        """
+        return tuple(name for name, c in sorted(self.calls.items()) if c.attempted > 0 and c.succeeded == 0)
 
 
 def _env_flag(name: str, default: str = "1") -> bool:
@@ -147,7 +202,10 @@ def _try_build_client(conn: DictConnection, feature: str) -> LLMClient | None:
 
 
 def stage_translate(
-    articles: list[dict[str, Any]], client: LLMClient | None, progress: ProgressCallback | None = None
+    articles: list[dict[str, Any]],
+    client: LLMClient | None,
+    progress: ProgressCallback | None = None,
+    calls: StageCalls | None = None,
 ) -> list[dict[str, Any]]:
     """`pipeline.py:238-276` `stage_translate()`, same per-article
     semantics. Already-translated articles are skipped (cached);
@@ -197,6 +255,9 @@ def stage_translate(
     # `LLMClient.translate_title` and remains the documented legacy
     # contract (p3-contract.md §1.7); it is what a single-item batch
     # degenerates to, and what the per-item fallback returns to.
+    # A caller that does not care about accounting still gets correct
+    # behaviour; the counters simply go to a throwaway.
+    calls = calls if calls is not None else StageCalls()
     batch_size = max(1, parsing.BATCH_SIZE_TRANSLATE_BATCHED)
     batches = [needs_call[i : i + batch_size] for i in range(0, len(needs_call), batch_size)]
 
@@ -222,10 +283,17 @@ def stage_translate(
         # Same neutral default as the sequential version: a failed or
         # empty translation leaves the original title in place rather
         # than blanking it (p3-contract.md §7 — never silently drop).
+        #
+        # `calls.record` is what makes that substitution VISIBLE. Without
+        # it, a batch that failed and a batch that succeeded produce
+        # identical-looking output and the stage reports "done" either
+        # way. See StageCalls for the incident this prevents.
         if error is not None or translated is None:
+            calls.record(ok=False, error=str(error) if error else "no translation returned")
             for article in batch:
                 article["title_en"] = article.get("title", "")
             continue
+        calls.record(ok=True)
         for article, text in zip(batch, translated, strict=False):
             article["title_en"] = text or article.get("title", "")
     if progress:
@@ -473,6 +541,10 @@ def run_llm_enrichment(
     today_val = today or date.today()
     embedding_backend = embedding_backend or default_embedding_backend()
 
+    # One accounting object per stage, so the caller can tell a stage
+    # that did its work from one whose every call failed. See StageCalls.
+    stage_calls: dict[str, StageCalls] = {}
+
     full_run = stages is None
     want = set(stages) if stages else set()
     do_translate = (STAGE_TRANSLATE in want) if not full_run else _env_flag("LLM_TRANSLATE")
@@ -500,7 +572,7 @@ def run_llm_enrichment(
     articles = [dict(r) for r in rows]
     total = len(articles)
     if not total and not do_topic:
-        return EnrichmentResult(enriched=0)
+        return EnrichmentResult(enriched=0, calls=stage_calls)
 
     skipped_stages: list[str] = []
 
@@ -509,6 +581,11 @@ def run_llm_enrichment(
         translate_client = _try_build_client(conn, TRANSLATION)
         if translate_client is None:
             skipped_stages.append(STAGE_TRANSLATE)
+        # Registered even when the client is None, so "no provider
+        # configured" and "provider configured but every call failed"
+        # stay distinguishable downstream: the first records zero
+        # attempts, the second records attempts with zero successes.
+        translate_calls = stage_calls.setdefault(STAGE_TRANSLATE, StageCalls())
 
         # Persisted in CHUNKS, not once at the end. Translating a full
         # day is minutes of work (measured: ~77 titles/min against
@@ -530,7 +607,7 @@ def run_llm_enrichment(
             if should_stop and should_stop():
                 break
             chunk = articles[start : start + TRANSLATE_PERSIST_CHUNK]
-            stage_translate(chunk, translate_client, progress=_chunk_progress)
+            stage_translate(chunk, translate_client, progress=_chunk_progress, calls=translate_calls)
             for a in chunk:
                 conn.execute("UPDATE articles SET title_en=%s WHERE id=%s", (a.get("title_en", ""), a["id"]))
             conn.commit()
@@ -552,7 +629,7 @@ def run_llm_enrichment(
         missing_tr = [a for a in articles if not (a.get("title_en") or "").strip() and is_bengali(a.get("title") or "")]
         if missing_tr:
             straggler_client = _try_build_client(conn, TRANSLATION)
-            stage_translate(missing_tr, straggler_client)
+            stage_translate(missing_tr, straggler_client, calls=translate_calls)
             for a in missing_tr:
                 conn.execute("UPDATE articles SET title_en=%s WHERE id=%s", (a.get("title_en", ""), a["id"]))
             conn.commit()
@@ -660,7 +737,7 @@ def run_llm_enrichment(
             except Exception as exc:  # noqa: BLE001 - mirrors collection_service.py:615-616
                 logger.warning("topic_clustering_skipped_nonfatal", extra={"error": str(exc)})
 
-    return EnrichmentResult(enriched=total, skipped_stages=tuple(skipped_stages))
+    return EnrichmentResult(enriched=total, skipped_stages=tuple(skipped_stages), calls=stage_calls)
 
 
 def _mark_standout(conn: DictConnection, article_id: Any) -> None:

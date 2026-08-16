@@ -177,6 +177,25 @@ class PromptVersionOut(BaseModel):
     active: bool
 
 
+class PromptStagePromptOut(BaseModel):
+    """One AI stage's whole system prompt.
+
+    `content` is the active saved version; `effective` is what the model
+    is actually sent, which differs only when `fallback_reason` explains
+    why the saved one was rejected. `default_content` ships the built-in
+    so the console can offer "restore the built-in" without a round trip
+    and without keeping a second copy of the text in the frontend.
+    """
+
+    field: str
+    content: str
+    version: int
+    effective: str
+    default_content: str
+    is_default: bool
+    fallback_reason: str = ""
+
+
 class PromptConfigOut(BaseModel):
     guidance: str
     examples: str
@@ -184,6 +203,7 @@ class PromptConfigOut(BaseModel):
     examples_version: int
     approved_count: int
     rejected_count: int
+    stages: list[PromptStagePromptOut] = []
 
 
 class PromptSaveBody(BaseModel):
@@ -267,6 +287,10 @@ class ProviderDefinitionOut(BaseModel):
     provider: str
     adapter: str  # "openai_compatible" | "gemini"
     base_url: str | None
+    # Non-empty when the stored row is loadable but cannot work, e.g. a
+    # base_url that already includes the request path. Defaulted so
+    # older callers and tests constructing this model still work.
+    config_problem: str = ""
     default_model: str
     enabled: bool
     note: str = ""
