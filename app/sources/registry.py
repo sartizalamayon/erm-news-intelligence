@@ -80,7 +80,20 @@ _SOURCE_MODULES: tuple[str, ...] = (
     "app.sources.digibangla",
     "app.sources.tech_shohor",
     "app.sources.bangla_tech_24",
+    # ── The last 6: enabled since the rebuild but never collected ───
+    # Each was seeded in the `sources` table with a `method` name but no
+    # plugin behind it, so `registry_key` stayed NULL. Collection
+    # iterates THIS list and uses the table only to veto, so all six
+    # were skipped on every run while showing as healthy. Each file's
+    # docstring records what its site actually exposes, measured live.
+    "app.sources.amar_barta",
+    "app.sources.bss",
+    "app.sources.deshpatrika",
+    "app.sources.infotech_insight",
+    "app.sources.share_biz",
+    "app.sources.share_business_24",
 )
+
 
 
 def register(source_cls: type[NewsSource]) -> type[NewsSource]:

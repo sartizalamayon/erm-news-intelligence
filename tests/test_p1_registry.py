@@ -1,4 +1,4 @@
-"""app.sources.registry — the single wiring point. Verifies all 45
+"""app.sources.registry — the single wiring point. Verifies all 51
 ported sources register cleanly, satisfy the `NewsSource` ABC contract,
 and have the metadata `app/services/collector.py` depends on
 (`key`, `display_name`). Importing every module here is itself a
@@ -59,6 +59,17 @@ EXPECTED_KEYS = {
     "digibangla",
     "tech_shohor",
     "bangla_tech_24",
+    # The last 6. Enabled in the `sources` table since the rebuild but
+    # never collected: each had a `method` name and no plugin, so
+    # `registry_key` stayed NULL and collection (which iterates THIS
+    # registry and uses the table only to veto) skipped them on every
+    # run while they showed as an ordinary quiet day.
+    "amar_barta",
+    "bss",
+    "deshpatrika",
+    "infotech_insight",
+    "share_biz",
+    "share_business_24",
 }
 
 
@@ -66,11 +77,11 @@ def test_load_all_registers_every_expected_source():
     load_all()
     sources = all_sources()
     assert set(sources) == EXPECTED_KEYS
-    assert len(sources) == 45
+    assert len(sources) == 51
 
 
 def test_source_module_count_matches_registry():
-    assert len(_SOURCE_MODULES) == 45
+    assert len(_SOURCE_MODULES) == 51
 
 
 def test_every_registered_source_is_a_news_source_subclass():
