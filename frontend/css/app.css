@@ -355,9 +355,29 @@ mark { background: color-mix(in oklab, var(--ac2) 26%, transparent); color: var(
 }
 .score-slider input[type="range"]::-moz-range-track { height: 4px; background: var(--line2); border-radius: 2px; }
 .score-slider input[type="range"]::-moz-range-thumb { pointer-events: auto; width: 14px; height: 14px; border-radius: 50%; background: var(--ac2); cursor: pointer; border: none; }
-.topn-select { height: 36px; border: 0; background: transparent; color: var(--tx); font-size: 12px; font-family: inherit; cursor: pointer; outline: none; padding-right: 8px; }
+/* Top N sat inside a .seg-group with border:0 and a transparent
+   background, so it read as a bare unstyled dropdown wedged against a
+   label rather than as a control. Given its own shape, matching the
+   other filter controls. */
+.topn-field { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 6px 0 11px; border: 1px solid var(--line2); border-radius: 9px; background: var(--panel); }
+.topn-field.on { border-color: var(--ac2); background: var(--acsoft); }
+.topn-field > .mono { font-size: 9px; letter-spacing: 1px; text-transform: uppercase; color: var(--tx4); white-space: nowrap; }
+.topn-field.on > .mono { color: var(--actx); }
+.topn-select { height: 34px; border: 0; background: transparent; color: var(--tx); font-size: 12px; font-family: inherit; cursor: pointer; outline: none; padding-right: 4px; }
+.topn-select:focus-visible { outline: 2px solid var(--ac2); outline-offset: 2px; border-radius: 6px; }
 
+/* TWO columns only while the reading pane is open.
+   This was a fixed two-column grid, so collapsing the pane left the
+   queue pinned at 40% with an empty 60% beside it holding a floating
+   "Show article" button. Collapsing a pane has to give its space back;
+   that is the whole point of collapsing it. */
 .review-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(300px, 40%) minmax(0, 1fr); }
+.review-body.detail-collapsed { grid-template-columns: minmax(0, 1fr); }
+.review-body.detail-collapsed .review-list-pane { border-right: 0; }
+/* The reopen control, docked to the edge the pane will come back from,
+   rather than adrift in the space the pane used to occupy. */
+.detail-reopen { position: absolute; top: 12px; right: 16px; z-index: 6; padding: 7px 13px; border: 1px solid var(--line2); border-radius: 8px; background: var(--panel); color: var(--tx2); font-size: 12px; cursor: pointer; }
+.detail-reopen:hover { border-color: var(--ac2); color: var(--actx); }
 .review-list-pane { border-right: 1px solid var(--line); overflow-y: auto; background: var(--bg); }
 .review-list-head { display: flex; align-items: center; justify-content: space-between; padding: 11px 18px 9px; position: sticky; top: 0; background: var(--bg); border-bottom: 1px solid var(--line); z-index: 5; }
 /* Date-group headers: clearly separated (not stacked-sticky, to avoid

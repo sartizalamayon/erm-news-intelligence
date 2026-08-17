@@ -92,6 +92,12 @@ export function mountReview(root, { navigate }) {
   };
 
   const debouncedFetch = debounce(() => fetchList(), 300);
+  // Declared HERE, not next to armInfiniteScroll below: render() runs at
+  // mount, render() calls bind(), and bind() arms the observer. A `let`
+  // further down the module body is still in its temporal dead zone at
+  // that point, so every page load threw "Cannot access 'listObserver'
+  // before initialization" and the queue never rendered a single row.
+  let listObserver = null;
 
   render();
   fetchList();
@@ -309,6 +315,47 @@ export function mountReview(root, { navigate }) {
   // torn out from under them: focus lost, caret gone, and the field
   // appearing to "not work". Same root cause as the run panel's scroll
   // reset. Identity is captured before the swap and restored after.
+  /**
+   * Load the next page when the reader nears the end of the list.
+   *
+   * Reading the queue and clicking "Load more" every twenty articles is
+   * friction in the middle of the one task this screen exists for. The
+   * button stays (as the keyboard path and the retry after a failed
+   * page) but it should almost never be the thing that fires.
+   *
+   * IntersectionObserver on a sentinel rather than a scroll handler:
+   * the list is re-rendered often, a scroll listener would have to be
+   * rebound and rate-limited by hand, and the observer costs nothing
+   * while nothing is near the viewport.
+   *
+   * `rootMargin` fires it a screen early so the next page is usually
+   * already in place by the time the reader gets there.
+   */
+  function armInfiniteScroll() {
+    if (listObserver) {
+      listObserver.disconnect();
+      listObserver = null;
+    }
+    if (typeof IntersectionObserver === "undefined") return; // button still works
+    const sentinel = root.querySelector('[data-role="load-sentinel"]');
+    const scroller = root.querySelector('[data-role="queue-list"]');
+    if (!sentinel || !scroller) return;
+    listObserver = new IntersectionObserver(
+      (entries) => {
+        if (!alive) return;
+        // Guarded on BOTH flags: a page still in flight must not queue a
+        // second request, and neither must a render that happens to
+        // re-intersect the sentinel.
+        if (!entries.some((e) => e.isIntersecting)) return;
+        if (s.loading || s.loadingMore) return;
+        if (s.items.length >= s.total) return;
+        fetchList({ append: true });
+      },
+      { root: scroller, rootMargin: "600px 0px" }
+    );
+    listObserver.observe(sentinel);
+  }
+
   function captureFocus() {
     const el = document.activeElement;
     if (!el || !root.contains(el)) return null;
@@ -425,9 +472,10 @@ export function mountReview(root, { navigate }) {
               </div>
               <span class="mono" id="scoreRangeLabel" style="font-size:11px;color:var(--tx2);min-width:38px;">${s.scoreMin} to ${s.scoreMax}</span>
             </div>
-            <div class="seg-group" style="padding:0 3px;">
-              <span class="mono" style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--tx4);padding:0 6px;">Top N</span>
-              <select data-role="topn-select" class="topn-select">
+            <div class="topn-field ${s.topN ? "on" : ""}">
+              <span class="mono" id="topnLabel">Top N</span>
+              <select data-role="topn-select" class="topn-select" aria-labelledby="topnLabel"
+                      title="Show only the N highest-scoring articles. Overrides sort, date and paging.">
                 <option value="">Off</option>
                 ${TOP_N_OPTIONS.map((n) => `<option value="${n}" ${s.topN === n ? "selected" : ""}>Top ${n}</option>`).join("")}
               </select>
@@ -456,7 +504,7 @@ export function mountReview(root, { navigate }) {
 
         ${s.error ? errorRow(s.error) : ""}
 
-        <div class="review-body">
+        <div class="review-body${s.detailOpen ? "" : " detail-collapsed"}" style="position:relative;">
           <div class="review-list-pane" data-role="queue-list">
             <div class="review-list-head">
               <label style="display:flex;align-items:center;gap:9px;cursor:pointer;">
@@ -468,8 +516,18 @@ export function mountReview(root, { navigate }) {
             </div>
             ${renderList()}
             ${
+              // A sentinel the scroll handler watches, not a button. The
+              // queue is a reading surface: making someone stop, aim at a
+              // button and click to see the next twenty is friction in
+              // the middle of the one task this screen exists for.
+              // The button remains as the no-JS-scroll fallback and as
+              // the manual retry after a failed page.
               hasMore
-                ? `<div style="padding:14px 18px;text-align:center;"><button id="loadMoreBtn" class="btn btn-outline" ${s.loadingMore ? "disabled" : ""}>${s.loadingMore ? "Loading…" : "Load more"}</button></div>`
+                ? `<div data-role="load-sentinel" style="padding:14px 18px;text-align:center;">
+                     <button id="loadMoreBtn" class="btn-ghost" style="font-size:12px;color:var(--tx3);" ${s.loadingMore ? "disabled" : ""}>${
+                       s.loadingMore ? "Loading more…" : "Load more"
+                     }</button>
+                   </div>`
                 : ""
             }
             ${s.items.length && !s.loading && !hasMore ? `<div class="end-of-queue">end of queue</div>` : ""}
@@ -483,11 +541,8 @@ export function mountReview(root, { navigate }) {
                    </div>
                    ${renderDetail(cur)}
                  </div>`
-              : `<button id="expandDetailBtn" class="btn-ghost" title="Show the reading pane"
-                         aria-label="Show the reading pane"
-                         style="align-self:flex-start;margin:10px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;">
-                   &#8592; Show article
-                 </button>`
+              : `<button id="expandDetailBtn" class="detail-reopen" title="Show the reading pane"
+                         aria-label="Show the reading pane" aria-expanded="false">&#8592; Reading pane</button>`
           }
         </div>
       </div>
@@ -824,6 +879,7 @@ export function mountReview(root, { navigate }) {
 
     const loadMoreBtn = root.querySelector("#loadMoreBtn");
     if (loadMoreBtn) loadMoreBtn.addEventListener("click", () => fetchList({ append: true }));
+    armInfiniteScroll();
 
     const resetBtn = root.querySelector("#resetFiltersBtn");
     if (resetBtn) resetBtn.addEventListener("click", resetFilters);
@@ -880,6 +936,10 @@ export function mountReview(root, { navigate }) {
   return {
     destroy() {
       alive = false;
+      if (listObserver) {
+        listObserver.disconnect();
+        listObserver = null;
+      }
     },
   };
 }
