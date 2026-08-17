@@ -41,6 +41,7 @@ import { api } from "../api.js";
 import {
   escapeHtml,
   fmtErr,
+  formatNumber,
   highlightTerms,
   notWiredBanner,
   searchTerms,
@@ -81,6 +82,9 @@ export function mountSearch(root) {
     total: 0,
     corpusSize: null,
     openBodies: new Set(),
+    selId: null, // the result open in the reading pane
+    detailOpen: true, // collapsible, so the result list can use the full width
+    loadingMore: false,
     page: 1,
     dateFrom: "",
     dateTo: "",
@@ -90,6 +94,9 @@ export function mountSearch(root) {
     srcOff: [],
     srcMenuOpen: false,
   };
+
+  // Mount scope: see armInfiniteScroll's note on the temporal dead zone.
+  let listObserver = null;
 
   readUrl();
   render();
@@ -190,7 +197,7 @@ export function mountSearch(root) {
 
   // ── search ───────────────────────────────────────────────────────────
 
-  async function runSearch({ page = 1, push = true } = {}) {
+  async function runSearch({ page = 1, push = true, append = false } = {}) {
     if (!s.q.trim()) return;
     // An impossible range returns nothing and looks identical to a
     // genuine no-match, so it is refused before the request.
@@ -201,7 +208,8 @@ export function mountSearch(root) {
     }
     s.ran = true;
     s.page = Math.max(1, page);
-    s.loading = true;
+    if (append) s.loadingMore = true;
+    else s.loading = true;
     s.error = null;
     if (push) writeUrl();
     render();
@@ -218,7 +226,8 @@ export function mountSearch(root) {
         },
       });
       if (!alive) return;
-      s.results = (data && data.results) || [];
+      const batch = (data && data.results) || [];
+      s.results = append ? s.results.concat(batch) : batch;
       s.total = (data && data.total) ?? s.results.length;
       s.corpusSize = data && data.corpusSize;
       // The source list comes back with the results, so it only exists
@@ -227,114 +236,99 @@ export function mountSearch(root) {
       // would show nothing to un-hide.
       if (data && data.sources && data.sources.length) s.sources = data.sources;
       s.loading = false;
-      s.openBodies.clear();
+      s.loadingMore = false;
+      if (!append) {
+        s.openBodies.clear();
+        s.selId = s.results.length ? s.results[0].id : null;
+      }
       render();
     } catch (err) {
       if (!alive) return;
       s.loading = false;
+      s.loadingMore = false;
       s.error = err;
       render();
     }
   }
 
-  function goToPage(n) {
-    const target = Math.min(totalPages(), Math.max(1, n));
-    if (target === s.page) return;
-    runSearch({ page: target });
-    const scroller = document.querySelector(".main-area");
-    if (scroller) scroller.scrollTop = 0;
-  }
 
   // ── fragments ────────────────────────────────────────────────────────
 
-  function resultCard(r) {
+  /** One row in the results list. Compact, because it is a scan surface. */
+  function resultRow(r) {
     const t = terms();
-    const open = s.openBodies.has(r.id);
+    const sel = s.selId === r.id;
     const statusLabel = r.status === "approved" ? "Approved" : r.status === "rejected" ? "Rejected" : "";
-    const statusBg = r.status === "approved" ? "var(--acsoft)" : "var(--redsoft)";
     const statusFg = r.status === "approved" ? "var(--actx)" : "var(--red)";
 
-    // Where did it match? A body-only hit is the case the old screen
-    // hid completely, and the one most worth showing.
+    // Where did it match? A body-only hit is the case worth flagging:
+    // the headline will not contain the word, so the row looks like a
+    // false positive until you know why it is here.
     const inTitle = t.some((w) => (r.title || "").toLowerCase().includes(w));
     const inTitleEn = t.some((w) => (r.titleEn || "").toLowerCase().includes(w));
     const inBody = t.some((w) => (r.body || "").toLowerCase().includes(w));
     const bodyOnly = !inTitle && !inTitleEn && inBody;
 
-    return `<div style="border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:15px 18px;">
-      <div class="row wrap" style="gap:10px;margin-bottom:7px;align-items:center;">
-        <span class="tag">${escapeHtml(r.source)}</span>
-        <span class="mono" style="font-size:10.5px;color:var(--tx3);">${escapeHtml(r.day)}</span>
-        ${statusLabel ? `<span class="pill" style="background:${statusBg};color:${statusFg};text-transform:uppercase;letter-spacing:.6px;font-size:9px;">${statusLabel}</span>` : ""}
-        ${bodyOnly ? `<span class="mono" style="font-size:9.5px;letter-spacing:.6px;text-transform:uppercase;color:var(--tx4);">matched in body</span>` : ""}
+    return `<div class="article-row ${sel ? "selected" : ""}" data-result="${escapeHtml(String(r.id))}"
+                 role="button" tabindex="0" aria-pressed="${sel ? "true" : "false"}">
+      <div style="flex:1;min-width:0;">
+        <div class="article-meta-row">
+          <span class="tag">${escapeHtml(r.source)}</span>
+          <span class="mono" style="font-size:10px;color:var(--tx3);">${escapeHtml(r.day)}</span>
+          ${statusLabel ? `<span class="mono" style="font-size:9px;letter-spacing:.6px;text-transform:uppercase;color:${statusFg};">${statusLabel}</span>` : ""}
+          ${bodyOnly ? `<span class="mono" style="font-size:9px;letter-spacing:.6px;text-transform:uppercase;color:var(--tx4);">in body</span>` : ""}
+        </div>
+        <div class="article-title">${highlightTerms(r.title, t)}</div>
+        ${
+          r.titleEn && r.titleEn !== r.title
+            ? `<div style="font-size:12px;color:var(--tx2);font-style:italic;margin-top:3px;">${highlightTerms(r.titleEn, t)}</div>`
+            : ""
+        }
+        ${
+          r.body
+            ? `<div style="margin-top:6px;font-size:11.5px;line-height:1.55;color:var(--tx3);">${highlightTerms(snippetAround(r.body, t, 110), t)}</div>`
+            : ""
+        }
       </div>
+    </div>`;
+  }
+
+  /**
+   * The reading pane.
+   *
+   * The archive used to expand an article INLINE, which pushed every
+   * result below it down the page and lost your place in a list you
+   * were part-way through scanning. Searching is read-one, go-back,
+   * read-another; that wants a stable list beside a stable reader,
+   * which is exactly the shape the Review queue already uses. Matching
+   * it also means one thing to learn instead of two.
+   */
+  function renderDetail() {
+    const r = s.results.find((x) => x.id === s.selId);
+    if (!r) {
+      return `<div class="detail-wrap"><div class="state-block">
+        <div class="state-title">Nothing selected</div>
+        <p class="state-body">Pick a result on the left to read it here.</p>
+      </div></div>`;
+    }
+    const t = terms();
+    return `<div class="detail-wrap">
+      <div class="detail-head">
+        <span class="tag">${escapeHtml(r.source)}</span>
+        <span class="mono" style="font-size:11px;color:var(--tx3);">${escapeHtml(r.day)}</span>
+      </div>
+      <h2 class="detail-title">${highlightTerms(r.title, t)}</h2>
+      ${r.titleEn && r.titleEn !== r.title ? `<div class="detail-title-en">${highlightTerms(r.titleEn, t)}</div>` : ""}
       <a href="${escapeHtml(r.url || "#")}" target="_blank" rel="noopener noreferrer"
-         style="display:block;font-family:'Lora',Georgia,serif;font-size:15.5px;font-weight:500;color:var(--tx);line-height:1.4;">${highlightTerms(
-           r.title,
-           t
-         )}</a>
-      ${
-        r.titleEn && r.titleEn !== r.title
-          ? `<div style="font-size:13px;color:var(--tx2);font-style:italic;margin-top:4px;">${highlightTerms(r.titleEn, t)}</div>`
-          : ""
-      }
+         style="display:inline-block;margin:4px 0 18px;font-size:12.5px;">Open at source &#8599;</a>
       ${
         r.body
-          ? `<div style="margin-top:9px;font-size:12.5px;line-height:1.65;color:var(--tx3);">${highlightTerms(
-              snippetAround(r.body, t),
-              t
-            )}</div>`
-          : ""
-      }
-      <div class="row" style="gap:14px;margin-top:10px;align-items:center;">
-        <button data-toggle-body="${r.id}" class="btn-ghost" style="color:${
-          r.body ? "var(--actx)" : "var(--tx3)"
-        };font-size:12.5px;font-weight:600;cursor:${r.body ? "pointer" : "default"};padding:0;">${
-          r.body ? (open ? "Hide full article" : "Read full article") : "No article text"
-        }</button>
-      </div>
-      ${
-        open && r.body
-          ? `<div style="margin-top:11px;padding:14px 16px;background:var(--bg);border:1px solid var(--line);border-radius:9px;font-family:'Lora',Georgia,serif;font-size:14px;line-height:1.75;color:var(--tx2);white-space:pre-wrap;">${highlightTerms(
-              r.body,
-              t
-            )}</div>`
-          : ""
+          ? `<div style="font-family:'Lora',Georgia,serif;font-size:15px;line-height:1.8;color:var(--tx2);white-space:pre-wrap;">${highlightTerms(r.body, t)}</div>`
+          : `<div style="font-size:13px;color:var(--tx3);">No article text was captured for this one. Open it at source to read it.</div>`
       }
     </div>`;
   }
 
-  function pagerHtml() {
-    const pages = totalPages();
-    if (pages <= 1) return "";
-    return `<div class="row" style="justify-content:center;gap:10px;margin-top:22px;align-items:center;">
-      <button data-page="1" class="btn btn-outline" ${s.page <= 1 ? "disabled" : ""}>First</button>
-      <button data-page="${s.page - 1}" class="btn btn-outline" ${s.page <= 1 ? "disabled" : ""}>&larr; Prev</button>
-      <span class="mono" style="font-size:11px;color:var(--tx3);min-width:110px;text-align:center;">Page ${s.page} of ${pages}</span>
-      <button data-page="${s.page + 1}" class="btn btn-outline" ${s.page >= pages ? "disabled" : ""}>Next &rarr;</button>
-      <button data-page="${pages}" class="btn btn-outline" ${s.page >= pages ? "disabled" : ""}>Last</button>
-    </div>`;
-  }
-
-  function resultsHeader() {
-    if (!s.ran || s.loading || s.error) return "";
-    const first = (s.page - 1) * PAGE_SIZE + 1;
-    const last = Math.min(s.total, first + s.results.length - 1);
-    return `<div class="row-between wrap" style="gap:10px;margin-bottom:14px;">
-      <div class="mono" style="font-size:11px;color:var(--tx3);">
-        ${
-          s.total
-            ? `${first.toLocaleString()} to ${last.toLocaleString()} of ${s.total.toLocaleString()} matches`
-            : "no matches"
-        }${s.corpusSize ? ` · searched ${s.corpusSize.toLocaleString()} articles` : ""}
-      </div>
-      ${
-        s.total
-          ? `<div class="mono" style="font-size:11px;color:var(--tx4);">every word must appear · newest first</div>`
-          : ""
-      }
-    </div>`;
-  }
 
   function filterBar() {
     const visibleSources = Math.max(0, s.sources.length - s.srcOff.length);
@@ -398,58 +392,129 @@ export function mountSearch(root) {
   // ── render ───────────────────────────────────────────────────────────
 
   function render() {
-    root.innerHTML = `
-      <div class="page page-narrow">
-        <p style="color:var(--tx2);font-size:13.5px;line-height:1.6;margin:0 0 18px;max-width:62ch;">
-          Every article ever collected, searched across the headline, the English translation and the
-          body text, on all dates and in any review state. Every word you type must appear.
-          Matches are highlighted so you can see why a result came back.
-        </p>
-        <div class="row" style="gap:10px;margin-bottom:8px;">
-          <div class="search-box" style="height:46px;padding:0 14px;max-width:none;">
-            <span style="color:var(--tx4);">&#8981;</span>
-            <input id="searchInput" value="${escapeHtml(s.q)}" placeholder="e.g. hormuz oil tariff" style="font-size:14.5px;" />
-            ${s.q ? `<button id="clearQueryBtn" class="btn-ghost" style="color:var(--tx4);padding:0 4px;font-size:14px;" title="Clear">&#10005;</button>` : ""}
-          </div>
-          <button id="searchBtn" class="btn btn-primary" style="padding:0 22px;height:46px;font-size:14px;">Search</button>
-        </div>
-        <div class="row wrap" style="gap:8px;margin-bottom:16px;">
-          <span style="font-size:12px;color:var(--tx4);padding:5px 0;">Try:</span>
-          ${SUGGESTIONS.map((x) => `<button class="chip-toggle" data-suggest="${escapeHtml(x)}" style="border-radius:999px;">${escapeHtml(x)}</button>`).join("")}
-        </div>
+    const listScroller = root.querySelector('[data-role="results-list"]');
+    const keepScroll = listScroller ? listScroller.scrollTop : 0;
 
-        ${filterBar()}
+    root.innerHTML = `
+      <div class="split-shell">
+        <div class="review-toolbar">
+          <div class="review-toolbar-row">
+            <div class="search-box" style="max-width:420px;">
+              <span style="color:var(--tx4);font-size:12px;">&#8981;</span>
+              <input id="searchInput" value="${escapeHtml(s.q)}" placeholder="Search every article ever collected"
+                     aria-label="Search the archive" />
+              ${s.q ? `<button id="clearQueryBtn" class="btn-ghost" style="color:var(--tx4);padding:0 4px;" aria-label="Clear the search">&#10005;</button>` : ""}
+            </div>
+            <button id="searchBtn" class="btn btn-primary" style="height:36px;padding:0 18px;">Search</button>
+            <div class="grow"></div>
+            ${
+              s.ran && !s.loading && !s.error
+                ? `<span class="mono" style="font-size:11px;color:var(--tx3);">${
+                    s.total
+                      ? `${formatNumber(s.results.length)} of ${formatNumber(s.total)} matches`
+                      : "no matches"
+                  }${s.corpusSize ? ` &#183; ${formatNumber(s.corpusSize)} articles searched` : ""}</span>`
+                : ""
+            }
+          </div>
+          <div class="review-toolbar-row" style="padding-top:0;">
+            ${filterBar()}
+          </div>
+        </div>
 
         ${
           dateRangeInvalid()
-            ? `<div class="banner banner-warn"><span>&#9888;</span><div style="flex:1;">The start date is after the end date, so nothing can match. Swap them or clear one.</div></div>`
+            ? `<div class="banner banner-warn" style="margin:12px 26px;"><span>&#9888;</span><div style="flex:1;">The start date is after the end date, so nothing can match. Swap them or clear one.</div></div>`
+            : ""
+        }
+        ${
+          s.error
+            ? s.error.kind === "not_found"
+              ? `<div style="margin:12px 26px;">${notWiredBanner("GET /search")}</div>`
+              : `<div class="banner banner-error" style="margin:12px 26px;"><span>&#10005;</span><div style="flex:1;">${escapeHtml(fmtErr(s.error))}</div><button id="searchRetry" class="btn-ghost" style="color:var(--red);text-decoration:underline;">Retry</button></div>`
             : ""
         }
 
-        ${resultsHeader()}
-
-        ${
-          s.loading
-            ? `<div class="stack" style="gap:10px;">${Array.from({ length: 4 })
-                .map(() => `<div class="card" style="padding:15px 18px;">${skeletonRows(3)}</div>`)
-                .join("")}</div>`
-            : s.error
-            ? s.error.kind === "not_found"
-              ? notWiredBanner("GET /search")
-              : `<div class="banner banner-error"><span>&#10005;</span><div style="flex:1;">${escapeHtml(fmtErr(s.error))}</div><button id="searchRetry" class="btn-ghost" style="color:var(--red);text-decoration:underline;">Retry</button></div>`
-            : !s.ran
-            ? `<div class="state-block"><div class="state-title">Search the archive</div><p class="state-body">Type a word or phrase above. The archive covers every article ever collected, not just today's.</p></div>`
-            : dateRangeInvalid()
-            ? ""
-            : !s.results.length
-            ? `<div class="state-block"><div class="state-title">No matches</div><p class="state-body">Every word has to appear in the same article. Try fewer words, or loosen the date, language, source and status filters.</p></div>`
-            : `<div class="stack" style="gap:10px;">${s.results.map(resultCard).join("")}</div>`
-        }
-
-        ${s.ran && !s.loading && !s.error && s.results.length ? pagerHtml() : ""}
+        <div class="split-body${s.detailOpen ? "" : " detail-collapsed"}" style="position:relative;">
+          <div class="split-list-pane" data-role="results-list">
+            ${
+              s.loading
+                ? `<div style="padding:18px;">${skeletonRows(10, 26)}</div>`
+                : !s.ran
+                ? `<div class="state-block"><div class="state-title">Search the archive</div><p class="state-body">Every article ever collected, not just today's. Try one of the suggestions below the box.</p>
+                     <div class="row wrap" style="gap:8px;justify-content:center;">
+                       ${SUGGESTIONS.map((x) => `<button class="chip-toggle" data-suggest="${escapeHtml(x)}" style="border-radius:999px;">${escapeHtml(x)}</button>`).join("")}
+                     </div></div>`
+                : dateRangeInvalid()
+                ? ""
+                : !s.results.length
+                ? `<div class="state-block"><div class="state-title">No matches</div><p class="state-body">Every word has to appear in the same article. Try fewer words, or loosen the filters above.</p></div>`
+                : s.results.map(resultRow).join("") +
+                  (s.results.length < s.total
+                    ? `<div data-role="load-sentinel" style="padding:14px 18px;text-align:center;">
+                         <button id="loadMoreBtn" class="btn-ghost" style="font-size:12px;color:var(--tx3);" ${s.loadingMore ? "disabled" : ""}>${
+                           s.loadingMore ? "Loading more…" : "Load more"
+                         }</button>
+                       </div>`
+                    : `<div class="end-of-queue">end of results</div>`)
+            }
+          </div>
+          ${
+            s.detailOpen
+              ? `<div class="split-detail-pane">
+                   <div style="display:flex;justify-content:flex-end;padding:8px 12px 0;">
+                     <button id="collapseDetailBtn" class="btn-ghost" aria-label="Collapse the reading pane"
+                             aria-expanded="true" style="font-size:12px;">&#10005; Hide</button>
+                   </div>
+                   ${renderDetail()}
+                 </div>`
+              : `<button id="expandDetailBtn" class="detail-reopen" aria-label="Show the reading pane"
+                         aria-expanded="false">&#8592; Reading pane</button>`
+          }
+        </div>
       </div>
     `;
+
+    const again = root.querySelector('[data-role="results-list"]');
+    if (again && keepScroll) again.scrollTop = keepScroll;
+
     bind();
+  }
+
+  /**
+   * Load the next page as the reader nears the end.
+   *
+   * Same treatment as the Review queue, for the same reason: stopping
+   * to aim at a button every twenty results interrupts scanning, which
+   * is the entire activity here. The button stays as the keyboard path
+   * and the retry after a failed page.
+   *
+   * Declared at mount scope, NOT beside this function: render() runs at
+   * mount, render() calls bind(), and bind() arms this. A `let` further
+   * down the module body would still be in its temporal dead zone and
+   * would throw on every load. That exact mistake cost a debugging pass
+   * on the Review queue.
+   */
+  function armInfiniteScroll() {
+    if (listObserver) {
+      listObserver.disconnect();
+      listObserver = null;
+    }
+    if (typeof IntersectionObserver === "undefined") return; // button still works
+    const sentinel = root.querySelector('[data-role="load-sentinel"]');
+    const scroller = root.querySelector('[data-role="results-list"]');
+    if (!sentinel || !scroller) return;
+    listObserver = new IntersectionObserver(
+      (entries) => {
+        if (!alive) return;
+        if (!entries.some((e) => e.isIntersecting)) return;
+        if (s.loading || s.loadingMore) return;
+        if (s.results.length >= s.total) return;
+        runSearch({ page: s.page + 1, append: true });
+      },
+      { root: scroller, rootMargin: "600px 0px" }
+    );
+    listObserver.observe(sentinel);
   }
 
   // ── binding ──────────────────────────────────────────────────────────
@@ -537,14 +602,56 @@ export function mountSearch(root) {
     const clearFiltersBtn = root.querySelector("#clearFiltersBtn");
     if (clearFiltersBtn) clearFiltersBtn.addEventListener("click", resetFilters);
 
-    root.querySelectorAll("[data-page]").forEach((b) =>
-      b.addEventListener("click", () => goToPage(Number(b.getAttribute("data-page"))))
-    );
+    // Selecting a result. Rows are role="button" with tabindex, so the
+    // keyboard reaches them; Enter and Space activate, as a real button
+    // would.
+    const select = (id) => {
+      s.selId = id;
+      s.detailOpen = true;
+      render();
+    };
+    root.querySelectorAll("[data-result]").forEach((row) => {
+      const id = row.getAttribute("data-result");
+      const pick = () => {
+        const hit = s.results.find((x) => String(x.id) === id);
+        if (hit) select(hit.id);
+      };
+      row.addEventListener("click", pick);
+      row.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          pick();
+        }
+      });
+    });
+
+    const collapseDetail = root.querySelector("#collapseDetailBtn");
+    if (collapseDetail)
+      collapseDetail.addEventListener("click", () => {
+        s.detailOpen = false;
+        render();
+        root.querySelector("#expandDetailBtn")?.focus();
+      });
+    const expandDetail = root.querySelector("#expandDetailBtn");
+    if (expandDetail)
+      expandDetail.addEventListener("click", () => {
+        s.detailOpen = true;
+        render();
+        root.querySelector("#collapseDetailBtn")?.focus();
+      });
+
+    const loadMoreBtn = root.querySelector("#loadMoreBtn");
+    if (loadMoreBtn) loadMoreBtn.addEventListener("click", () => runSearch({ page: s.page + 1, append: true }));
+    armInfiniteScroll();
   }
 
   return {
     destroy() {
       alive = false;
+      if (listObserver) {
+        listObserver.disconnect();
+        listObserver = null;
+      }
       // Leave the address bar as this screen found it. Without this the
       // shell's pushRoute carries `?q=...` onto whatever screen comes
       // next, since it preserves window.location.search by design.

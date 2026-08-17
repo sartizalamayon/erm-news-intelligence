@@ -319,7 +319,11 @@ mark { background: color-mix(in oklab, var(--ac2) 26%, transparent); color: var(
 .standing-note { font-size: 11.5px; color: var(--tx3); line-height: 1.5; margin-top: 7px; }
 
 /* ── Review queue ────────────────────────────────────────────────── */
-.review-shell { display: flex; flex-direction: column; height: calc(100vh - 60px); }
+/* `.split-shell` is the generic name; `.review-shell` is its original
+   alias. A full-height column with its own scrolling panes, so the list
+   and the reading pane scroll independently instead of the whole page
+   scrolling as one. */
+.split-shell, .review-shell { display: flex; flex-direction: column; height: calc(100vh - 60px); }
 .review-toolbar { flex: 0 0 auto; border-bottom: 1px solid var(--line); background: var(--panel2); }
 .review-toolbar-row { display: flex; align-items: center; gap: 9px; padding: 12px 26px; flex-wrap: wrap; }
 .search-box { display: flex; align-items: center; gap: 8px; background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 0 12px; height: 36px; min-width: 210px; flex: 1; max-width: 320px; }
@@ -371,7 +375,16 @@ mark { background: color-mix(in oklab, var(--ac2) 26%, transparent); color: var(
    queue pinned at 40% with an empty 60% beside it holding a floating
    "Show article" button. Collapsing a pane has to give its space back;
    that is the whole point of collapsing it. */
-.review-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(300px, 40%) minmax(0, 1fr); }
+/* The list-plus-reading-pane split. Shared by the Review queue and the
+   Search archive: both are "scan a list, open one, keep your place",
+   and having them behave differently was the actual complaint. The
+   .review-* names are kept as aliases so existing markup and the many
+   comments referring to them stay accurate. */
+.split-body, .review-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(300px, 40%) minmax(0, 1fr); }
+.split-list-pane { border-right: 1px solid var(--line); overflow-y: auto; background: var(--bg); }
+.split-detail-pane { overflow-y: auto; background: var(--panel2); }
+.split-body.detail-collapsed { grid-template-columns: minmax(0, 1fr); }
+.split-body.detail-collapsed .split-list-pane { border-right: 0; }
 .review-body.detail-collapsed { grid-template-columns: minmax(0, 1fr); }
 .review-body.detail-collapsed .review-list-pane { border-right: 0; }
 /* The reopen control, docked to the edge the pane will come back from,
