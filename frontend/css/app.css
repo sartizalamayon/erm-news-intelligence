@@ -21,6 +21,46 @@ body {
   transition: background .2s ease, color .2s ease;
 }
 
+/* ── Keyboard visibility ─────────────────────────────────────────────
+   Before this, the whole stylesheet had exactly ONE :focus-visible
+   rule. Tabbing through the app moved an invisible cursor: you could
+   not tell which control you were on, which makes every screen here
+   unusable without a mouse.
+
+   :focus-visible, not :focus, so a mouse click does not leave a ring
+   behind on the thing you just pressed. One rule at the top rather
+   than per-component, so a control added later inherits it instead of
+   being forgotten. */
+:focus-visible {
+  outline: 2px solid var(--ac2);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+/* Rows and panes are focus targets for scroll management, not things a
+   keyboard user tabs to, so they should not flash a ring when focused
+   programmatically. */
+#screenRoot:focus-visible, .split-list-pane:focus-visible, .review-list-pane:focus-visible { outline: none; }
+
+/* Skip link: the first thing Tab reaches, hidden until it is focused.
+   Without it, reaching the screen content means tabbing past every nav
+   item on every page load. */
+.skip-link {
+  /* fixed, not absolute: absolute resolves against the page, so on a
+     scrolled screen the revealed link lands wherever the top of the
+     DOCUMENT is rather than where the user is looking. A skip link has
+     to appear in the viewport, always. */
+  position: fixed; top: -60px; left: 12px; z-index: 200;
+  padding: 10px 16px; border-radius: 0 0 9px 9px;
+  background: var(--acbtn); color: var(--onac); font-size: 13px; font-weight: 600;
+}
+/* No transition. This appears the instant Tab is pressed and vanishes
+   the instant focus moves on, so an animation only delays the one
+   control whose entire purpose is to be fast. It also made the reveal
+   untestable: getComputedStyle returns the IN-FLIGHT value during a
+   transition, so the rule read as "not applying" when it was applying
+   correctly all along. */
+.skip-link:focus { top: 0; }
+
 a { color: var(--actx); text-decoration: none; }
 a:hover { opacity: .8; }
 input, select, textarea, button { font-family: inherit; }

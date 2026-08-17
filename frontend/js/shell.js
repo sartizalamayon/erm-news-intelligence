@@ -39,11 +39,16 @@ let accountOpenState = false;
 export function mountShell(root, { onSignOut }) {
   shellRoot = root;
   shellRoot.innerHTML = `
+    <a href="#screenRoot" class="skip-link">Skip to content</a>
     <div class="app-shell">
-      <aside id="railEl" class="rail"></aside>
+      <!-- Landmarks, so a screen reader can jump straight to the nav or
+           the screen instead of walking the whole rail every time. The
+           rail is the site navigation; screenRoot is where the mounted
+           screen renders and is the skip link's target. -->
+      <aside id="railEl" class="rail" aria-label="Main navigation"></aside>
       <main class="main-area">
         <div id="topbarEl" class="topbar"></div>
-        <div id="screenRoot"></div>
+        <div id="screenRoot" tabindex="-1"></div>
       </main>
     </div>
     <div id="accountModalEl"></div>
@@ -262,12 +267,12 @@ function renderChrome() {
                 <div class="rail-user-name">${escapeHtml((state.user && state.user.display_name) || "")}</div>
                 <div class="rail-user-email">${escapeHtml((state.user && state.user.email) || "")}</div>
               </div>
-              <button id="accountBtn" class="rail-signout" title="Account & security">&#9881;</button>
-              <button id="signOutBtn" class="rail-signout" title="Sign out">&#9211;</button>`
+              <button id="accountBtn" class="rail-signout" title="Account and security" aria-label="Account and security">&#9881;</button>
+              <button id="signOutBtn" class="rail-signout" title="Sign out" aria-label="Sign out">&#9211;</button>`
             : ""
         }
       </div>
-      <button id="railToggleBtn" class="rail-toggle">${state.railOpen ? "‹ Collapse" : "›"}</button>
+      <button id="railToggleBtn" class="rail-toggle" aria-expanded="${state.railOpen ? "true" : "false"}" aria-label="${state.railOpen ? "Collapse the navigation rail" : "Expand the navigation rail"}">${state.railOpen ? "‹ Collapse" : "›"}</button>
     </div>
   `;
 
@@ -286,7 +291,7 @@ function renderChrome() {
         : ""
     }
     <span class="today-label">${escapeHtml(todayLabel())}</span>
-    <button id="topThemeBtn" class="icon-btn" title="Switch theme">${themeGlyph(getTheme())}</button>
+    <button id="topThemeBtn" class="icon-btn" title="Switch theme" aria-label="Switch between light and dark theme">${themeGlyph(getTheme())}</button>
     <button id="goReviewBtn" class="btn btn-primary" style="display:flex;align-items:center;gap:9px;padding:9px 15px;white-space:nowrap;">
       Review queue
       ${

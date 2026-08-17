@@ -396,7 +396,7 @@ export function mountReview(root, { navigate }) {
           <div class="review-toolbar-row">
             <div class="search-box">
               <span style="color:var(--tx4);font-size:12px;">&#8981;</span>
-              <input data-role="queue-filter" placeholder="Filter the queue…" value="${escapeHtml(s.q)}" />
+              <input data-role="queue-filter" aria-label="Filter the queue by headline" placeholder="Filter the queue…" value="${escapeHtml(s.q)}" />
             </div>
             <div class="seg-group">
               ${[
@@ -460,15 +460,17 @@ export function mountReview(root, { navigate }) {
           <div class="review-toolbar-row" style="padding-top:0;">
             <div class="date-range-group">
               <span class="mono" style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--tx4);">Date</span>
-              <input type="date" data-role="date-from" class="date-input" value="${escapeHtml(s.dateFrom)}" ${s.topN ? "disabled" : ""} />
+              <input type="date" data-role="date-from" class="date-input" aria-label="Filter from this date" value="${escapeHtml(s.dateFrom)}" ${s.topN ? "disabled" : ""} />
               <span style="color:var(--tx4);">to</span>
-              <input type="date" data-role="date-to" class="date-input" value="${escapeHtml(s.dateTo)}" ${s.topN ? "disabled" : ""} />
+              <input type="date" data-role="date-to" class="date-input" aria-label="Filter up to this date" value="${escapeHtml(s.dateTo)}" ${s.topN ? "disabled" : ""} />
             </div>
             <div class="score-slider-group">
               <span class="mono" style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--tx4);">Score</span>
               <div class="score-slider">
-                <input type="range" min="1" max="10" step="1" data-role="score-min" value="${s.scoreMin}" />
-                <input type="range" min="1" max="10" step="1" data-role="score-max" value="${s.scoreMax}" />
+                <input type="range" min="1" max="10" step="1" data-role="score-min" value="${s.scoreMin}"
+                       aria-label="Lowest AI relevance score to show" aria-valuemin="1" aria-valuemax="10" aria-valuenow="${s.scoreMin}" />
+                <input type="range" min="1" max="10" step="1" data-role="score-max" value="${s.scoreMax}"
+                       aria-label="Highest AI relevance score to show" aria-valuemin="1" aria-valuemax="10" aria-valuenow="${s.scoreMax}" />
               </div>
               <span class="mono" id="scoreRangeLabel" style="font-size:11px;color:var(--tx2);min-width:38px;">${s.scoreMin} to ${s.scoreMax}</span>
             </div>

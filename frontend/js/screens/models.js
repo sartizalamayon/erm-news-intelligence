@@ -412,6 +412,7 @@ export function mountModels(root) {
         <select class="text-input" style="padding:7px 9px;font-size:12.5px;width:160px;${problem ? "border-color:var(--amber);" : ""}"
                 data-route-provider="${feature}" data-slot="${slot}">${providerOptions(target?.provider)}</select>
         <input class="text-input" style="padding:7px 9px;font-size:12.5px;width:170px;" placeholder="model override"
+               aria-label="Model override for the ${slot} provider on ${label(feature)}"
                value="${escapeHtml(target?.model || "")}" data-route-model="${feature}" data-slot="${slot}" />
       </div>
       ${problem ? `<div style="font-size:11px;color:var(--amber);margin-top:5px;">${escapeHtml(problem)}</div>` : ""}`;

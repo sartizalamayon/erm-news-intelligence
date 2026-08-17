@@ -335,9 +335,9 @@ export function mountSearch(root) {
     return `<div class="row wrap" style="gap:10px;margin-bottom:12px;align-items:center;">
       <div class="date-range-group ${dateRangeInvalid() ? "range-invalid" : ""}">
         <span class="mono" style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--tx4);">Date</span>
-        <input type="date" data-role="date-from" class="date-input" value="${escapeHtml(s.dateFrom)}" />
+        <input type="date" data-role="date-from" class="date-input" aria-label="Filter from this date" value="${escapeHtml(s.dateFrom)}" />
         <span style="color:var(--tx4);">to</span>
-        <input type="date" data-role="date-to" class="date-input" value="${escapeHtml(s.dateTo)}" />
+        <input type="date" data-role="date-to" class="date-input" aria-label="Filter up to this date" value="${escapeHtml(s.dateTo)}" />
       </div>
       <div class="seg-group">
         ${LANGS.map(([k, l]) => `<button class="seg-btn ${s.lang === k ? "active" : ""}" data-lang="${k}">${l}</button>`).join("")}

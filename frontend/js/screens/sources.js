@@ -376,7 +376,7 @@ export function mountSources(root) {
             <div class="row wrap" style="gap:12px;align-items:center;padding:16px 22px 13px;">
               <div class="search-box" style="flex:1;min-width:190px;">
                 <span style="color:var(--tx4);font-size:12px;">&#8981;</span>
-                <input id="srcFilterInput" placeholder="Filter by name, method or language" value="${escapeHtml(s.q)}" />
+                <input id="srcFilterInput" placeholder="Filter by name, method or language" aria-label="Filter sources by name, method or language" value="${escapeHtml(s.q)}" />
               </div>
               <div class="row" style="gap:5px;">
                 ${FILTERS.map(
