@@ -406,6 +406,29 @@ class ImportResultOut(BaseModel):
 # ── Source health (frontend-contract.md §3.10) ──────────────────────────
 
 
+class StageCallsOut(BaseModel):
+    """How many LLM calls a stage made and how many came back — the
+    structured form of `app.services.enrichment.StageCalls`.
+
+    Exists as a field rather than only inside `detail` because "every
+    call failed" is a fact a UI must be able to render as a state, not
+    a sentence it has to parse. A stage whose calls all failed still
+    reports the articles it "processed", which is how a wholly dead
+    translate stage once rendered as a green success.
+
+    The whole object is null when a stage does not report call
+    accounting. That is a real, current state (only the translate stage
+    records `StageCalls` today), and it is deliberately distinct from a
+    zeroed record: "not counted" must never render as "nothing failed".
+    """
+
+    attempted: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    # One representative error, so a failure count comes with a cause.
+    first_error: str = ""
+
+
 class PipelineStageOut(BaseModel):
     key: str
     name: str
@@ -413,6 +436,39 @@ class PipelineStageOut(BaseModel):
     status: str  # "done" | "not_run" | "error"
     ran_at: str | None
     detail: str = ""
+    calls: StageCallsOut | None = None
+
+
+class PipelineStagePanelOut(PipelineStageOut):
+    """`GET /health/pipeline/stages` — a stage row plus the provider and
+    model it would use if started right now.
+
+    `route` is `LLMClient.name` as resolved by
+    `app.services.llm.registry.build_client_for_feature` — the WHOLE
+    failover chain, which with pooled credentials is routinely ten
+    candidates long. `route_primary` is its head (who answers unless
+    something goes wrong) and `route_fallbacks` how many candidates sit
+    behind it, so a label can be short without the full chain being
+    lost. All three describe what the stage will ACTUALLY call, not what
+    the routing preference says: a feature routed to a provider with no
+    usable key resolves to its secondary, and that has happened for real
+    on this database.
+
+    Null `route` with a populated `route_error` means nothing is
+    configured for the feature, so the UI renders "n/a" with the reason
+    instead of a plausible-looking provider name.
+
+    `uses_llm` is false for the one stage that makes no model call at
+    all ("Get article text" is a plain HTTP fetch), which is why an
+    empty `route` there means "needs none" rather than "not set up".
+    """
+
+    feature: str | None = None
+    uses_llm: bool = True
+    route: str | None = None
+    route_primary: str | None = None
+    route_fallbacks: int = 0
+    route_error: str | None = None
 
 
 class HealthOverviewOut(BaseModel):
@@ -460,6 +516,7 @@ class StageRunResult(BaseModel):
     stage: str
     status: str  # "done" | "error"
     detail: str = ""
+    calls: StageCallsOut | None = None
 
 
 # ── Fetch (P1) trigger + live progress (BUGFIX mission) ─────────────────
@@ -536,6 +593,12 @@ class RunStartBody(BaseModel):
     fetch: bool = True
     match: bool = True
     enrich: bool = True
+    # Which enrichment stages the enrich phase should run. Null (the
+    # default, and what every older client sends) means all five,
+    # exactly as before. A subset is what lets "re-run just the scoring
+    # stage" be the same backgrounded, progress-reporting run as
+    # everything else instead of a separate blocking endpoint.
+    stages: list[str] | None = None
 
 
 class ResetDayBody(BaseModel):
@@ -568,6 +631,9 @@ class RunPhasesRequestedOut(BaseModel):
     fetch: bool
     match: bool
     enrich: bool
+    # Null means "all five stages"; a list means this run was narrowed
+    # to those stages. See RunStartBody.stages.
+    stages: list[str] | None = None
 
 
 class RunFetchPhaseOut(BaseModel):
@@ -621,6 +687,17 @@ class RunStageOut(BaseModel):
     step: str = ""
     started_at: str | None = None
     finished_at: str | None = None
+    # WHICH provider and model this stage is using, resolved when the
+    # stage starts and published live. Same meaning as
+    # PipelineStagePanelOut's fields of the same names.
+    feature: str | None = None
+    uses_llm: bool = True
+    route: str | None = None
+    route_primary: str | None = None
+    route_fallbacks: int = 0
+    route_error: str | None = None
+    # Populated when the stage finishes. See StageCallsOut.
+    calls: StageCallsOut | None = None
 
 
 class RunEnrichPhaseOut(BaseModel):

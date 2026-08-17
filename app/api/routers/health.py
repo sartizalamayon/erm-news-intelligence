@@ -88,6 +88,7 @@ from app.api.schemas.admin import (
     FetchRunStatusOut,
     HealthOverviewOut,
     HealthSourceRowOut,
+    PipelineStagePanelOut,
     RematchResult,
     ResetDayBody,
     ResetDayResult,
@@ -186,6 +187,24 @@ def diagnose_source(source_id: int, admin: AuthenticatedUser = Depends(require_a
     return SourceDiagnoseResult(**result)
 
 
+@router.get("/pipeline/stages", response_model=list[PipelineStagePanelOut])
+def pipeline_stages(admin: AuthenticatedUser = Depends(require_admin)) -> list[PipelineStagePanelOut]:
+    """The Run screen's idle view of the pipeline: each enrichment
+    stage's recorded status and LLM call accounting for today, plus the
+    provider and model it would use if started now
+    (`app.services.admin.pipeline_panel`).
+
+    Separate from `GET /health/overview` (which already returns stage
+    statuses) because resolving five routes decrypts provider
+    credentials and reads the routing/quota config — work the Sources
+    screen's KPI tiles have no use for. `GET /health/overview` is
+    unchanged apart from each stage now also carrying `calls`.
+    """
+    with get_connection() as conn:
+        rows = admin_service.pipeline_panel(conn)
+    return [PipelineStagePanelOut(**row) for row in rows]
+
+
 @router.post("/pipeline/stages/{stage_key}/run", response_model=StageRunResult)
 def run_stage(stage_key: str, admin: AuthenticatedUser = Depends(require_admin)) -> StageRunResult:
     with get_connection() as conn:
@@ -251,8 +270,17 @@ def start_run(body: RunStartBody, admin: AuthenticatedUser = Depends(require_adm
     again. Safe to call while a run is already in progress — returns
     that run's current snapshot rather than starting a redundant second
     one.
+
+    `body.stages` narrows the enrich phase to a subset of the five
+    enrichment stages (null = all five, unchanged). That is what lets
+    "re-run just this stage" be an ordinary background run with live
+    progress instead of the synchronous, navigation-fragile
+    `POST /pipeline/stages/{key}/run` above — which remains for API
+    compatibility but is no longer what the Run screen calls.
     """
-    data = admin_service.start_run(fetch=body.fetch, match=body.match, enrich=body.enrich, trigger="manual")
+    data = admin_service.start_run(
+        fetch=body.fetch, match=body.match, enrich=body.enrich, stages=body.stages, trigger="manual"
+    )
     return RunStatusOut(**data)
 
 

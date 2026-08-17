@@ -312,3 +312,237 @@ def test_macro_card_shows_the_stored_figure_when_one_exists(dash_client, monkeyp
     assert inflation["status"] == "rollup"
     assert inflation["vals"][-1] == pytest.approx(9.7)
     assert "last stored figure" in inflation["note"]
+
+
+# ── Long term: the CRO blocks (migrations/0021) ─────────────────────────
+#
+# The reader of /dash/long is Grameenphone's ERM function. What that
+# reader needs from a 12-month view is (a) whether the window was even
+# observed, (b) what the regulator and the peer operators have been
+# doing, and (c) whether anything is rising on volume AND severity at
+# once. The tests below pin the honesty properties of those blocks,
+# because every one of them is a place where a plausible-looking number
+# could be printed instead of an absence.
+
+
+def _set_coverage(conn, month, *, collected_days: int, articles: int = 0) -> None:
+    conn.execute(
+        "INSERT INTO rollup_monthly_coverage (month, article_count, matched_count, scored_count, "
+        "collected_count, collected_days) VALUES (%s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (month) DO UPDATE SET article_count = EXCLUDED.article_count, "
+        "collected_days = EXCLUDED.collected_days",
+        (month, articles, articles, articles, articles if collected_days else 0, collected_days),
+    )
+
+
+def _set_watch(conn, month, entity, *, count: int, scored: int = 0, high: int = 0, score_sum: float = 0.0) -> None:
+    conn.execute(
+        "INSERT INTO rollup_monthly_watch (month, group_key, entity, article_count, matched_count, "
+        "scored_count, high_count, score_sum) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (month, group_key, entity) DO UPDATE SET article_count = EXCLUDED.article_count, "
+        "scored_count = EXCLUDED.scored_count, high_count = EXCLUDED.high_count, score_sum = EXCLUDED.score_sum",
+        (month, "regulatory", entity, count, count, scored, high, score_sum),
+    )
+
+
+def test_trends_marks_unmonitored_months_instead_of_drawing_them_as_zero(dash_client) -> None:
+    """`articles.day` is a PUBLICATION date, so a month before the
+    collector existed still carries backdated articles. Drawn as an
+    ordinary bar that reads as "risk coverage was flat all year then
+    exploded", which is a fact about when monitoring started.
+    """
+    client, conn = dash_client
+    today = _today_dhaka()
+    since = _add_months(_month_start(today), -11)
+    months = [_add_months(since, i) for i in range(12)]
+
+    # Ten months of backdated leftovers, two months actually collected.
+    for m in months[:10]:
+        _set_coverage(conn, m, collected_days=0, articles=4)
+    _set_coverage(conn, months[10], collected_days=9, articles=400)
+    _set_coverage(conn, months[11], collected_days=4, articles=200)
+    for m in months:
+        queries.upsert_rollup_monthly_section(conn, m, "Telco/regulatory", fetched_delta=4, matched_delta=4)
+    conn.commit()
+
+    data = client.get("/dashboard/trends").json()
+
+    assert data["monitoredMonths"] == 2
+    assert [c["monitored"] for c in data["coverage"]] == [False] * 10 + [True, True]
+    # The backdated months still report their real article count. They
+    # are not erased, only marked -- erasing them would be its own lie.
+    assert data["coverage"][0]["articles"] == 4
+    assert data["coverage"][0]["collectedDays"] == 0
+    assert [m["monitored"] for m in data["months12"]] == [False] * 10 + [True, True]
+    assert "not monitored rather than as zero" in data["windowNote"]
+    assert "13 days across 2" in data["windowNote"]
+
+
+def test_trends_says_so_when_no_month_was_monitored(dash_client) -> None:
+    """The empty-deployment case must not render as twelve quiet months."""
+    client, conn = dash_client
+    conn.commit()
+
+    data = client.get("/dashboard/trends").json()
+
+    assert data["monitoredMonths"] == 0
+    assert "nothing below is a trend" in data["windowNote"]
+    for group in data["watch"]:
+        for row in group["rows"]:
+            assert row["dir"] == "unknown"
+            assert row["latestRate"] is None
+            assert "No month in this window was monitored." == row["dirBasis"]
+
+
+def test_trends_watch_direction_is_per_collection_day_not_raw_count(dash_client) -> None:
+    """The collector ran 9 days one month and 4 the next in the real
+    deployment. An unchanged raw count across those two months is a rise
+    in coverage, and a chart comparing raw counts would call it flat.
+    """
+    client, conn = dash_client
+    today = _today_dhaka()
+    since = _add_months(_month_start(today), -11)
+    months = [_add_months(since, i) for i in range(12)]
+
+    _set_coverage(conn, months[10], collected_days=9, articles=400)
+    _set_coverage(conn, months[11], collected_days=4, articles=200)
+    # Identical raw counts, very different amounts of looking.
+    _set_watch(conn, months[10], "btrc", count=11, scored=7, high=5, score_sum=58.0)
+    _set_watch(conn, months[11], "btrc", count=11, scored=10, high=2, score_sum=59.0)
+    conn.commit()
+
+    data = client.get("/dashboard/trends").json()
+    regulatory = next(g for g in data["watch"] if g["key"] == "regulatory")
+    btrc = next(r for r in regulatory["rows"] if r["key"] == "btrc")
+
+    assert btrc["latest"] == btrc["previous"] == 11  # raw counts identical
+    assert btrc["latestRate"] == pytest.approx(2.75)  # 11 / 4 days
+    assert btrc["prevRate"] == pytest.approx(1.22)  # 11 / 9 days
+    assert btrc["dir"] == "up"
+    # The arrow has to be checkable without leaving the screen.
+    assert "2.75 per collection day" in btrc["dirBasis"]
+    assert "11 over 4 days, then 11 over 9" in btrc["dirBasis"]
+
+
+def test_trends_escalation_needs_both_volume_and_severity(dash_client) -> None:
+    """Volume alone is not risk. A theme whose count doubled while its
+    articles scored lower is noisier, not worse, and must not be badged.
+    """
+    client, conn = dash_client
+    today = _today_dhaka()
+    since = _add_months(_month_start(today), -11)
+    months = [_add_months(since, i) for i in range(12)]
+
+    _set_coverage(conn, months[10], collected_days=4, articles=400)
+    _set_coverage(conn, months[11], collected_days=4, articles=400)
+
+    # Volume up 4x, mean severity DOWN (10.0 -> 7.0). Not escalation.
+    _set_watch(conn, months[10], "spectrum", count=4, scored=1, high=1, score_sum=10.0)
+    _set_watch(conn, months[11], "spectrum", count=16, scored=8, high=4, score_sum=56.0)
+    # Volume up AND mean severity up (5.0 -> 8.0). Escalation.
+    _set_watch(conn, months[10], "btrc", count=4, scored=4, high=0, score_sum=20.0)
+    _set_watch(conn, months[11], "btrc", count=8, scored=8, high=6, score_sum=64.0)
+    conn.commit()
+
+    data = client.get("/dashboard/trends").json()
+    rows = {r["key"]: r for r in next(g for g in data["watch"] if g["key"] == "regulatory")["rows"]}
+
+    assert rows["spectrum"]["dir"] == "up"
+    assert rows["spectrum"]["escalating"] is False
+    assert rows["btrc"]["escalating"] is True
+
+
+def test_trends_severity_is_n_a_rather_than_zero_when_nothing_was_scored(dash_client) -> None:
+    """A printed 0.0 on a 0 to 10 relevance scale reads as "assessed,
+    and harmless" -- the opposite of "never assessed". Same defect the
+    macro cards were already fixed for.
+    """
+    client, conn = dash_client
+    today = _today_dhaka()
+    since = _add_months(_month_start(today), -11)
+    months = [_add_months(since, i) for i in range(12)]
+
+    _set_coverage(conn, months[11], collected_days=4, articles=100)
+    _set_watch(conn, months[11], "telecom_tax", count=2, scored=0, high=0, score_sum=0.0)
+    conn.commit()
+
+    data = client.get("/dashboard/trends").json()
+    rows = {r["key"]: r for r in next(g for g in data["watch"] if g["key"] == "regulatory")["rows"]}
+    tax = rows["telecom_tax"]
+
+    assert tax["total"] == 2
+    assert tax["avgScore"] is None
+    assert tax["scored"] == 0
+    assert "none scored by the AI stage yet" in tax["severityNote"]
+
+
+def test_trends_reports_counts_hidden_in_unmonitored_months(dash_client) -> None:
+    """The strip cannot draw a bar for an unmonitored month, so the
+    total beside it would silently disagree with the picture. The gap is
+    reported rather than left for the reader to trip over.
+    """
+    client, conn = dash_client
+    today = _today_dhaka()
+    since = _add_months(_month_start(today), -11)
+    months = [_add_months(since, i) for i in range(12)]
+
+    _set_coverage(conn, months[2], collected_days=0, articles=5)
+    _set_coverage(conn, months[11], collected_days=4, articles=100)
+    _set_watch(conn, months[2], "sim_rules", count=7, scored=7, high=1, score_sum=49.0)
+    _set_watch(conn, months[11], "sim_rules", count=2, scored=1, high=1, score_sum=8.0)
+    conn.commit()
+
+    data = client.get("/dashboard/trends").json()
+    rows = {r["key"]: r for r in next(g for g in data["watch"] if g["key"] == "regulatory")["rows"]}
+    sim = rows["sim_rules"]
+
+    assert sim["total"] == 9
+    assert sim["backdated"] == 7  # published before monitoring began
+    assert sim["monthsPresent"] == 1  # of the monitored months only
+
+
+def test_trends_relmix_marks_unmonitored_months(dash_client) -> None:
+    """The sharpest version of the same problem: this series is a SHARE,
+    so one backdated article scoring 9 in an unmonitored month draws a
+    full-height 100% bar next to a real month's 28%.
+    """
+    client, conn = dash_client
+    today = _today_dhaka()
+    since = _add_months(_month_start(today), -11)
+    months = [_add_months(since, i) for i in range(12)]
+
+    _set_coverage(conn, months[0], collected_days=0, articles=1)
+    _set_coverage(conn, months[11], collected_days=4, articles=100)
+    queries.upsert_rollup_monthly_score_band(conn, months[0], "high", count_delta=1)
+    queries.upsert_rollup_monthly_score_band(conn, months[11], "high", count_delta=28)
+    queries.upsert_rollup_monthly_score_band(conn, months[11], "low", count_delta=72)
+    conn.commit()
+
+    data = client.get("/dashboard/trends").json()
+    points = data["relMixTrend"]
+
+    # The unmonitored month genuinely computes to 100%, and that is
+    # exactly why it must be flagged rather than drawn.
+    assert points[0]["highShare"] == pytest.approx(1.0)
+    assert points[0]["monitored"] is False
+    assert points[11]["highShare"] == pytest.approx(0.28)
+    assert points[11]["monitored"] is True
+
+
+def test_trends_standing_theme_note_uses_months_with_data_as_denominator(dash_client) -> None:
+    """"Present in 2 of the last 12 months" reads as a theme that faded.
+    When only 2 months carry any theme data, the honest denominator is 2.
+    """
+    client, conn = dash_client
+    today = _today_dhaka()
+    since = _add_months(_month_start(today), -11)
+    months = [_add_months(since, i) for i in range(12)]
+
+    for m in months[10:]:
+        queries.upsert_rollup_monthly_theme(conn, m, "Spectrum repricing", count_delta=6, intensity=0.9)
+    conn.commit()
+
+    data = client.get("/dashboard/trends").json()
+    entry = next(s for s in data["standing"] if s["name"] == "Spectrum repricing")
+
+    assert entry["note"] == "Present in 2 of the 2 months with theme data."

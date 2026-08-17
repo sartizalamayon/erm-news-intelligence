@@ -17,7 +17,14 @@ from app.sources.registry import register
 CONFIG = IdEnumConfig(
     site_url="https://www.dailyictnews.com",
     article_pattern="/{id}",
-    id_regex=r"(?:dailyictnews\.com)?/(\d{4,})",
+    # The trailing lookahead is load-bearing. Without it the homepage's
+    # image filenames match: `/content/archives/2026/08/9007442b-f8d6-...`
+    # yielded a "9007442" id against a real newest article id of 17353,
+    # and the walk spent its whole probe budget 8.99 million ids above
+    # the top of the site (run 125: "0 fetched" after 56.7s).
+    # `_id_enum._plausible_max_id` now also rejects that id as an
+    # outlier; this keeps the regex from producing it in the first place.
+    id_regex=r"(?:dailyictnews\.com)?/(\d{4,})(?![\dA-Za-z])",
     date_source="bengali_date",
     not_article_check="none",
 )

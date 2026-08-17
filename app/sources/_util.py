@@ -155,6 +155,35 @@ def parse_dt(value: str | int | float | None) -> datetime | None:
     return None
 
 
+# Bengali numerals and month names.
+#
+# Shared here rather than duplicated per method family: `_id_enum`
+# (Somoy Journal, Daily ICT News) and `_archive_listing` (Amar Barta,
+# Share Biz, Share Business 24) both read Bengali-script dates, and a
+# month table that exists twice is a table that will be corrected once.
+BN_DIGIT_TABLE = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+BN_MONTHS: dict[str, int] = {
+    "জানুয়ারি": 1,
+    "ফেব্রুয়ারি": 2,
+    "মার্চ": 3,
+    "এপ্রিল": 4,
+    "মে": 5,
+    "জুন": 6,
+    "জুলাই": 7,
+    "আগস্ট": 8,
+    "সেপ্টেম্বর": 9,
+    "অক্টোবর": 10,
+    "নভেম্বর": 11,
+    "ডিসেম্বর": 12,
+}
+BN_MONTH_ALT = "|".join(BN_MONTHS)
+
+
+def bn_digits(text: str) -> str:
+    """Bengali numerals -> ASCII, leaving everything else untouched."""
+    return text.translate(BN_DIGIT_TABLE)
+
+
 _URL_DATE_RE = re.compile(r"/(20\d{2})[/-](\d{1,2})[/-](\d{1,2})(?:[/-]|$)")
 
 

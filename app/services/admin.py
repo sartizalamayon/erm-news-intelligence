@@ -1609,19 +1609,130 @@ PIPELINE_STAGES: tuple[tuple[str, str, str], ...] = (
 )
 _PIPELINE_STAGE_KEYS = {key for key, _, _ in PIPELINE_STAGES}
 
+# Which routed AI feature each stage's LLM calls actually go through.
+#
+# This map is the whole reason the Run screen can say WHICH provider and
+# model a stage is about to use. Routing is per-FEATURE
+# (`app.services.llm.routing.FEATURES`) while the pipeline is per-STAGE,
+# and nothing anywhere joined the two — so an operator watching "Score
+# relevance" run had no way to know it was Groq, Gemini or Mistral
+# answering, which is precisely the question you need answered when a
+# stage starts failing or gets slow.
+#
+# `bodies` maps to None on purpose: it is a plain HTTP page fetch
+# against `app.sources`, with no LLM call anywhere in it (see
+# `_run_bodies_stage`). Rendering it with an empty provider slot would
+# read as "unconfigured"; `None` here means "this stage has no provider
+# because it needs none", which is a different statement.
+STAGE_FEATURES: dict[str, str | None] = {
+    "translate": llm_routing.TRANSLATION,
+    "bodies": None,
+    "dedup": llm_routing.DEDUP_VERIFICATION,
+    "judge": llm_routing.SCORING,
+    "topic": llm_routing.TOPIC_CLUSTERING,
+}
+
+
+def stage_route(conn: DictConnection, stage_key: str) -> dict[str, Any]:
+    """Which provider and model `stage_key` would use, right now.
+
+    Resolved through the SAME call the stage itself makes
+    (`app.services.llm.registry.build_client_for_feature`), never a
+    re-derivation from the routing config: a route that reads
+    "scoring -> mistral" but resolves to Gemini because Mistral has no
+    usable credential has happened for real on this database, and a
+    display built from the stored preference would have shown the wrong
+    provider with total confidence. `LLMClient.name` is what the failover
+    chain actually resolved to, in try order.
+
+    Never raises. A feature with nothing configured returns
+    `route=None` plus the resolver's own reason in `route_error`, so the
+    UI can render "n/a" and say why instead of inventing a provider.
+    """
+    feature = STAGE_FEATURES.get(stage_key)
+    if feature is None:
+        return {
+            "feature": None,
+            "uses_llm": False,
+            "route": None,
+            "route_primary": None,
+            "route_fallbacks": 0,
+            "route_error": None,
+        }
+    try:
+        client = _build_client_for_feature(conn, feature)
+    except Exception as exc:  # noqa: BLE001 - a display helper must never break the page it labels
+        return {
+            "feature": feature,
+            "uses_llm": True,
+            "route": None,
+            "route_primary": None,
+            "route_fallbacks": 0,
+            "route_error": str(exc)[:300],
+        }
+    name = str(getattr(client, "name", "") or "")
+    if not name:
+        return {
+            "feature": feature,
+            "uses_llm": True,
+            "route": None,
+            "route_primary": None,
+            "route_fallbacks": 0,
+            "route_error": "the resolved client reported no provider name",
+        }
+    # `LLMClient.name` is the WHOLE failover chain, joined with " -> " by
+    # `registry.build_client_for_feature`. With pooled credentials that
+    # is routinely ten candidates long (five Gemini keys then five
+    # Mistral keys), which is true, useful in a tooltip, and completely
+    # unreadable as a label. Split here rather than in the browser so
+    # there is one place that knows the join, next to the code that
+    # documents it: the head is who answers unless something goes wrong,
+    # the tail is how deep the safety net goes.
+    parts = [p.strip() for p in name.split(" -> ") if p.strip()]
+    return {
+        "feature": feature,
+        "uses_llm": True,
+        "route": name,
+        "route_primary": parts[0] if parts else name,
+        "route_fallbacks": max(0, len(parts) - 1),
+        "route_error": None,
+    }
+
+
+def pipeline_stage_routes(conn: DictConnection) -> dict[str, dict[str, Any]]:
+    """`stage_route` for every stage, keyed by stage key."""
+    return {key: stage_route(conn, key) for key, _, _ in PIPELINE_STAGES}
+
 
 def _stage_status_setting_key(stage: str, day: date) -> str:
     return f"pipeline_stage_status:{stage}:{day.isoformat()}"
 
 
 def _record_stage_status(
-    conn: DictConnection, stage: str, *, status: str, detail: str, day: date | None = None
+    conn: DictConnection,
+    stage: str,
+    *,
+    status: str,
+    detail: str,
+    calls: dict[str, Any] | None = None,
+    day: date | None = None,
 ) -> None:
     day = day or date.today()
     set_setting(
         conn,
         _stage_status_setting_key(stage, day),
-        json.dumps({"status": status, "detail": detail, "ran_at": datetime.now(timezone.utc).isoformat()}),
+        json.dumps(
+            {
+                "status": status,
+                "detail": detail,
+                # Persisted alongside the status so the call accounting
+                # survives the run that produced it. Without this the
+                # only place "578 of 578 calls FAILED" ever existed was
+                # the live run panel, and reloading the page lost it.
+                "calls": calls,
+                "ran_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
     )
     conn.commit()
 
@@ -1644,11 +1755,40 @@ def pipeline_stage_statuses(conn: DictConnection, day: date | None = None) -> li
                     "status": data.get("status", "done"),
                     "ran_at": data.get("ran_at"),
                     "detail": data.get("detail", ""),
+                    # None (not a zeroed record) for a stage last run
+                    # before call accounting existed: "we did not count"
+                    # and "we counted zero" are different facts.
+                    "calls": data.get("calls"),
                 }
             )
         else:
-            out.append({"key": key, "name": name, "desc": desc, "status": "not_run", "ran_at": None, "detail": ""})
+            out.append(
+                {
+                    "key": key,
+                    "name": name,
+                    "desc": desc,
+                    "status": "not_run",
+                    "ran_at": None,
+                    "detail": "",
+                    "calls": None,
+                }
+            )
     return out
+
+
+def pipeline_panel(conn: DictConnection, day: date | None = None) -> list[dict[str, Any]]:
+    """`GET /health/pipeline/stages` — one row per stage, carrying
+    everything the Run screen draws when NO run is in flight: today's
+    recorded status and call accounting, plus the provider/model that
+    stage would use if started now.
+
+    Deliberately its own endpoint rather than more fields on
+    `GET /health/overview`: resolving five routes decrypts credentials
+    and reads the routing/quota config, which the Sources screen's KPI
+    tiles have no use for and should not pay for on every load.
+    """
+    routes = pipeline_stage_routes(conn)
+    return [{**row, **routes.get(row["key"], {})} for row in pipeline_stage_statuses(conn, day)]
 
 
 BODIES_STAGE_MAX = 2000
@@ -1781,21 +1921,52 @@ def _run_bodies_stage(
     }
 
 
+def _calls_payload(result: Any, stage_key: str) -> dict[str, Any] | None:
+    """`StageCalls` for `stage_key` as a plain dict, or None.
+
+    None means "this stage does not report per-call accounting", which
+    is a real state today: `app.services.enrichment` records
+    `StageCalls` for the translate stage only. Returning a zeroed record
+    for the others would put "0 of 0 calls failed" on screen for stages
+    that in fact made calls nobody counted — a fabricated all-clear,
+    which is exactly the class of bug the accounting was added to kill.
+    """
+    calls = getattr(result, "calls", None)
+    if not isinstance(calls, dict):
+        return None
+    entry = calls.get(stage_key)
+    if entry is None:
+        return None
+    return {
+        "attempted": int(getattr(entry, "attempted", 0)),
+        "succeeded": int(getattr(entry, "succeeded", 0)),
+        "failed": int(getattr(entry, "failed", 0)),
+        "first_error": str(getattr(entry, "first_error", "") or ""),
+    }
+
+
 def run_pipeline_stage(
     conn: DictConnection,
     stage_key: str,
     *,
     progress: Any | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Run ONE enrichment stage.
 
     `progress(done, total, step)` is forwarded to the enrichment stage
     so callers can render live x/n counts instead of an opaque
     "running…". Optional: every existing caller that omits it behaves
     exactly as before.
+
+    Returns `status`/`detail` as always, plus `calls` — the stage's LLM
+    call accounting as a structured dict (or None when the stage does
+    not report it; see `_calls_payload`). `detail` still carries the same
+    human sentence, but a UI should not have to parse prose to find out
+    that every call failed.
     """
     if stage_key not in _PIPELINE_STAGE_KEYS:
         raise ValidationError(f"unknown pipeline stage {stage_key!r}, must be one of {sorted(_PIPELINE_STAGE_KEYS)}")
+    calls: dict[str, Any] | None = None
     try:
         if stage_key == "bodies":
             result = _run_bodies_stage(conn, progress=progress)
@@ -1818,6 +1989,7 @@ def run_pipeline_stage(
 
             enrichment_result = enrichment.run_llm_enrichment(conn, stages={stage_key}, progress=progress)
             detail = _enrichment_detail(enrichment_result)
+            calls = _calls_payload(enrichment_result, stage_key)
             # A stage that attempted LLM work and got NOTHING back is a
             # FAILED stage, not a done one. It used to report "done ·
             # processed 578 article(s)" while all 578 kept their
@@ -1830,13 +2002,13 @@ def run_pipeline_stage(
                 else ()
             )
             if dead:
-                _record_stage_status(conn, stage_key, status="error", detail=detail)
-                return {"stage": stage_key, "status": "error", "detail": detail}
+                _record_stage_status(conn, stage_key, status="error", detail=detail, calls=calls)
+                return {"stage": stage_key, "status": "error", "detail": detail, "calls": calls}
     except Exception as exc:
-        _record_stage_status(conn, stage_key, status="error", detail=str(exc))
+        _record_stage_status(conn, stage_key, status="error", detail=str(exc), calls=calls)
         raise
-    _record_stage_status(conn, stage_key, status="done", detail=detail)
-    return {"stage": stage_key, "status": "done", "detail": detail}
+    _record_stage_status(conn, stage_key, status="done", detail=detail, calls=calls)
+    return {"stage": stage_key, "status": "done", "detail": detail, "calls": calls}
 
 
 def _enrichment_detail(result: Any) -> str:
@@ -1865,7 +2037,7 @@ def _enrichment_detail(result: Any) -> str:
     return " · ".join(parts)
 
 
-def run_pipeline_all(conn: DictConnection) -> list[dict[str, str]]:
+def run_pipeline_all(conn: DictConnection) -> list[dict[str, Any]]:
     """Runs all 5 stages in order. Each stage's failure is isolated —
     one broken stage is recorded and the rest still run — mirroring
     app.services.collector's per-source isolation philosophy at the
@@ -2271,7 +2443,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _new_enrich_phase_state() -> dict[str, Any]:
+def _new_enrich_phase_state(stages: tuple[str, ...] | None = None) -> dict[str, Any]:
     """Per-stage state, including LIVE progress fields.
 
     `done`/`total`/`step` are what turn an opaque "running…" into
@@ -2279,7 +2451,17 @@ def _new_enrich_phase_state() -> dict[str, Any]:
     own progress callback while it runs, so an operator can tell a slow
     stage apart from a stuck one — previously indistinguishable, which
     is exactly how a genuinely hung judge stage went unnoticed.
+
+    `route`/`route_error` are filled in when the stage STARTS (see
+    `_run_one_enrich_stage`), not here: the answer to "which provider is
+    running this" is only true as of the moment the client is built, and
+    an admin can re-route a feature between one stage and the next.
+    `calls` is filled in when it finishes.
+
+    `stages` selects which of `PIPELINE_STAGES` this run includes. None
+    means all five (the pre-existing behaviour).
     """
+    wanted = tuple(stages) if stages is not None else tuple(key for key, _, _ in PIPELINE_STAGES)
     return {
         "status": "pending",
         "stages": [
@@ -2294,8 +2476,16 @@ def _new_enrich_phase_state() -> dict[str, Any]:
                 "step": "",
                 "started_at": None,
                 "finished_at": None,
+                "feature": STAGE_FEATURES.get(key),
+                "uses_llm": STAGE_FEATURES.get(key) is not None,
+                "route": None,
+                "route_primary": None,
+                "route_fallbacks": 0,
+                "route_error": None,
+                "calls": None,
             }
             for key, name, desc in PIPELINE_STAGES
+            if key in wanted
         ],
     }
 
@@ -2424,14 +2614,43 @@ def _run_one_enrich_stage(stage_key: str) -> bool:
     with _run_lock:
         entry = _stage_entry(stage_key)
         if entry is not None:
-            entry.update(status="running", done=0, total=0, step="", started_at=_now_iso())
+            entry.update(
+                status="running",
+                done=0,
+                total=0,
+                step="",
+                started_at=_now_iso(),
+                route=None,
+                route_error=None,
+                calls=None,
+            )
     try:
         with get_connection() as stage_conn:
+            # Resolved BEFORE the stage runs and published immediately,
+            # so "which provider and model is this" is answerable while
+            # the stage is still going rather than only afterwards from
+            # a log line. Cheap: building a client opens no connection
+            # and makes no request.
+            route = stage_route(stage_conn, stage_key)
+            with _run_lock:
+                entry = _stage_entry(stage_key)
+                if entry is not None:
+                    entry.update(
+                        route=route["route"],
+                        route_primary=route["route_primary"],
+                        route_fallbacks=route["route_fallbacks"],
+                        route_error=route["route_error"],
+                    )
             result = run_pipeline_stage(stage_conn, stage_key, progress=_report)
         with _run_lock:
             entry = _stage_entry(stage_key)
             if entry is not None:
-                entry.update(status=result["status"], detail=result["detail"], finished_at=_now_iso())
+                entry.update(
+                    status=result["status"],
+                    detail=result["detail"],
+                    calls=result.get("calls"),
+                    finished_at=_now_iso(),
+                )
         # Not `return True`. `run_pipeline_stage` now reports status
         # "error" WITHOUT raising when a stage's every LLM call failed
         # (see enrichment.StageCalls), and returning True there would
@@ -2457,8 +2676,12 @@ def _run_enrich_subphase(conn: DictConnection) -> None:
 
     with _run_lock:
         _run_state["phase"] = "enrich"
-
-    configured = [key for key, _, _ in PIPELINE_STAGES]
+        # The run's stage SELECTION is whatever `_new_enrich_phase_state`
+        # put in the snapshot — a subset when the caller asked for one,
+        # all five otherwise. Reading it from there rather than from a
+        # separate parameter keeps one source of truth: whatever the UI
+        # is rendering is exactly what this loop will run.
+        configured = [s["key"] for s in (_run_state.get("enrich") or {}).get("stages", [])]
     planned = [tuple(s for s in wave if s in configured) for wave in ENRICH_WAVES]
     # Anything in PIPELINE_STAGES that no wave claims still has to run.
     claimed = {s for wave in planned for s in wave}
@@ -2512,7 +2735,12 @@ def _run_pipeline_in_background(*, fetch: bool, match: bool, enrich: bool, trigg
 
 
 def start_run(
-    *, fetch: bool = True, match: bool = True, enrich: bool = True, trigger: str = "manual"
+    *,
+    fetch: bool = True,
+    match: bool = True,
+    enrich: bool = True,
+    stages: list[str] | None = None,
+    trigger: str = "manual",
 ) -> dict[str, Any]:
     """`POST /health/pipeline/run`'s service function — the single entry
     point for "Run collection". Starts fetch/match/enrich (whichever are
@@ -2522,9 +2750,30 @@ def start_run(
     browser, still existing — see this module section's docstring.
     Returns the existing in-progress snapshot unchanged, without starting
     a second run, if one is already running.
+
+    `stages` narrows the enrich phase to a SUBSET of `PIPELINE_STAGES`.
+    None (the default, and every pre-existing caller) means all five,
+    unchanged. This exists because the UI previously had two ways to run
+    the same five stages — an all-or-nothing "Enrich" checkbox, and a
+    separate card of five synchronous per-stage buttons that blocked the
+    request for the whole stage and were abandoned by any navigation.
+    With a subset accepted here, re-running one stage is the SAME
+    background run as everything else: same isolation, same live
+    progress, same immunity to closing the tab.
     """
     if not fetch and not match and not enrich:
         raise ValidationError("at least one phase (fetch/match/enrich) must be selected")
+    selected: tuple[str, ...] | None = None
+    if stages is not None:
+        unknown = sorted(set(stages) - _PIPELINE_STAGE_KEYS)
+        if unknown:
+            raise ValidationError(f"unknown pipeline stage(s) {unknown}, must be from {sorted(_PIPELINE_STAGE_KEYS)}")
+        # Ordered by PIPELINE_STAGES, not by however the caller listed
+        # them: the wave planner below depends on pipeline order, and a
+        # UI is free to send whatever order its checkboxes are in.
+        selected = tuple(key for key, _, _ in PIPELINE_STAGES if key in set(stages))
+        if enrich and not selected:
+            raise ValidationError("the enrich phase was requested with an empty stage list")
     with _run_lock:
         already_running = _run_state.get("status") == "running"
         if not already_running:
@@ -2533,12 +2782,17 @@ def start_run(
                 status="running",
                 phase="idle",
                 trigger=trigger,
-                requested={"fetch": fetch, "match": match, "enrich": enrich},
+                requested={
+                    "fetch": fetch,
+                    "match": match,
+                    "enrich": enrich,
+                    "stages": list(selected) if selected is not None else None,
+                },
                 started_at=datetime.now(timezone.utc).isoformat(),
                 finished_at=None,
                 fetch=_new_fetch_phase_state() if fetch else None,
                 match=_new_match_phase_state() if match else None,
-                enrich=_new_enrich_phase_state() if enrich else None,
+                enrich=_new_enrich_phase_state(selected) if enrich else None,
                 error=None,
             )
     # `run_status()` acquires `_run_lock` itself — must be called after

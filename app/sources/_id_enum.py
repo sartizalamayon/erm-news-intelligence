@@ -35,7 +35,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from app.errors import SourceFetchError
-from app.sources._util import DHAKA, clean_title, is_recent
+from app.sources._util import BN_DIGIT_TABLE, BN_MONTH_ALT, BN_MONTHS, DHAKA, clean_title, is_recent
 from app.sources.base import FeedItem
 from app.sources.http import get, get_or_raise
 
@@ -55,25 +55,80 @@ _OG_TITLE_RE = re.compile(r'property="og:title"\s+content="([^"]+)"')
 _CANONICAL_RE = re.compile(r'<link[^>]+rel="canonical"[^>]+href="([^"]*)"')
 _CANONICAL_RE_SIMPLE = re.compile(r'<link rel="canonical" href="(https?://[^"]+)"')
 
+_ENGLISH_MONTHS = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+_EN_MONTH_ALT = "January|February|March|April|May|June|July|August|September|October|November|December|" + "|".join(
+    m.capitalize() for m in _ENGLISH_MONTHS
+)
+
+# `"datePublished": "18:35, 15 August 2026"` — TIME first, then the
+# date, in Dhaka wall clock with no offset. Served by the eMythMakers
+# CMS (InfoTech Insight, Share Biz, Share Business 24). `_JSONLD_DATE_RE`
+# above only understands the ISO ordering and silently finds nothing
+# here, which is why these sites need their own parser rather than a
+# looser version of that one.
+_JSONLD_TIMEFIRST_RE = re.compile(
+    r'"datePublished"\s*:\s*"(\d{1,2}):(\d{2}),\s*(\d{1,2})\s+(' + _EN_MONTH_ALT + r")\s+(\d{4})\""
+)
+
+# `<i class="fa fa-calendar"></i>&nbsp;&nbsp;11-08-2026` — Desh Patrika
+# prints a bare DD-MM-YYYY next to a calendar glyph and no clock time at
+# all. Anchored on the glyph because a naked DD-MM-YYYY regex also
+# matches the "related news" dates further down the same page (the live
+# page carries five of them), which would date the article to whichever
+# sidebar story happened to come first.
+_CALENDAR_DMY_RE = re.compile(r"fa-calendar[^>]*>\s*</i>(?:\s|&nbsp;|&#160;)*(\d{1,2})-(\d{1,2})-(\d{4})")
+
+# `<div class="entry_update ..."><i class="fa fa-clock-o"></i>&nbsp;&nbsp;17
+# Aug 2026, 00:16<br></div>` — BSS's only machine-readable timestamp (no
+# JSON-LD anywhere on the page). Scoped to the `entry_update` container
+# for the same reason as above: the page's "latest news" rail repeats
+# the same date format for other stories.
+_ENTRY_UPDATE_BLOCK_RE = re.compile(r'class="[^"]*entry_update[^"]*"[^>]*>(.{0,400}?)</div>', re.S)
+_ENGLISH_DMY_TIME_RE = re.compile(r"(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{4}),\s*(\d{1,2}):(\d{2})")
+
+# An id far above every other id on the page is not an id.
+#
+# Daily ICT News' homepage embeds image filenames built from a UUID:
+#
+#     /content/archives/2026/08/9007442b-f8d6-4749-b568-a19c11a77876-bigthumb.jpg
+#
+# `(?:dailyictnews\.com)?/(\d{4,})` matched the leading `9007442` of that
+# UUID, so `max(all_ids)` returned 9,007,442 against a real newest
+# article id of 17,353. The walk started 8.99 MILLION ids above the top
+# of the site, every probe 404'd, and the source hit MAX_CONSEC_FAIL and
+# reported "0 fetched" after 57 seconds — run 125's Daily ICT News
+# entry. Tightening that one regex fixes that one site; this guard fixes
+# the whole family, because any source whose page embeds a long digit
+# run anywhere can lose its entire run the same silent way.
+#
+# The test is relative to the MEDIAN, which is unmoved by a handful of
+# outliers, and the multiplier is deliberately loose: real article ids
+# on a homepage span at most a few thousand around the median, so a
+# 100x gap is never a legitimate id and always a false match.
+OUTLIER_ID_FACTOR = 100
+MIN_IDS_FOR_OUTLIER_CHECK = 5
+
 # Bengali-digit date, e.g. "১৮ জুন ২০২৬" or "১৮ জুন ২০২৬, ২৩:১৬" — no time
 # element on these sites, so a bare date always resolves to noon Dhaka
 # (matches legacy's own documented behavior, collector_logic.py:1124-1139).
-_BN_DIGIT_TABLE = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
-_BN_MONTHS = {
-    "জানুয়ারি": 1,
-    "ফেব্রুয়ারি": 2,
-    "মার্চ": 3,
-    "এপ্রিল": 4,
-    "মে": 5,
-    "জুন": 6,
-    "জুলাই": 7,
-    "আগস্ট": 8,
-    "সেপ্টেম্বর": 9,
-    "অক্টোবর": 10,
-    "নভেম্বর": 11,
-    "ডিসেম্বর": 12,
-}
-_BN_MONTH_ALT = "|".join(_BN_MONTHS)
+# The digit table and month names live in `_util` because the archive
+# listing family reads the same script.
+_BN_DIGIT_TABLE = BN_DIGIT_TABLE
+_BN_MONTHS = BN_MONTHS
+_BN_MONTH_ALT = BN_MONTH_ALT
 
 # TWO orderings, because the sites using this parser do not agree.
 #
@@ -100,13 +155,23 @@ class IdEnumConfig:
     site_url: str
     article_pattern: str
     id_regex: str
-    date_source: str = "jsonld"  # | "bengali_date"
+    # "jsonld" | "bengali_date" | "jsonld_timefirst" | "calendar_dmy" | "entry_update"
+    date_source: str = "jsonld"
     date_tz_override: str | None = None
     not_article_check: str = "canonical_is_homepage"  # | "no_time_element" | "no_jsonld" | "none"
     canonical_hop: bool = False
     no_follow_redirects: bool = False
     workers: int = 8
     batch_size: int = 40
+    # Some CMSes append the section to og:title ("Headline | Section").
+    # Set the separator to split it back off, so the stored headline is
+    # the headline and the section is available to `skip_sections`.
+    title_section_separator: str | None = None
+    # Sections to drop entirely, lower-cased. Needed where a site
+    # publishes the SAME story twice under two different ids — BSS mirrors
+    # every story into a "Subscriber" wire feed, so collecting both would
+    # double every article it produces. Requires `title_section_separator`.
+    skip_sections: frozenset[str] = frozenset()
 
 
 def _parse_jsonld_date(html: str, tz_override: str | None) -> datetime | None:
@@ -157,6 +222,99 @@ def _parse_bengali_date(html: str) -> datetime | None:
     return None
 
 
+def _parse_jsonld_timefirst_date(html: str) -> datetime | None:
+    """`"datePublished": "18:35, 15 August 2026"` — Dhaka wall clock,
+    no offset carried in the string (see `_JSONLD_TIMEFIRST_RE`).
+    """
+    m = _JSONLD_TIMEFIRST_RE.search(html)
+    if not m:
+        return None
+    hour, minute, day, month_name, year = m.groups()
+    month = _ENGLISH_MONTHS.get(month_name[:3].lower())
+    if month is None:
+        return None
+    try:
+        return datetime(int(year), month, int(day), int(hour), int(minute), tzinfo=DHAKA)
+    except ValueError:
+        return None
+
+
+def _parse_calendar_dmy_date(html: str) -> datetime | None:
+    """`fa-calendar` glyph followed by `DD-MM-YYYY`. The page carries no
+    clock time, so a bare date resolves to noon Dhaka — the same
+    convention `_parse_bengali_date` already uses for dateless pages.
+    """
+    m = _CALENDAR_DMY_RE.search(html)
+    if not m:
+        return None
+    day, month, year = (int(g) for g in m.groups())
+    try:
+        return datetime(year, month, day, 12, 0, tzinfo=DHAKA)
+    except ValueError:
+        return None
+
+
+def _parse_entry_update_date(html: str) -> datetime | None:
+    """First `DD Mon YYYY, HH:MM` inside the `entry_update` container,
+    Dhaka wall clock. A page with no such container (BSS serves a
+    fixed placeholder for every unused id) yields `None`, which is what
+    rejects it as a non-article.
+    """
+    block = _ENTRY_UPDATE_BLOCK_RE.search(html)
+    if not block:
+        return None
+    m = _ENGLISH_DMY_TIME_RE.search(block.group(1))
+    if not m:
+        return None
+    day, month_name, year, hour, minute = m.groups()
+    month = _ENGLISH_MONTHS.get(month_name[:3].lower())
+    if month is None:
+        return None
+    try:
+        return datetime(int(year), month, int(day), int(hour), int(minute), tzinfo=DHAKA)
+    except ValueError:
+        return None
+
+
+def _parse_date(html: str, cfg: IdEnumConfig) -> datetime | None:
+    if cfg.date_source == "bengali_date":
+        return _parse_bengali_date(html)
+    if cfg.date_source == "jsonld_timefirst":
+        return _parse_jsonld_timefirst_date(html)
+    if cfg.date_source == "calendar_dmy":
+        return _parse_calendar_dmy_date(html)
+    if cfg.date_source == "entry_update":
+        return _parse_entry_update_date(html)
+    return _parse_jsonld_date(html, cfg.date_tz_override)
+
+
+def _split_section(title: str, separator: str | None) -> tuple[str, str]:
+    """("Headline | Section") -> ("Headline", "section"). Returns the
+    title unchanged and an empty section when there is no separator to
+    split on.
+    """
+    if not separator or separator not in title:
+        return title, ""
+    head, _, section = title.rpartition(separator)
+    return head.strip(), section.strip().lower()
+
+
+def _plausible_max_id(all_ids: list[int]) -> int:
+    """The highest id that is actually an article id — see
+    `OUTLIER_ID_FACTOR` for the UUID-fragment false match this exists to
+    reject. With too few ids to judge, the plain maximum is returned:
+    guessing at a distribution from three samples would be worse than
+    the behaviour this replaces.
+    """
+    if len(all_ids) < MIN_IDS_FOR_OUTLIER_CHECK:
+        return max(all_ids)
+    ordered = sorted(all_ids)
+    median = ordered[len(ordered) // 2]
+    ceiling = median * OUTLIER_ID_FACTOR
+    plausible = [i for i in ordered if i <= ceiling]
+    return max(plausible) if plausible else max(all_ids)
+
+
 def _is_article(html: str, not_article_check: str, site_url: str) -> bool:
     if not_article_check == "canonical_is_homepage":
         m = _CANONICAL_RE.search(html)
@@ -200,10 +358,7 @@ def _resolve_one(
     if not _is_article(html, cfg.not_article_check, cfg.site_url):
         return None
 
-    if cfg.date_source == "bengali_date":
-        dt = _parse_bengali_date(html)
-    else:
-        dt = _parse_jsonld_date(html, cfg.date_tz_override)
+    dt = _parse_date(html, cfg)
     if dt is None:
         return None
 
@@ -216,6 +371,10 @@ def _resolve_one(
         if om:
             title = clean_title(om.group(1))
 
+    title, section = _split_section(title, cfg.title_section_separator)
+    if section and section in cfg.skip_sections:
+        return None
+
     return (nid, title, final_url, dt)
 
 
@@ -224,7 +383,7 @@ def fetch_id_enum(session: requests.Session, cfg: IdEnumConfig, *, source: str) 
     all_ids = [int(m) for m in re.findall(cfg.id_regex, homepage.text)]
     if not all_ids:
         raise SourceFetchError(f"id_enum: no IDs found on homepage of {cfg.site_url}", source=source)
-    max_id = max(all_ids)
+    max_id = _plausible_max_id(all_ids)
 
     resolved: list[tuple[int, str, str, datetime]] = []
     newest_dt: datetime | None = None

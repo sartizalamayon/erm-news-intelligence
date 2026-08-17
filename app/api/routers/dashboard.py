@@ -48,6 +48,7 @@ from app.api.schemas.core import (
     FunnelStageOut,
     HeatRowOut,
     KpiOut,
+    MonthCoverageOut,
     MonthVolumeOut,
     RelMixOut,
     RelMixTrendPointOut,
@@ -55,10 +56,12 @@ from app.api.schemas.core import (
     SourceCountOut,
     StandingThemeOut,
     TrendCardOut,
+    WatchGroupOut,
+    WatchRowOut,
     get_risk_sections,
 )
 from app.config import get_settings
-from app.db import queries
+from app.db import queries, watchlist
 from app.db.connection import DictConnection, get_connection
 from app.services import admin as admin_service
 from app.services import macro as macro_service
@@ -416,6 +419,193 @@ def _month_start(d: date) -> date:
     return d.replace(day=1)
 
 
+# ── Long-term: the CRO blocks (migrations/0021) ──────────────────────────
+#
+# WHO THIS SCREEN IS FOR, and what changed because of it.
+#
+# The reader is Grameenphone's ERM function and ultimately its Chief Risk
+# Officer. What that reader does with a 12-month view is decide which
+# exposures belong on a risk register with an owner and a mitigation, and
+# which were a bad week. "Coverage volume by section, 12 months" does not
+# support that decision: it reports how busy the crawler was, sliced by a
+# taxonomy (Geopolitical / Macroeconomy / Political) that is not how
+# telecom risk arrives. So four things were added, each tied to a
+# question the role actually asks:
+#
+#   1. "Were we even watching?"  -> `coverage` / `windowNote`.
+#      `articles.day` is a PUBLICATION date. A crawl started in month N
+#      still finds articles published in N-3, so a 12-month chart mixes
+#      monitored months with months represented only by backdated
+#      leftovers. Unlabelled, the switch-on of monitoring draws as a
+#      hundredfold surge in risk. Everything else on the tab is
+#      uninterpretable without this block, so it renders first.
+#
+#   2. "What is the regulator doing, and on which axis?" -> `watch`
+#      group `regulatory`. BTRC actions, spectrum and licensing, telecom
+#      tax, SIM rules, service-quality mandates, shutdown/throttling,
+#      bandwidth. These are risk-register line items.
+#
+#   3. "Who else is in the news, and for what?" -> `watch` group
+#      `operators`. A peer's fine or licence condition is the best
+#      available forecast of your own, since the regulator applies the
+#      same rule to everyone.
+#
+#   4. "Is it getting worse, or just noisier?" -> each row's `dir` +
+#      `escalating`. Volume alone is not a risk signal; volume rising
+#      WITH severity is. Both are computed between the two most recent
+#      MONITORED months and normalized per collection day, because the
+#      collector ran 9 days in one month and 4 in the next and comparing
+#      raw counts across those compares two different amounts of looking.
+#
+# Every number below is a rollup value or arithmetic over two of them,
+# and each row carries `dirBasis`/`severityNote` stating which numbers
+# in words, so nothing on the screen has to be taken on trust.
+
+
+def _fmt_month(d: date) -> str:
+    return d.strftime("%b")
+
+
+def _round_rate(count: int, days: int) -> float | None:
+    """Coverage per collection day, or None when the month was not
+    monitored. None becomes "n/a" on the screen: dividing by zero
+    collection days has no answer, and 0.0 would read as a measured
+    absence of coverage.
+    """
+    if days <= 0:
+        return None
+    return round(count / days, 2)
+
+
+def _watch_groups(
+    conn: DictConnection,
+    since_month: date,
+    month_list: list[date],
+    coverage_by_month: dict[date, dict[str, int]],
+) -> list[WatchGroupOut]:
+    """Build the operator and regulatory boards from
+    `rollup_monthly_watch`, read-only, one query for the whole window.
+    """
+    rows = conn.execute(
+        "SELECT month, group_key, entity, article_count, scored_count, high_count, score_sum "
+        "FROM rollup_monthly_watch WHERE month >= %s",
+        (since_month,),
+    ).fetchall()
+    by_entity: dict[tuple[str, str], dict[date, dict[str, float]]] = defaultdict(dict)
+    for r in rows:
+        by_entity[(r["group_key"], r["entity"])][r["month"]] = {
+            "article_count": float(r["article_count"]),
+            "scored_count": float(r["scored_count"]),
+            "high_count": float(r["high_count"]),
+            "score_sum": float(r["score_sum"]),
+        }
+
+    # Months in the window the collector actually ran in, oldest first.
+    # Every comparison below is between the last two of these, never
+    # between calendar-adjacent months, because an unmonitored month
+    # holds no evidence either way.
+    monitored = [m for m in month_list if coverage_by_month.get(m, {}).get("collected_days", 0) > 0]
+    latest_month = monitored[-1] if monitored else None
+    prev_month = monitored[-2] if len(monitored) > 1 else None
+
+    groups: list[WatchGroupOut] = []
+    for group in watchlist.WATCH_GROUPS:
+        out_rows: list[WatchRowOut] = []
+        for entity in group.entities:
+            series = by_entity.get((group.key, entity.key), {})
+            counts = [int(series.get(m, {}).get("article_count", 0)) for m in month_list]
+            total = sum(counts)
+            scored = int(sum(series.get(m, {}).get("scored_count", 0) for m in month_list))
+            high = int(sum(series.get(m, {}).get("high_count", 0) for m in month_list))
+            score_sum = sum(series.get(m, {}).get("score_sum", 0.0) for m in month_list)
+            months_present = sum(1 for m in monitored if series.get(m, {}).get("article_count", 0) > 0)
+            monitored_set = set(monitored)
+            backdated = sum(c for m, c in zip(month_list, counts, strict=True) if m not in monitored_set)
+
+            latest = int(series.get(latest_month, {}).get("article_count", 0)) if latest_month else 0
+            previous = int(series.get(prev_month, {}).get("article_count", 0)) if prev_month else 0
+            latest_days = coverage_by_month.get(latest_month, {}).get("collected_days", 0) if latest_month else 0
+            prev_days = coverage_by_month.get(prev_month, {}).get("collected_days", 0) if prev_month else 0
+            latest_rate = _round_rate(latest, latest_days)
+            prev_rate = _round_rate(previous, prev_days)
+
+            direction = "unknown"
+            dir_basis = "Needs two monitored months to compare. Only one so far."
+            if latest_rate is not None and prev_rate is not None and latest_month and prev_month:
+                lm, pm = _fmt_month(latest_month), _fmt_month(prev_month)
+                if prev_rate == 0 and latest_rate == 0:
+                    direction = "flat"
+                elif prev_rate == 0:
+                    direction = "up"
+                # A 15% deadband: below that, month-to-month wobble at
+                # these volumes is not a direction.
+                elif latest_rate > prev_rate * 1.15:
+                    direction = "up"
+                elif latest_rate < prev_rate * 0.85:
+                    direction = "down"
+                else:
+                    direction = "flat"
+                dir_basis = (
+                    f"{latest_rate} per collection day in {lm} against {prev_rate} in {pm} "
+                    f"({latest} over {latest_days} days, then {previous} over {prev_days})."
+                )
+            elif not monitored:
+                dir_basis = "No month in this window was monitored."
+
+            # Severity: a real mean over real scored articles, or n/a.
+            # Never a 0.0 stand-in -- on a 0 to 10 relevance scale that
+            # reads as "assessed, and harmless".
+            avg_score = round(score_sum / scored, 1) if scored else None
+            if not total:
+                severity_note = "Not seen in this window."
+            elif not scored:
+                severity_note = f"{total} identified, none scored by the AI stage yet, so no severity."
+            else:
+                severity_note = f"Mean relevance {avg_score} over {scored} scored of {total} identified."
+
+            # Escalation is the both-axes signal, and it is deliberately
+            # hard to trip. Volume per collection day up AND mean
+            # severity up, on a base big enough that one article cannot
+            # move it. Anything less is volume, which is not risk.
+            escalating = False
+            if latest_month and prev_month and latest_rate is not None and prev_rate is not None:
+                latest_scored = int(series.get(latest_month, {}).get("scored_count", 0))
+                prev_scored = int(series.get(prev_month, {}).get("scored_count", 0))
+                if latest >= 3 and latest_scored >= 3 and prev_scored >= 1:
+                    latest_mean = series[latest_month]["score_sum"] / latest_scored
+                    prev_mean = series[prev_month]["score_sum"] / prev_scored
+                    escalating = latest_rate > prev_rate and latest_mean > prev_mean
+
+            out_rows.append(
+                WatchRowOut(
+                    key=entity.key,
+                    label=entity.label,
+                    note=entity.note,
+                    counts=counts,
+                    total=total,
+                    backdated=backdated,
+                    monthsPresent=months_present,
+                    latest=latest,
+                    previous=previous,
+                    latestLabel=_fmt_month(latest_month) if latest_month else "n/a",
+                    prevLabel=_fmt_month(prev_month) if prev_month else "n/a",
+                    latestRate=latest_rate,
+                    prevRate=prev_rate,
+                    dir=direction,
+                    dirBasis=dir_basis,
+                    avgScore=avg_score,
+                    scored=scored,
+                    high=high,
+                    escalating=escalating,
+                    severityNote=severity_note,
+                )
+            )
+        # Busiest first, so the board leads with what is actually moving.
+        out_rows.sort(key=lambda r: (-r.total, r.label))
+        groups.append(WatchGroupOut(key=group.key, title=group.title, blurb=group.blurb, rows=out_rows))
+    return groups
+
+
 def _add_months(d: date, delta: int) -> date:
     total = d.year * 12 + (d.month - 1) + delta
     return date(total // 12, total % 12 + 1, 1)
@@ -508,6 +698,50 @@ def dashboard_trends(
                 )
             )
 
+        # Coverage first: every series below is read inside this frame.
+        coverage_rows = conn.execute(
+            "SELECT month, article_count, matched_count, scored_count, collected_count, collected_days "
+            "FROM rollup_monthly_coverage WHERE month >= %s ORDER BY month",
+            (since_month,),
+        ).fetchall()
+        coverage_by_month: dict[date, dict[str, int]] = {
+            r["month"]: {
+                "article_count": int(r["article_count"]),
+                "matched_count": int(r["matched_count"]),
+                "scored_count": int(r["scored_count"]),
+                "collected_count": int(r["collected_count"]),
+                "collected_days": int(r["collected_days"]),
+            }
+            for r in coverage_rows
+        }
+        coverage = [
+            MonthCoverageOut(
+                label=_fmt_month(m),
+                month=m.isoformat(),
+                monitored=coverage_by_month.get(m, {}).get("collected_days", 0) > 0,
+                collectedDays=coverage_by_month.get(m, {}).get("collected_days", 0),
+                articles=coverage_by_month.get(m, {}).get("article_count", 0),
+                collected=coverage_by_month.get(m, {}).get("collected_count", 0),
+                matched=coverage_by_month.get(m, {}).get("matched_count", 0),
+            )
+            for m in month_list
+        ]
+        monitored_months = sum(1 for c in coverage if c.monitored)
+        collection_days = sum(c.collectedDays for c in coverage)
+        if monitored_months == 0:
+            window_note = (
+                "No month in this window has any collection activity recorded, so nothing below is a trend. "
+                "Run a collection, or backfill the rollups, and this tab fills in."
+            )
+        else:
+            monitored_labels = ", ".join(c.label for c in coverage if c.monitored)
+            window_note = (
+                f"Collection ran on {collection_days} days across {monitored_months} of these 12 months "
+                f"({monitored_labels}). The other months hold only backdated articles a later crawl "
+                "happened to surface, so they are not a sample of that month's news and are drawn as "
+                "not monitored rather than as zero."
+            )
+
         section_rows = conn.execute(
             "SELECT month, section, matched_count FROM rollup_monthly_section WHERE month >= %s ORDER BY month",
             (since_month,),
@@ -515,7 +749,16 @@ def dashboard_trends(
         section_by_month: dict[date, dict[str, int]] = defaultdict(dict)
         for r in section_rows:
             section_by_month[r["month"]][r["section"]] = int(r["matched_count"])
-        months12 = [MonthVolumeOut(label=m.strftime("%b"), segments=section_by_month.get(m, {})) for m in month_list]
+        months12 = [
+            MonthVolumeOut(
+                label=_fmt_month(m),
+                segments=section_by_month.get(m, {}),
+                monitored=coverage_by_month.get(m, {}).get("collected_days", 0) > 0,
+            )
+            for m in month_list
+        ]
+
+        watch = _watch_groups(conn, since_month, month_list, coverage_by_month)
 
         theme_rows = conn.execute(
             "SELECT theme, month, article_count, intensity FROM rollup_monthly_theme "
@@ -561,7 +804,16 @@ def dashboard_trends(
             standing.append(
                 StandingThemeOut(
                     name=theme,
-                    note=f"Present in {int(row['months_active'])} of the last 12 months.",
+                    # NOT "of the last 12 months". Only `available_months`
+                    # of this window carry any theme data at all, and in
+                    # this deployment that is 2, so "present in 2 of the
+                    # last 12 months" reads as a theme that faded when it
+                    # is in fact a theme present every month we looked.
+                    # The denominator has to be the months with data.
+                    note=(
+                        f"Present in {int(row['months_active'])} of the "
+                        f"{available_months} months with theme data."
+                    ),
                     count=int(row["total_count"]),
                     months=int(row["months_active"]),
                     dir=direction,
@@ -588,7 +840,10 @@ def dashboard_trends(
             high = bands.get("high", 0)
             rel_mix_trend.append(
                 RelMixTrendPointOut(
-                    label=m.strftime("%b"), highShare=(high / total if total else 0.0), total=total
+                    label=m.strftime("%b"),
+                    highShare=(high / total if total else 0.0),
+                    total=total,
+                    monitored=coverage_by_month.get(m, {}).get("collected_days", 0) > 0,
                 )
             )
 
@@ -608,4 +863,8 @@ def dashboard_trends(
         standing=standing,
         relMixTrend=rel_mix_trend,
         topSources=top_sources_12mo,
+        coverage=coverage,
+        monitoredMonths=monitored_months,
+        windowNote=window_note,
+        watch=watch,
     )

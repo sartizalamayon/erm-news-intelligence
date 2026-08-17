@@ -179,6 +179,79 @@ class TrendCardOut(BaseModel):
 class MonthVolumeOut(BaseModel):
     label: str
     segments: dict[str, int]
+    # Was the collector actually running in this month (rollup_monthly_
+    # coverage.collected_days > 0, migrations/0021)? `articles.day` is a
+    # PUBLICATION date, so an unmonitored month still carries whatever
+    # backdated articles a later crawl happened to surface. Drawn as a
+    # plain bar next to a monitored month, that reads as "risk coverage
+    # was near zero all year and then exploded", which is a statement
+    # about when monitoring began, not about the world. The frontend
+    # uses this to draw those months as absent rather than as empty.
+    monitored: bool = False
+
+
+class MonthCoverageOut(BaseModel):
+    """One month of "were we watching", from `rollup_monthly_coverage`.
+
+    This is the frame every other 12-month series on the tab has to be
+    read inside, which is why it is its own block rather than a footnote.
+    """
+
+    label: str
+    month: str
+    monitored: bool
+    collectedDays: int
+    articles: int
+    collected: int
+    matched: int
+
+
+class WatchRowOut(BaseModel):
+    """One watchlist entity over the 12-month window, from
+    `rollup_monthly_watch` (migrations/0021) and the curated patterns in
+    `app.db.watchlist`.
+
+    Every field here is either a raw rollup number or an arithmetic
+    combination of two of them, and `dirBasis` spells out that
+    arithmetic in words so a reader can check the arrow against the
+    counts without leaving the screen.
+    """
+
+    key: str
+    label: str
+    note: str
+    counts: list[int]
+    total: int
+    # Of `total`, how many fall in months the collector was NOT running
+    # in. The screen draws those months as "not monitored" rather than as
+    # bars, so without this number the strip visibly disagrees with the
+    # total beside it and the reader cannot tell which one is wrong.
+    backdated: int = 0
+    monthsPresent: int
+    latest: int
+    previous: int
+    latestLabel: str
+    prevLabel: str
+    # Coverage per COLLECTION DAY, not per month. The collector ran on 9
+    # days of one month and 4 of the next in this deployment, so raw
+    # month-over-month counts compare two different amounts of looking.
+    # None when there is no monitored month to compute it from.
+    latestRate: float | None = None
+    prevRate: float | None = None
+    dir: str = "unknown"
+    dirBasis: str = ""
+    avgScore: float | None = None
+    scored: int = 0
+    high: int = 0
+    escalating: bool = False
+    severityNote: str = ""
+
+
+class WatchGroupOut(BaseModel):
+    key: str
+    title: str
+    blurb: str
+    rows: list[WatchRowOut]
 
 
 class HeatRowOut(BaseModel):
@@ -209,6 +282,13 @@ class RelMixTrendPointOut(BaseModel):
     label: str
     highShare: float
     total: int
+    # Same honesty flag as MonthVolumeOut.monitored, and it matters more
+    # here than anywhere else on the tab: this series is a SHARE, so an
+    # unmonitored month holding a single backdated article that happened
+    # to score 9 draws a full-height 100% bar next to a monitored month's
+    # 28%. The tallest bars on the chart were the months with the least
+    # evidence behind them.
+    monitored: bool = False
 
 
 class DashboardTrendsOut(BaseModel):
@@ -223,6 +303,14 @@ class DashboardTrendsOut(BaseModel):
     # equivalent of the short-term "most productive sources" card, not a
     # per-section cut. Additive, defaults empty for backward compat.
     topSources: list[SourceCountOut] = Field(default_factory=list)
+    # ── The CRO-facing blocks (migrations/0021) ──
+    # `coverage` first, deliberately: it is the frame the other series
+    # have to be read inside. `monitoredMonths` and `windowNote` are the
+    # one-line version of it, for the banner at the top of the tab.
+    coverage: list[MonthCoverageOut] = Field(default_factory=list)
+    monitoredMonths: int = 0
+    windowNote: str = ""
+    watch: list[WatchGroupOut] = Field(default_factory=list)
 
 
 # ── Review queue (frontend-contract.md §3.3) ─────────────────────────────

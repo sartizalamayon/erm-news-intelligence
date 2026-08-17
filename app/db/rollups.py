@@ -45,6 +45,19 @@ numbers agree on what "matched" means):
   scored articles have a band).
 - theme article_count: grouped by `topic_tag`, `topic_tag <> ''` (same
   predicate `idx_articles_topic_tag` is a partial index for).
+- watch article_count (migrations/0021): headlines matching one of
+  `app.db.watchlist`'s curated entity patterns. Deliberately NOT derived
+  from `articles.keywords`, whose loose substring matching is tuned for
+  recall into the review queue and gets a competitor's monthly count
+  wrong by two orders of magnitude -- see that module's docstring for
+  the measured evidence. `high_count` reuses the same `llm_score >= 8`
+  boundary as the score bands so "high" means one thing on this screen.
+- coverage collected_count / collected_days (migrations/0021): whether
+  a month was actually being monitored, as opposed to merely appearing
+  in the corpus because a later crawl found backdated articles.
+  `articles.day` is a publication date, so without this the long-term
+  chart cannot tell "a quiet month" from "a month before the collector
+  existed", and draws both as an empty bar.
 - theme intensity: normalized against that THEME'S OWN max article_count
   across its full history (not a global cross-theme max) -- 0007's own
   header comment flags this as an open normalization choice ("whichever
@@ -71,11 +84,24 @@ import sys
 from datetime import date
 
 from app.db.connection import DictConnection, get_connection
+from app.db.watchlist import (
+    NORMALIZED_TEXT_SQL,
+    all_entities,
+    entity_predicate_sql,
+    prefilter_pattern,
+)
 from app.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
 
 _SCORE_BANDS = ("high", "medium", "low", "least")
+
+# `articles.day` is a publication DATE and `fetched_at` a timestamptz, so
+# "was this article collected in the same calendar month it was
+# published" needs one agreed timezone or the answer drifts with the
+# server's TZ setting. Dhaka, matching the dashboard's own `_today_dhaka`
+# and the app's single operating timezone.
+DHAKA_TZ = "Asia/Dhaka"
 
 
 def _month_start(d: date) -> date:
@@ -257,6 +283,161 @@ def _upsert_themes(conn: DictConnection, month: date, month_end: date) -> int:
     return len(rows)
 
 
+def _upsert_watch(conn: DictConnection, month: date, month_end: date) -> int:
+    """One row per (month, watchlist entity) with volume AND severity.
+
+    A single pass over the month's articles computes every entity at
+    once via `count(*) FILTER (WHERE <entity predicate>)`, rather than
+    one query per entity: twelve entities x a dozen months of backfill
+    would otherwise be ~150 separate scans for numbers that come out of
+    one.
+
+    The f-string builds SQL from `app.db.watchlist`'s frozen dataclasses
+    only -- module constants, never a request parameter, a database
+    value, or an admin-editable field -- exactly like `_zero_out_missing`
+    above builds its SET clause from this module's own constants. Adding
+    a watchlist entity is a code change, which is the point (see that
+    module's docstring on why the admin-editable `keywords` table is the
+    wrong source for a dashboard number).
+    """
+    entities = all_entities()
+    if not entities:  # pragma: no cover -- the watchlist is never empty in practice
+        return 0
+
+    # The CTEs are MATERIALIZED on purpose. Written as plain nested
+    # subqueries Postgres flattens them, which re-derives the
+    # lower()/replace()/concat text and re-runs each entity regex inside
+    # every FILTER clause: the month holding 45k real articles took ~13s
+    # that way. `hits` applies one combined regex first
+    # (watchlist.prefilter_pattern) so the twelve per-entity predicates
+    # only ever run against the few hundred headlines that mention
+    # telecom at all.
+    flags = ", ".join(
+        f"{entity_predicate_sql(entity, text_sql='hits.s')} AS e{index}"
+        for index, (_group, entity) in enumerate(entities)
+    )
+    selects = ", ".join(
+        f"count(*) FILTER (WHERE y.e{index}) AS n{index}, "
+        f"count(*) FILTER (WHERE y.e{index} AND y.matched) AS m{index}, "
+        f"count(*) FILTER (WHERE y.e{index} AND y.llm_score IS NOT NULL) AS s{index}, "
+        f"count(*) FILTER (WHERE y.e{index} AND y.llm_score >= 8) AS h{index}, "
+        f"coalesce(sum(y.llm_score) FILTER (WHERE y.e{index}), 0) AS t{index}"
+        for index in range(len(entities))
+    )
+    row = conn.execute(
+        f"""
+        WITH base AS MATERIALIZED (
+            SELECT (a.review_status != 'filtered_out') AS matched,
+                   a.llm_score,
+                   {NORMALIZED_TEXT_SQL} AS s
+            FROM articles a
+            WHERE a.day >= %s AND a.day < %s
+        ),
+        hits AS MATERIALIZED (
+            SELECT base.matched, base.llm_score, base.s FROM base WHERE base.s ~ '{prefilter_pattern()}'
+        ),
+        y AS MATERIALIZED (
+            SELECT hits.matched, hits.llm_score, {flags} FROM hits
+        )
+        SELECT {selects} FROM y
+        """,  # noqa: S608
+        (month, month_end),
+    ).fetchone()
+    row = row or {}
+
+    for index, (group, entity) in enumerate(entities):
+        conn.execute(
+            """
+            INSERT INTO rollup_monthly_watch
+                (month, group_key, entity, article_count, matched_count, scored_count, high_count, score_sum)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (month, group_key, entity) DO UPDATE SET
+                article_count = EXCLUDED.article_count,
+                matched_count = EXCLUDED.matched_count,
+                scored_count  = EXCLUDED.scored_count,
+                high_count    = EXCLUDED.high_count,
+                score_sum     = EXCLUDED.score_sum
+            """,
+            (
+                month,
+                group.key,
+                entity.key,
+                int(row.get(f"n{index}") or 0),
+                int(row.get(f"m{index}") or 0),
+                int(row.get(f"s{index}") or 0),
+                int(row.get(f"h{index}") or 0),
+                float(row.get(f"t{index}") or 0),
+            ),
+        )
+    # Every entity is written every time (the aggregate always returns a
+    # value, zero or not), so there is no stale-key zero-out pass to do
+    # here -- same reasoning as the score bands above. An entity REMOVED
+    # from the watchlist does leave rows behind; the read side selects by
+    # the current watchlist, so those rows are inert rather than wrong.
+    return len(entities)
+
+
+def _upsert_coverage(conn: DictConnection, month: date, month_end: date) -> int:
+    """The "were we actually watching this month" row. See
+    migrations/0021's header for why a publication-date chart is
+    unreadable without it.
+
+    Note the two different clocks: `article_count` and friends are keyed
+    on publication month, while `collected_days` counts distinct dates
+    the collector ran inside this calendar month regardless of what it
+    published. `collected_count` is the intersection -- published in this
+    month AND fetched in this month.
+    """
+    row = conn.execute(
+        f"""
+        SELECT
+          count(*) AS article_count,
+          count(*) FILTER (WHERE review_status != 'filtered_out') AS matched_count,
+          count(*) FILTER (WHERE llm_score IS NOT NULL) AS scored_count,
+          count(*) FILTER (
+            WHERE date_trunc('month', fetched_at AT TIME ZONE '{DHAKA_TZ}')::date = %s
+          ) AS collected_count
+        FROM articles
+        WHERE day >= %s AND day < %s
+        """,  # noqa: S608 -- DHAKA_TZ is a module constant, never caller input
+        (month, month, month_end),
+    ).fetchone()
+    row = row or {}
+
+    days_row = conn.execute(
+        f"""
+        SELECT count(DISTINCT (fetched_at AT TIME ZONE '{DHAKA_TZ}')::date) AS n
+        FROM articles
+        WHERE (fetched_at AT TIME ZONE '{DHAKA_TZ}') >= %s
+          AND (fetched_at AT TIME ZONE '{DHAKA_TZ}') < %s
+        """,  # noqa: S608 -- as above
+        (month, month_end),
+    ).fetchone()
+
+    conn.execute(
+        """
+        INSERT INTO rollup_monthly_coverage
+            (month, article_count, matched_count, scored_count, collected_count, collected_days)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (month) DO UPDATE SET
+            article_count   = EXCLUDED.article_count,
+            matched_count   = EXCLUDED.matched_count,
+            scored_count    = EXCLUDED.scored_count,
+            collected_count = EXCLUDED.collected_count,
+            collected_days  = EXCLUDED.collected_days
+        """,
+        (
+            month,
+            int(row.get("article_count") or 0),
+            int(row.get("matched_count") or 0),
+            int(row.get("scored_count") or 0),
+            int(row.get("collected_count") or 0),
+            int((days_row or {}).get("n") or 0),
+        ),
+    )
+    return 1
+
+
 def compute_rollups_for_month(conn: DictConnection, month: date) -> dict[str, int]:
     """Recompute every rollup_monthly_* row for the calendar month
     containing `month` (any day within the month works; it is normalized
@@ -272,6 +453,8 @@ def compute_rollups_for_month(conn: DictConnection, month: date) -> dict[str, in
         "sources": _upsert_sources(conn, month, month_end),
         "score_bands": _upsert_score_bands(conn, month, month_end),
         "themes": _upsert_themes(conn, month, month_end),
+        "watch": _upsert_watch(conn, month, month_end),
+        "coverage": _upsert_coverage(conn, month, month_end),
     }
     logger.info("rollups_computed", extra={"month": month.isoformat(), **counts})
     return counts
@@ -287,23 +470,48 @@ def compute_rollups_for_day(conn: DictConnection, day: date) -> dict[str, int]:
 
 
 def backfill_all_days(conn: DictConnection) -> dict[str, int]:
-    """One-off backfill: recompute rollups for every historical day that
-    has data in `articles`. Iterates one call per DISTINCT `day` present
-    (not one call per distinct month) so this literally covers "every
-    historical day that has data" per-call, even though each call
-    internally recomputes its whole containing month -- some months get
-    recomputed more than once, which is harmless (idempotent, see module
-    docstring) and cheap at this data's real scale (a few thousand rows,
-    dozens of distinct days -- see storage-policy.md §6).
+    """One-off backfill: recompute rollups for every historical month
+    that has data in `articles`.
+
+    This used to iterate one call per DISTINCT `day`, on the grounds
+    that recomputing a month several times is idempotent and cheap. It
+    is still idempotent, and it is no longer cheap: the real corpus has
+    203 distinct days inside 15 months, and the watchlist aggregate
+    (migrations/0021) is a regex pass over every article in the month,
+    so the per-day loop did the same expensive scan up to 31 times for
+    one month's answer and ran for many minutes. Since
+    `compute_rollups_for_day` only ever normalizes its argument to the
+    1st of the month anyway, deduplicating to distinct months produces
+    byte-identical rollup rows in a fraction of the time.
     """
-    rows = conn.execute("SELECT DISTINCT day FROM articles WHERE day IS NOT NULL ORDER BY day").fetchall()
-    days = [r["day"] for r in rows]
+    rows = conn.execute(
+        "SELECT DISTINCT date_trunc('month', day)::date AS m FROM articles WHERE day IS NOT NULL ORDER BY m"
+    ).fetchall()
+    days = [r["m"] for r in rows]
     months_seen: set[date] = set()
     for d in days:
         compute_rollups_for_day(conn, d)
         months_seen.add(_month_start(d))
+
+    # migrations/0021's coverage row is keyed on a SECOND clock: it also
+    # counts the days the collector ran inside a calendar month, whatever
+    # those articles' publication dates were. A month can therefore have
+    # collection activity and no articles published in it, and the
+    # publication-date loop above would skip it entirely, leaving that
+    # month looking unmonitored on the dashboard.
+    fetch_rows = conn.execute(
+        f"SELECT DISTINCT date_trunc('month', fetched_at AT TIME ZONE '{DHAKA_TZ}')::date AS m "  # noqa: S608
+        "FROM articles WHERE fetched_at IS NOT NULL ORDER BY m"
+    ).fetchall()
+    for r in fetch_rows:
+        if r["m"] not in months_seen:
+            compute_rollups_for_month(conn, r["m"])
+            months_seen.add(r["m"])
     conn.commit()
-    result = {"days_processed": len(days), "distinct_months": len(months_seen)}
+    # Two different numbers on purpose: `months_recomputed` can exceed
+    # `publication_months`, because a month in which the collector ran
+    # but nothing was PUBLISHED still needs its coverage row written.
+    result = {"publication_months": len(days), "months_recomputed": len(months_seen)}
     logger.info("rollups_backfill_complete", extra=result)
     return result
 

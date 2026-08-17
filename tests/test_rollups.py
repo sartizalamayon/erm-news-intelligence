@@ -16,6 +16,7 @@ import pytest
 from app.db.queries import insert_article
 from app.db.rollups import backfill_all_days, compute_rollups_for_day
 from app.db.testing import migrated_schema, pg_available
+from app.db.watchlist import all_entities
 
 pytestmark = pytest.mark.skipif(not pg_available(), reason="no reachable Postgres (set TEST_DATABASE_URL)")
 
@@ -104,7 +105,19 @@ def test_compute_rollups_for_day_writes_expected_section_source_band_theme_rows(
         counts = compute_rollups_for_day(conn, DAY)
         conn.commit()
 
-        assert counts == {"sections": 3, "sources": 3, "score_bands": 4, "themes": 2}
+        # "watch" is one row per app.db.watchlist entity (5 operators +
+        # 7 regulatory axes) and is written whether or not the month
+        # mentioned any of them, so the series has no holes in it.
+        # "coverage" is the single per-month row of migrations/0021.
+        assert counts == {
+            "sections": 3,
+            "sources": 3,
+            "score_bands": 4,
+            "themes": 2,
+            "watch": len(all_entities()),
+            "coverage": 1,
+        }
+        assert len(all_entities()) == 12
 
         sections = {
             r["section"]: (r["fetched_count"], r["matched_count"])
@@ -281,8 +294,28 @@ def test_backfill_all_days_covers_every_distinct_historical_day() -> None:
 
         result = backfill_all_days(conn)
 
-        assert result["days_processed"] == 3
-        assert result["distinct_months"] == 2
+        # Two publication months (Jan, Feb) from three articles: the
+        # backfill deduplicates to months rather than looping per day,
+        # since every call recomputes its whole containing month anyway.
+        assert result["publication_months"] == 2
+
+        # THREE months recomputed, not two, and that is the point of
+        # migrations/0021's coverage row rather than an off-by-one.
+        # `insert_article` leaves `fetched_at` at its `now()` default, so
+        # these three articles were COLLECTED in the current real month
+        # while being PUBLISHED in January and February. A publication-
+        # date-only loop would never visit the collection month, and the
+        # dashboard would then show the month monitoring actually
+        # happened in as unmonitored.
+        assert result["months_recomputed"] == 3
+        collection_month = dt.date.today().replace(day=1)
+        row = conn.execute(
+            "SELECT article_count, collected_days FROM rollup_monthly_coverage WHERE month = %s",
+            (collection_month,),
+        ).fetchone()
+        assert row is not None, "the month the collector ran in must get a coverage row"
+        assert row["collected_days"] == 1  # one distinct fetch date
+        assert row["article_count"] == 0  # and nothing was published in it
 
         jan = conn.execute(
             "SELECT matched_count FROM rollup_monthly_section WHERE month = %s AND section = %s",
