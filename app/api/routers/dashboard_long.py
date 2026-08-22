@@ -82,6 +82,10 @@ CRIT_PER_ROW = 3
 # says so rather than implying it covers the sector.
 MARKET_CODES = ("GP", "ROBI")
 
+# Whose desk this is. The operator board is a share-of-voice board rather
+# than a competitor list, so our own operator sits on it and is marked.
+_OUR_OPERATOR_KEY = "grameenphone"
+
 # Which context guard the add-flow tests a proposed term against, per
 # board. Chosen for the operator rather than asked of them: someone
 # adding a wallet should not have to know the guard vocabulary exists to
@@ -252,9 +256,11 @@ def _board_row(
                            isUs=is_us, isNew=is_new)
 
     stats = None
+    has_history = False
     if rollup is not None:
         table, key_col, rollup_key = rollup
         stats = _rollup_stats(conn, table=table, key_col=key_col, key=rollup_key, months=win.monitored)
+        has_history = stats is not None
     if stats is None:
         stats = evidence_service.board_stats(conn, where, params, since=since)
 
@@ -275,7 +281,14 @@ def _board_row(
         # and the wire carries the one decimal the screen actually shows.
         mean=round(stats.mean, 1) if stats.mean is not None else None,
         isUs=is_us,
-        isNew=is_new,
+        # DERIVED, not declared. This used to be
+        # `group.key == "mfs" or entity.key == "airtel"` — a badge that
+        # named the entities added in one particular week and would have
+        # gone on calling them new forever. What the mark is actually for
+        # is "this row has no durable history behind it yet, so do not
+        # read a short series as a quiet one", and that is a property of
+        # the data, not of a name. It clears itself once the rollup runs.
+        isNew=is_new or not has_history,
         crit=_evidence_out(crit),
         criticalTruncated=stats.critical > len(crit),
         # The count is on the books but the articles behind it have aged
@@ -616,8 +629,10 @@ def _group_board(conn: DictConnection, group_key: str, win: _Window) -> BoardOut
                 params=params,
                 win=win,
                 rollup=("rollup_monthly_watch", "entity", entity.key),
-                is_us=entity.key == "grameenphone",
-                is_new=group.key == "mfs" or entity.key == "airtel",
+                # `is_us` is a genuine constant of this deployment: the
+                # operator board is a share-of-voice board, so the desk's
+                # own operator is marked rather than omitted.
+                is_us=entity.key == _OUR_OPERATOR_KEY,
             )
         )
     title = pairs[0][0].title if pairs else group_key.title()

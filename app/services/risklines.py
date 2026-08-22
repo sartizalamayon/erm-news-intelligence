@@ -50,6 +50,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
+from app.api.schemas.core import get_risk_sections
 from app.db import econaxes, watchlist
 from app.db.connection import DictConnection
 from app.logging import get_logger
@@ -58,6 +59,16 @@ from app.services import macro as macro_service
 from app.services import market as market_service
 
 logger = get_logger(__name__)
+
+# The section the political-stability line reads. Sections are
+# ADMIN-CREATABLE (`keywords.section`, surfaced by
+# `app.api.schemas.core.get_risk_sections`), so this name is a default,
+# not a constant: it is resolved against the configured set on every
+# request, and the line says so plainly when it is not there rather than
+# reporting zero coverage forever. The codebase has been bitten by the
+# static version of exactly this before — see the historical note in
+# app/api/schemas/core.py about a hardcoded five-section tuple.
+POLITICAL_SECTION = "Political"
 
 
 def _twelve_months_back(today: date | None = None) -> date:
@@ -400,10 +411,19 @@ def _political_line(
     if not monitored:
         return _no_read("political", "Political stability", "No month in this window was monitored.", window, "news")
 
+    configured = get_risk_sections(conn)
+    if POLITICAL_SECTION not in configured:
+        return _no_read(
+            "political",
+            "Political stability",
+            f"No {POLITICAL_SECTION!r} section is configured, so this line has nothing to read.",
+            window,
+            "news",
+        )
     rows = conn.execute(
         "SELECT month, matched_count FROM rollup_monthly_section "
         "WHERE section = %s AND month = ANY(%s) ORDER BY month",
-        ("Political", monitored),
+        (POLITICAL_SECTION, monitored),
     ).fetchall()
     by_month = {r["month"]: int(r["matched_count"]) for r in rows}
     latest = monitored[-1]
@@ -413,7 +433,7 @@ def _political_line(
         return _no_read(
             "political",
             "Political stability",
-            "No Political-section coverage was rolled up for this window.",
+            f"No {POLITICAL_SECTION} coverage was rolled up for this window.",
             window,
             "news",
         )

@@ -419,3 +419,55 @@ def test_a_regex_metacharacter_in_a_term_is_refused_or_neutralised(client):
 def test_creating_an_entity_that_collides_with_a_code_defined_key_is_refused(client):
     r = client.post("/watchlist", json={"groupKey": "operators", "label": "Grameenphone", "enTerms": ["gp"]})
     assert r.status_code == 422, r.text
+
+
+# ── hardcoding guards ────────────────────────────────────────────────
+
+
+def test_the_new_badge_is_derived_from_history_not_from_an_entity_name(client):
+    """REGRESSION: `isNew` was `group == "mfs" or key == "airtel"`.
+
+    That named the entities added in one particular week and would have
+    gone on calling them new forever. The mark means "no durable history
+    behind this row yet", which is a property of the data, so it has to
+    clear itself once the rollup covers the row.
+    """
+    conn = client.conn
+    _mark_monitored(conn, THIS_MONTH, days=5)
+    _insert_article(conn, title="BTRC fines an operator", llm_score=9.0, llm_reason="r")
+    conn.commit()
+
+    rows = {r["key"]: r for r in client.get("/dashboard/long/telecom").json()["regulatory"]["rows"]}
+    # No rollup rows exist in this schema at all, so every row is "new".
+    assert rows["btrc"]["isNew"] is True
+
+    conn.execute(
+        "INSERT INTO rollup_monthly_watch (month, group_key, entity, article_count, scored_count, "
+        "high_count, score_sum) VALUES (%s, 'regulatory', 'btrc', 4, 3, 2, 24)",
+        (THIS_MONTH,),
+    )
+    conn.commit()
+    rows = {r["key"]: r for r in client.get("/dashboard/long/telecom").json()["regulatory"]["rows"]}
+    assert rows["btrc"]["isNew"] is False, "a row with rollup history is no longer new"
+    # And the counts now come from the rollup, not from live articles.
+    assert rows["btrc"]["items"] == 4
+    assert rows["btrc"]["mean"] == 8.0
+
+
+def test_political_line_says_so_when_its_section_is_not_configured(client, monkeypatch):
+    """REGRESSION: the section name was hardcoded.
+
+    `keywords.section` is admin-creatable, so an admin who renames or
+    removes the Political section used to get a line reporting zero
+    coverage forever instead of an explanation.
+    """
+    import app.services.risklines as rl
+
+    conn = client.conn
+    _mark_monitored(conn, THIS_MONTH, days=5)
+    conn.commit()
+    monkeypatch.setattr(rl, "get_risk_sections", lambda c: ("Geopolitical", "Macroeconomy"))
+
+    line = next(ln for ln in client.get("/dashboard/long/risk").json()["lines"] if ln["key"] == "political")
+    assert line["direction"] == "none"
+    assert "not configured" in line["evidence"] or "nothing to read" in line["evidence"]
