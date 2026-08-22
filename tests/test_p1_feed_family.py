@@ -5,9 +5,8 @@ and offset pagination), `_wp_rest` (WordPress REST paginator), `_rss` /
 
 from __future__ import annotations
 
-import requests
-
 import pytest
+import requests
 
 from app.errors import SourceFetchError
 from app.sources import _api, _fallback, _gnews, _rss, _wp_rest
