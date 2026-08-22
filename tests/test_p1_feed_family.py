@@ -5,11 +5,14 @@ and offset pagination), `_wp_rest` (WordPress REST paginator), `_rss` /
 
 from __future__ import annotations
 
+import requests
+
 import pytest
 
 from app.errors import SourceFetchError
-from app.sources import _api, _gnews, _rss, _wp_rest
+from app.sources import _api, _fallback, _gnews, _rss, _wp_rest
 from app.sources import http as _http
+from app.sources.base import FeedItem
 from tests.test_p1_helpers import FakeResponse, FakeSession
 
 
@@ -170,6 +173,54 @@ class TestWpRest:
         session = FakeSession().add("https://example.com/wp-json/wp/v2/posts", FakeResponse(status_code=500))
         with pytest.raises(SourceFetchError):
             _wp_rest.fetch_wp_rest(session, "https://example.com", source="test")
+
+    def test_network_failure_message_names_the_real_cause(self):
+        """A bare 'wp_rest unreachable: <url>' told an operator nothing
+        about WHY — connect timeout, read timeout, DNS, TLS all looked
+        identical. get_or_raise()'s message names the actual cause (see
+        http._describe_failure), so page 1 must go through it.
+        """
+        session = FakeSession()
+        for _ in range(_http.DEFAULT_MAX_RETRIES + 1):
+            session.add("https://example.com/wp-json/wp/v2/posts", requests.exceptions.ReadTimeout("slow"))
+        with pytest.raises(SourceFetchError, match="no response within"):
+            _wp_rest.fetch_wp_rest(session, "https://example.com", source="test")
+
+
+class TestGnewsFallback:
+    def test_primary_success_never_touches_gnews(self):
+        session = FakeSession(strict=True)
+        calls = []
+
+        def primary():
+            calls.append(1)
+            return [FeedItem(url="https://example.com/a", title="A", source_key="test")]
+
+        items = _fallback.fetch_with_gnews_fallback(primary, session, "example.com", source="test")
+        assert len(items) == 1
+        assert calls == [1]  # gnews's own request would have raised on this strict FakeSession if it fired
+
+    def test_primary_failure_falls_back_to_gnews(self, monkeypatch):
+        monkeypatch.setattr(_gnews.time, "sleep", lambda *_: None)
+        session = FakeSession()
+        session.request = lambda method, url, **kwargs: FakeResponse(status_code=200, text=RSS_FEED)  # type: ignore[method-assign]
+
+        def primary():
+            raise SourceFetchError("primary is down", source="test")
+
+        items = _fallback.fetch_with_gnews_fallback(primary, session, "example.com", source="test")
+        assert len(items) == 2  # RSS_FEED's two items, served by the gnews fallback path
+
+    def test_both_primary_and_gnews_failing_propagates(self, monkeypatch):
+        monkeypatch.setattr(_gnews.time, "sleep", lambda *_: None)
+        session = FakeSession()
+        session.request = lambda method, url, **kwargs: FakeResponse(status_code=500)  # type: ignore[method-assign]
+
+        def primary():
+            raise SourceFetchError("primary is down", source="test")
+
+        with pytest.raises(SourceFetchError):
+            _fallback.fetch_with_gnews_fallback(primary, session, "example.com", source="test")
 
 
 class TestJsonApi:

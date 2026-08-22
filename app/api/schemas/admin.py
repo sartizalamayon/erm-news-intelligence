@@ -726,3 +726,31 @@ class RunStatusOut(BaseModel):
     match: RunMatchPhaseOut | None = None
     enrich: RunEnrichPhaseOut | None = None
     error: str | None = None
+
+
+# ── Admin user management ──────────────────────────────────────────────
+
+
+class UserOut(BaseModel):
+    id: int
+    email: str
+    role: str
+    display_name: str
+    is_active: bool
+    created_at: str | None = None
+    last_login_at: str | None = None
+    has_password: bool
+
+
+class UserCreate(BaseModel):
+    email: str
+    password: str
+    role: str = "analyst"
+
+
+class UserRoleUpdate(BaseModel):
+    role: str
+
+
+class UserActiveUpdate(BaseModel):
+    is_active: bool

@@ -99,6 +99,12 @@ ADMIN_ROUTES: list[tuple[str, str, dict | None]] = [
     ("POST", "/health/sources/1/diagnose", None),
     ("POST", "/health/pipeline/stages/translate/run", None),
     ("POST", "/health/pipeline/run-all", None),
+    # ── users.py ──
+    ("GET", "/users", None),
+    ("POST", "/users", {"email": "new.user@grameenphone.com", "password": "a-strong-enough-password-123", "role": "analyst"}),
+    ("PATCH", "/users/1/role", {"role": "admin"}),
+    ("PATCH", "/users/1/active", {"is_active": False}),
+    ("DELETE", "/users/1", None),
 ]
 
 

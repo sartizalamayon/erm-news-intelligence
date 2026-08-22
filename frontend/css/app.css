@@ -499,6 +499,10 @@ mark { background: color-mix(in oklab, var(--ac2) 26%, transparent); color: var(
 .sources-cols { grid-template-columns: 1.5fr 1.5fr .4fr .9fr .9fr 1.9fr; }
 .keywords-cols { grid-template-columns: 1.3fr 1.3fr .8fr .8fr; }
 .runs-cols { grid-template-columns: 1.2fr .8fr .6fr .6fr .8fr; }
+/* Users: email+status, role select, last login, actions (deactivate +
+   delete). Actions gets less width than sources-cols' since a row here
+   carries two buttons, not five. */
+.users-cols { grid-template-columns: 2fr .7fr 1fr 1.3fr; }
 
 /* ── Manual / phase strip ────────────────────────────────────────── */
 .phase-strip { display: flex; align-items: stretch; gap: 10px; }
@@ -521,4 +525,179 @@ mark { background: color-mix(in oklab, var(--ac2) 26%, transparent); color: var(
   .grid-2, .grid-2-long { grid-template-columns: 1fr; }
   .export-grid { grid-template-columns: 1fr; }
   .review-body { grid-template-columns: 1fr; }
+}
+
+/* ── Long-term dashboard: sub-tabs, boards, evidence ──────────────────
+   The rebuilt Long-term view (frontend/js/screens/dashboard_long.js).
+   Every class below is shared by at least two of the four sub-tabs —
+   the Telecom and Economy boards are the SAME component with different
+   rows, which is deliberate: a risk officer defends an economy number
+   the same way they defend a telecom one, so the two must not look like
+   different kinds of claim. */
+
+.long-tabs { display: flex; gap: 8px; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
+.long-tab {
+  padding: 9px 15px; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  font-size: 13px; font-weight: 500; background: transparent; color: var(--tx3); cursor: pointer;
+}
+.long-tab:hover { color: var(--tx2); }
+.long-tab.active { border-bottom-color: var(--ac2); color: var(--actx); font-weight: 600; }
+
+/* Window chip. Every board and card states the span its own evidence
+   covers, rather than the screen carrying one global caveat — market
+   series run twelve real months, news-derived ones only as far as
+   collection reached, and a figure lifted into a board paper has to
+   carry that with it. `.win-chip-ext` marks the external-series case. */
+.win-chip {
+  display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 8.5px; letter-spacing: .9px;
+  text-transform: uppercase; color: var(--tx4); border: 1px solid var(--line);
+  border-radius: 5px; padding: 3px 7px; white-space: nowrap;
+}
+.win-chip-ext { border-color: var(--acline); color: var(--actx); }
+
+/* Direction chip. The WORD carries the meaning and the arrow only
+   reinforces it: a rising arrow on a risk line is bad news, so
+   direction is never left to colour or glyph alone. */
+.dir-chip {
+  display: inline-flex; align-items: center; gap: 5px; font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; font-weight: 600; letter-spacing: .8px; text-transform: uppercase;
+  padding: 3px 8px; border-radius: 999px; white-space: nowrap;
+}
+.dir-bad { background: var(--redsoft); color: var(--red); }
+.dir-warn { background: var(--ambersoft); color: var(--amber); }
+.dir-ok { background: var(--greensoft); color: var(--green); }
+.dir-none { background: transparent; border: 1px solid var(--line2); color: var(--tx3); }
+
+/* Risk-line card strip. Five cards on one row at desktop width; they
+   collapse rather than shrink below it, because a five-across grid of
+   30px numerals is unreadable long before it is narrow. */
+.risk-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 14px; }
+.risk-value { font-size: 30px; font-weight: 700; letter-spacing: -1.3px; line-height: 1; }
+.risk-sub { font-size: 11px; color: var(--tx3); margin-top: 5px; line-height: 1.45; }
+.risk-ev { font-size: 11px; color: var(--tx3); line-height: 1.5; }
+.risk-spark { display: flex; align-items: flex-end; gap: 3px; height: 26px; }
+.risk-spark-bar { flex: 1; border-radius: 3px 3px 1px 1px; }
+
+/* A measurement we do not have, drawn as visibly not a measurement.
+   Never a flat line through zeroes: a confident flat line is a picture
+   of data that was never collected. */
+.hatch {
+  width: 100%; height: 3px; border-radius: 2px;
+  background: repeating-linear-gradient(45deg, var(--gridline), var(--gridline) 3px, transparent 3px, transparent 6px);
+}
+
+/* Board: one grid shared by peers, wallets, regulatory and economy. */
+.board-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(120px, 2fr) 58px 58px 52px 66px 18px;
+  gap: 14px;
+}
+.board-head { padding: 14px 0 9px; border-bottom: 1px solid var(--line); }
+.board-row-wrap { border-bottom: 1px solid var(--line); }
+.board-row { align-items: center; padding: 13px 0; }
+.board-name { font-size: 13px; font-weight: 600; letter-spacing: -.2px; }
+.board-note { font-size: 10.5px; color: var(--tx4); line-height: 1.45; margin-top: 3px; }
+.board-num { text-align: right; font-size: 15px; font-weight: 700; letter-spacing: -.4px; }
+.board-mean { text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 600; }
+.board-th {
+  font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 1.4px;
+  text-transform: uppercase; color: var(--tx3);
+}
+.board-th-r { text-align: right; }
+.board-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line2); }
+.board-dot-us { background: var(--ac2); }
+.board-dot-new { background: var(--green); }
+/* The critical count is the door into the evidence. It is a real
+   button, not a styled div, so it is reachable by keyboard — the whole
+   feature is unusable without it otherwise. */
+.crit-btn {
+  border: 0; background: transparent; padding: 0; cursor: pointer; font: inherit;
+  text-align: right; width: 100%; font-size: 15px; font-weight: 700; letter-spacing: -.4px;
+  color: var(--red); text-decoration: underline; text-decoration-color: var(--redsoft); text-underline-offset: 3px;
+}
+.crit-btn:hover { text-decoration-color: var(--red); }
+.crit-btn[disabled] { color: var(--tx4); text-decoration: none; cursor: default; }
+.board-chev { display: grid; place-items: center; color: var(--tx4); transition: transform .15s ease; }
+.board-chev.open { transform: rotate(180deg); color: var(--actx); }
+
+.board-expand {
+  margin: 0 0 16px; padding: 4px 18px 6px;
+  border-left: 2px solid var(--acline); background: var(--panel2); border-radius: 0 11px 11px 0;
+}
+.board-expand-label {
+  font-family: 'JetBrains Mono', monospace; font-size: 9px; letter-spacing: 1.4px;
+  text-transform: uppercase; color: var(--actx); padding: 12px 0 4px;
+}
+.board-expand-more {
+  font-family: 'JetBrains Mono', monospace; font-size: 9.5px; color: var(--tx4);
+  padding: 11px 0 4px; border-top: 1px solid var(--line);
+}
+.board-verdict { margin-top: 14px; font-size: 11.5px; color: var(--tx2); line-height: 1.6; }
+
+/* Evidence row: the answer to "based on what?". */
+.ev-row {
+  display: grid; grid-template-columns: 52px minmax(0, 1fr) 140px; gap: 16px;
+  align-items: start; padding: 16px 0; border-top: 1px solid var(--line);
+}
+.ev-row-sm { grid-template-columns: 46px minmax(0, 1fr) 140px; padding: 13px 0; }
+.score-chip {
+  width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center;
+  font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 600;
+}
+.score-chip-sm { width: 34px; height: 34px; border-radius: 9px; font-size: 13px; }
+.score-band {
+  font-family: 'JetBrains Mono', monospace; font-size: 7.5px; letter-spacing: .8px; text-transform: uppercase;
+}
+.band-red { background: var(--redsoft); color: var(--red); }
+.band-yellow { background: var(--ambersoft); color: var(--amber); }
+.band-green { background: var(--greensoft); color: var(--green); }
+.band-magenta { background: var(--violetsoft); color: var(--violet); }
+.band-red-tx { color: var(--red); }
+.band-yellow-tx { color: var(--amber); }
+.band-green-tx { color: var(--green); }
+.band-magenta-tx { color: var(--violet); }
+.ev-title { font-family: 'Lora', Georgia, serif; font-size: 14.5px; line-height: 1.45; color: var(--tx); }
+.ev-meta { font-family: 'JetBrains Mono', monospace; font-size: 9.5px; color: var(--tx4); margin-top: 6px; }
+/* The model's recorded reason, quoted rather than paraphrased. The rule
+   down its left edge marks it as quoted material, not our prose. */
+.ev-reason {
+  margin-top: 9px; padding-left: 11px; border-left: 2px solid var(--line2);
+  font-size: 11.5px; color: var(--tx3); line-height: 1.55;
+}
+.ev-reason-missing { color: var(--tx4); font-style: italic; }
+
+/* 52-week position bar: where a price sits inside its own year. */
+.range-bar { position: relative; height: 6px; border-radius: 4px; background: var(--gridline); }
+.range-mark { position: absolute; top: -3px; width: 2px; height: 12px; border-radius: 1px; }
+.range-axis {
+  display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace;
+  font-size: 9px; color: var(--tx4); margin-top: 6px;
+}
+
+/* Watchlist add flow. The preview panel is the safety rail that makes
+   self-service acceptable at all — see app/db/watchlist.py. */
+.wl-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.wl-group { border: 1px solid var(--line); border-radius: 11px; background: var(--panel2); padding: 14px 16px; }
+.wl-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.wl-chip { font-size: 11px; color: var(--tx2); background: var(--raise); padding: 2px 8px; border-radius: 5px; }
+.wl-chip-custom { color: var(--green); background: var(--greensoft); font-weight: 600; }
+.wl-chip-us { color: var(--actx); background: var(--acsoft); font-weight: 600; }
+.wl-add { margin-top: 20px; padding: 20px 22px; border: 1px solid var(--acline); border-radius: 14px; background: var(--acsoft); }
+.wl-add-grid { display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: 22px; align-items: start; }
+.wl-sample { display: flex; align-items: flex-start; gap: 9px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel2); }
+.wl-sample-t { font-size: 11.5px; color: var(--tx2); line-height: 1.45; }
+
+@media (max-width: 1250px) {
+  .risk-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 1100px) {
+  .board-cols { grid-template-columns: minmax(0, 1.4fr) 52px 52px 48px 60px 18px; }
+  .board-cols > .board-bar { display: none; }
+  .wl-add-grid { grid-template-columns: 1fr; }
+  .wl-groups { grid-template-columns: 1fr; }
+}
+@media (max-width: 900px) {
+  .risk-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ev-row, .ev-row-sm { grid-template-columns: 46px minmax(0, 1fr); }
+  .ev-row > .ev-actions { grid-column: 2; justify-content: flex-start; }
 }

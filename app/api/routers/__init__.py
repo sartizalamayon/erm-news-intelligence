@@ -10,6 +10,7 @@ from app.api.routers import (
     auth,
     brief,
     dashboard,
+    dashboard_long,
     export,
     health,
     keywords,
@@ -18,12 +19,17 @@ from app.api.routers import (
     review,
     search,
     sources,
+    users,
 )
 
 ALL_ROUTERS = [
     auth.router,
     me.router,
     dashboard.router,
+    # The rebuilt Long-term tabs. Separate module, same app: dashboard.py
+    # keeps the Short-term tab, the storage-admin routes and the original
+    # /dashboard/trends, all of which still have callers.
+    dashboard_long.router,
     review.router,
     export.router,
     brief.router,
@@ -33,4 +39,5 @@ ALL_ROUTERS = [
     keywords.router,
     prompts.router,
     health.router,
+    users.router,
 ]

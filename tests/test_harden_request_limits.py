@@ -73,6 +73,27 @@ def test_zero_offset_is_allowed_through(client):
     assert response.status_code == 401
 
 
+def test_a_large_but_realistic_offset_reaches_the_route(client):
+    """The bug this test exists for: `offset` used to share `limit`'s
+    10,000 ceiling, so paging deep into a real corpus (the Review queue
+    Load More sends `offset=<articles already loaded>`, and a real
+    corpus comfortably exceeds 10,000 pending rows) 400'd for a reason
+    that had nothing to do with anything being wrong. `offset` now has
+    its own, much higher ceiling -- 15,000 must reach the route (401,
+    not 400).
+    """
+    response = client.get("/search", params={"offset": "15000"})
+    assert response.status_code == 401
+
+
+def test_a_pathological_offset_is_still_rejected(client):
+    # offset's raised ceiling is high, not unlimited -- still bounded
+    # well above any realistic corpus size.
+    response = client.get("/search", params={"offset": "999999999"})
+    assert response.status_code == 400
+    assert "offset" in response.json()["detail"]
+
+
 def test_search_free_text_over_length_limit_is_rejected(client):
     # The mission-named case: GET /search's free-text `q=` hits a
     # GIN-indexed column with no length cap of its own (`q: str = ""`,

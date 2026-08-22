@@ -417,6 +417,21 @@ def list_articles(
     offset: int = 0,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> ArticleListOut:
+    # Reject a filter value we do not understand rather than quietly
+    # doing something else with it. Found by fuzzing: `status=bogus`
+    # returned 200 with total 0, which is indistinguishable from "your
+    # perfectly valid filter matched nothing", and `top_n=-1` was
+    # ignored outright, returning the FULL list to a caller who asked
+    # for a bounded one. Both are the silently-wrong-answer pattern this
+    # project has been bitten by repeatedly.
+    if status is not None and status not in VALID_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"status must be one of {', '.join(VALID_STATUSES)}",
+        )
+    if top_n is not None and top_n < 1:
+        raise HTTPException(status_code=422, detail="top_n must be 1 or more")
+
     tier_keys = [t for t in tier.split(",") if t] if tier else None
     excluded = [s for s in (exclude_source.split(",") if exclude_source else []) if s]
     starred_only = starred == "true"

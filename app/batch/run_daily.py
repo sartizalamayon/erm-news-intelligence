@@ -44,6 +44,7 @@ from app.db.connection import get_connection
 from app.db.reaper import reap_stale_runs
 from app.db.rollups import compute_rollups_for_day
 from app.logging import configure_logging, get_logger
+from app.services import market as market_service
 from app.services.collector import run_collection
 from app.sources._util import today_dhaka
 from app.sources.registry import all_sources, load_all
@@ -86,6 +87,21 @@ def main() -> int:
             rollup_counts = compute_rollups_for_day(conn, today_dhaka())
             conn.commit()
             logger.info("rollups_updated", extra=rollup_counts)
+
+            # Exchange prices for the Long-term dashboard's Market tab.
+            # Deliberately AFTER the rollups and inside its own try: the
+            # exchange is a third party that can be down or slow, and a
+            # dead scrape must not cost us the day's collection, which is
+            # the irreplaceable part of this job. `refresh` already
+            # swallows its own network errors and returns counts; this
+            # guard only covers a DB failure while storing.
+            try:
+                market_counts = market_service.refresh(conn)
+                conn.commit()
+                logger.info("market_refreshed", extra=market_counts)
+            except Exception:
+                conn.rollback()
+                logger.warning("market_refresh_failed", exc_info=True)
     else:
         logger.warning(
             "batch_run_no_database_configured",

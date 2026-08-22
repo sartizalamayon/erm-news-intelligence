@@ -31,8 +31,13 @@ from app.db.rollups import compute_rollups_for_month
 from app.db.testing import migrated_schema, pg_available
 from app.db.watchlist import (
     WATCH_GROUPS,
+    WatchEntity,
+    WatchRule,
     all_entities,
+    all_entities_with_custom,
+    custom_entities,
     entity_predicate_sql,
+    entity_where_sql,
     prefilter_pattern,
 )
 
@@ -224,11 +229,180 @@ def test_coverage_rollup_separates_monitored_from_backdated() -> None:
         assert row["collected_days"] == 0  # so February was never monitored
 
 
-def test_watch_groups_are_the_two_a_risk_officer_asks_about() -> None:
+def test_watch_groups_are_the_three_a_risk_officer_asks_about() -> None:
     keys = [g.key for g in WATCH_GROUPS]
-    assert keys == ["operators", "regulatory"]
+    # `mfs` joined operators/regulatory when bKash and Nagad were added:
+    # the scoring rubric already treats mobile financial services as
+    # top-tier, and an operator competes with both for the same wallet.
+    assert keys == ["operators", "regulatory", "mfs"]
     operator_keys = {e.key for e in WATCH_GROUPS[0].entities}
     # Grameenphone itself is on the operator board on purpose: the board
     # is share of voice among peers, not a list of other people.
     assert "grameenphone" in operator_keys
-    assert {"robi", "banglalink", "teletalk"} <= operator_keys
+    assert {"robi", "banglalink", "teletalk", "airtel"} <= operator_keys
+    assert {e.key for e in WATCH_GROUPS[2].entities} == {"bkash", "nagad"}
+
+
+# ── Custom entities (migrations/0026) ───────────────────────────────────
+#
+# Self-service entity creation lives in app/services/watchlist_admin.py
+# and is tested there. What is tested HERE is the half that has to keep
+# working exactly as it did: the code-defined vocabulary the rollup and
+# the dashboard iterate must be unaffected by anything a form writes,
+# and the parameterized SQL builder must agree with the interpolated one
+# it sits beside.
+
+
+def test_all_entities_is_the_fifteen_code_defined_ones_with_an_empty_custom_table() -> None:
+    """`app/db/rollups.py::_upsert_watch` and the dashboard router both
+    iterate `all_entities()`. If a custom table could change that count,
+    the number of rows written per month would depend on what someone
+    typed, and `entity_predicate_sql`'s "every literal comes from this
+    module's frozen dataclasses" guarantee would be false.
+    """
+    with migrated_schema() as conn:
+        assert len(all_entities()) == 15
+        assert conn.execute("SELECT count(*) AS n FROM watch_entities").fetchone()["n"] == 0
+        assert custom_entities(conn) == []
+        assert all_entities_with_custom(conn) == all_entities()
+
+
+def _insert_custom(conn, *, key: str, group_key: str, rules: list[tuple[str, str | None]]) -> int:
+    row = conn.execute(
+        "INSERT INTO watch_entities (group_key, key, label, note, created_by) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+        (group_key, key, key.title(), "", "ops@example.test"),
+    ).fetchone()
+    for position, (pattern, context) in enumerate(rules):
+        conn.execute(
+            "INSERT INTO watch_entity_rules (entity_id, position, pattern, context) VALUES (%s, %s, %s, %s)",
+            (row["id"], position, pattern, context),
+        )
+    conn.commit()
+    return int(row["id"])
+
+
+def test_custom_entities_are_appended_inside_their_own_group() -> None:
+    with migrated_schema() as conn:
+        _insert_custom(
+            conn,
+            key="walletco",
+            group_key="mfs",
+            rules=[(r"(\ywalletco\y)", None), ("(ওয়ালেটকো)", "(ওয়ালেট)")],
+        )
+
+        pairs = all_entities_with_custom(conn)
+        assert len(pairs) == 16
+        group, entity = pairs[-1]
+        # Last, and inside `mfs` -- a custom entity never sorts above
+        # the curated ones it sits beside.
+        assert group.key == "mfs"
+        assert entity.key == "walletco"
+        assert entity.rules == (
+            WatchRule(pattern=r"(\ywalletco\y)"),
+            WatchRule(pattern="(ওয়ালেটকো)", context="(ওয়ালেট)"),
+        )
+
+
+def test_a_custom_entity_shadowing_a_code_key_is_dropped() -> None:
+    """A hand-written INSERT can do what the service refuses. Two
+    entities with one key collide on rollup_monthly_watch's primary key
+    and one overwrites the other's counts, so the merge drops the
+    intruder rather than letting a wrong number reach the dashboard.
+    """
+    with migrated_schema() as conn:
+        _insert_custom(conn, key="btrc", group_key="regulatory", rules=[("(anything)", None)])
+        assert custom_entities(conn) == []
+        assert all_entities_with_custom(conn) == all_entities()
+
+
+def test_a_custom_entity_in_an_unknown_group_is_dropped() -> None:
+    """The group supplies the title and blurb the dashboard renders
+    around an entity; there is nothing to render an orphan in. The row
+    stays in the table so the admin screen can still delete it.
+    """
+    with migrated_schema() as conn:
+        _insert_custom(conn, key="walletco", group_key="competitors", rules=[("(walletco)", None)])
+        assert custom_entities(conn) == []
+        assert conn.execute("SELECT count(*) AS n FROM watch_entities").fetchone()["n"] == 1
+
+
+def _where_matches(conn, entity: WatchEntity, title: str, title_en: str = "") -> bool:
+    where_sql, params = entity_where_sql(entity)
+    row = conn.execute(
+        f"SELECT {where_sql} AS hit FROM (SELECT %s::text AS title, %s::text AS title_en) a",  # noqa: S608
+        [*params, title, title_en],
+    ).fetchone()
+    return bool(row["hit"])
+
+
+@pytest.mark.parametrize(
+    ("title", "title_en"),
+    [
+        ("", "BTRC fines GP over illegal VoIP SIM use"),
+        ("", "Hamilton, Antonelli stung by grid penalties at Hungarian GP"),
+        ("আগামী রবিবার ঢাকায় সমাবেশ", ""),
+        ("কেটি পেরি-জাস্টিন ট্রুডোর অন্তরঙ্গ মুহূর্ত ভাইরাল", ""),
+        ("রাজধানীতে নগদ টাকা ছিনতাই", ""),
+        ("নগদের মোবাইল ব্যাংকিং সেবায় নতুন মার্চেন্ট", ""),
+        ("", "GP seeks integrated spectrum, revenue and tax policy"),
+    ],
+)
+def test_entity_where_sql_gives_the_same_answer_as_entity_predicate_sql(title: str, title_en: str) -> None:
+    """Two builders for one meaning: `entity_predicate_sql` interpolates
+    (safe only for this module's own constants, and what the rollup's
+    twelve-FILTER aggregate needs), `entity_where_sql` binds (required
+    for a pattern that came out of a database row). They must never
+    disagree, or a previewed entity would count differently from a
+    curated one on the same screen.
+    """
+    with migrated_schema() as conn:
+        for _group, entity in all_entities():
+            assert _where_matches(conn, entity, title, title_en) == _matches(conn, entity.key, title, title_en), (
+                f"{entity.key} disagrees on {title or title_en!r}"
+            )
+
+
+def test_entity_where_sql_binds_every_pattern_rather_than_inlining_it() -> None:
+    """The property the whole custom-entity feature rests on: a pattern
+    that came from a form is never spliced into SQL text, escaping or
+    no escaping.
+    """
+    entity = WatchEntity(
+        key="probe",
+        label="",
+        note="",
+        rules=(WatchRule(pattern="(walletco)"), WatchRule(pattern="(ওয়ালেটকো)", context="(ওয়ালেট)")),
+    )
+    where_sql, params = entity_where_sql(entity)
+    assert params == ["(walletco)", "(ওয়ালেটকো)", "(ওয়ালেট)"]
+    assert where_sql.count("%s") == len(params)
+    for pattern in params:
+        assert pattern not in where_sql
+
+
+def test_entity_where_sql_requires_both_patterns_when_a_rule_is_guarded() -> None:
+    with migrated_schema() as conn:
+        guarded = WatchEntity(
+            key="probe",
+            label="",
+            note="",
+            rules=(WatchRule(pattern="(নগদ)", context="(মোবাইল ব্যাংকিং)"),),
+        )
+        assert not _where_matches(conn, guarded, "রাজধানীতে নগদ টাকা ছিনতাই")
+        assert _where_matches(conn, guarded, "নগদের মোবাইল ব্যাংকিং সেবা")
+
+        # And ANY rule matching is enough.
+        either = WatchEntity(
+            key="probe",
+            label="",
+            note="",
+            rules=(WatchRule(pattern="(নগদ)", context="(মোবাইল ব্যাংকিং)"), WatchRule(pattern=r"(\ynagad\y)")),
+        )
+        assert _where_matches(conn, either, "", "Nagad opens 500 new agent points")
+
+
+def test_an_entity_with_no_rules_matches_nothing() -> None:
+    with migrated_schema() as conn:
+        empty = WatchEntity(key="probe", label="", note="", rules=())
+        assert entity_where_sql(empty) == ("false", [])
+        assert not _where_matches(conn, empty, "নগদ টাকা", "Nagad")

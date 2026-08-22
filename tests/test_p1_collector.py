@@ -261,6 +261,24 @@ def test_write_items_inserts_new_articles(fake_queries):
     assert len(fake_queries.rows) == 2
 
 
+def test_write_items_files_everything_under_the_collection_day(fake_queries):
+    """`day` is the COLLECTION day, not the article's own publication
+    date — every row this run inserts is filed under `collected_on`
+    regardless of when the source says it was published, including an
+    item published on an entirely different calendar day (the rolling
+    30-hour fetch window routinely picks up the previous evening's
+    news). A prior revision filed by publication date instead; reverted
+    back to collection-day filing per an explicit product decision.
+    """
+    result = collector.SourceResult(source_key="ok_source", display_name="OK Source", status="ok", fetched=1)
+    yesterday_evening = datetime(2026, 8, 5, 23, 0, tzinfo=timezone.utc)
+    items = [FeedItem(url="https://x.example/late", title="Late", source_key="fake", published_at=yesterday_evening)]
+    collector.write_items(_conn(), result, items, day=date(2026, 8, 6))
+    assert len(fake_queries.rows) == 1
+    assert fake_queries.rows[0]["day"] == date(2026, 8, 6)
+    assert fake_queries.rows[0]["published"] == yesterday_evening
+
+
 def test_write_items_dedupes_within_the_same_batch(fake_queries):
     result = collector.SourceResult(source_key="dup_source", display_name="Dup Source", status="ok", fetched=2)
     items = [_item("https://dup.example/same", "A"), _item("https://dup.example/same", "A dup")]

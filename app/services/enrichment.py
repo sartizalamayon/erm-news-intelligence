@@ -375,6 +375,7 @@ def stage_llm_verify_groups(
     client: LLMClient | None,
     *,
     allocate_id: Callable[[], int] | None = None,
+    calls: StageCalls | None = None,
 ) -> list[dict[str, Any]]:
     """`pipeline.py:164-225` `stage_llm_verify_groups()`, verbatim logic:
     for every embedding-proposed group with 2+ members, ask the LLM to
@@ -436,7 +437,11 @@ def stage_llm_verify_groups(
                 # it on a failed answer: `verify_group`'s own documented
                 # fallback is "never wrongly merge", and the proposal
                 # came from a conservative lexical pass.
+                if calls is not None:
+                    calls.record(ok=False, error=str(error) if error else "no verification returned")
                 continue
+            if calls is not None:
+                calls.record(ok=True)
             subgroup_to_gid: dict[int, int] = {}
             for m, s in zip(chunk, sub, strict=False):
                 if s not in subgroup_to_gid:
@@ -629,10 +634,15 @@ def run_llm_enrichment(
         missing_tr = [a for a in articles if not (a.get("title_en") or "").strip() and is_bengali(a.get("title") or "")]
         if missing_tr:
             straggler_client = _try_build_client(conn, TRANSLATION)
-            stage_translate(missing_tr, straggler_client, calls=translate_calls)
+            # `setdefault`, not the `do_translate` block's local — this
+            # runs on a standalone dedup-only rerun too (`do_translate`
+            # False), where that local is never assigned at all.
+            stage_translate(missing_tr, straggler_client, calls=stage_calls.setdefault(STAGE_TRANSLATE, StageCalls()))
             for a in missing_tr:
                 conn.execute("UPDATE articles SET title_en=%s WHERE id=%s", (a.get("title_en", ""), a["id"]))
             conn.commit()
+
+        dedup_calls = stage_calls.setdefault(STAGE_DEDUP, StageCalls())
 
         # Reported in THREE phases, not just start and end. Previously
         # this published `0/N` and then nothing until it finished, so on
@@ -647,7 +657,9 @@ def run_llm_enrichment(
 
         if progress:
             progress(0, total, "Verifying groups")
-        articles = stage_llm_verify_groups(articles, dedup_verify_client, allocate_id=allocate_group_id)
+        articles = stage_llm_verify_groups(
+            articles, dedup_verify_client, allocate_id=allocate_group_id, calls=dedup_calls
+        )
 
         for i, a in enumerate(articles, start=1):
             conn.execute(
@@ -663,6 +675,7 @@ def run_llm_enrichment(
     # ── STEP 2: judge — score in BATCHES ──
     if do_judge and not (should_stop and should_stop()):
         judge_client = _try_build_client(conn, SCORING)
+        judge_calls = stage_calls.setdefault(STAGE_JUDGE, StageCalls())
         if judge_client is None:
             skipped_stages.append(STAGE_JUDGE)
         else:
@@ -701,13 +714,17 @@ def run_llm_enrichment(
                 if should_stop and should_stop():
                     break
                 if error is not None or judgments is None:
-                    # `judge_batch` already converts provider errors into
-                    # neutral per-item fallbacks internally; reaching here
-                    # means something outside that contract failed. Leave
-                    # the batch unscored rather than writing a wrong score
-                    # — an unscored row stays visible as pending.
+                    # `judge_batch` now RAISES on a whole-call failure
+                    # (see its docstring) instead of swallowing it into a
+                    # fallback that reads as success. Leave the batch
+                    # unscored rather than writing a wrong score — an
+                    # unscored row stays visible as pending — and record
+                    # the failure so it's visible on the run panel instead
+                    # of just in a log line.
                     logger.warning("judge_batch_failed_leaving_unscored", extra={"batch_size": len(chunk)})
+                    judge_calls.record(ok=False, error=str(error) if error else "no judgments returned")
                     continue
+                judge_calls.record(ok=True)
                 for a, j in zip(chunk, judgments, strict=False):
                     a["llm_score"] = j.score
                     a["llm_reason"] = j.reason
@@ -725,6 +742,7 @@ def run_llm_enrichment(
         if topic_client is None:
             skipped_stages.append(STAGE_TOPIC)
         else:
+            topic_calls = stage_calls.setdefault(STAGE_TOPIC, StageCalls())
             try:
                 _run_topic_clustering(
                     conn,
@@ -733,6 +751,7 @@ def run_llm_enrichment(
                     embedding_backend,
                     progress=progress,
                     should_stop=should_stop,
+                    calls=topic_calls,
                 )
             except Exception as exc:  # noqa: BLE001 - mirrors collection_service.py:615-616
                 logger.warning("topic_clustering_skipped_nonfatal", extra={"error": str(exc)})
@@ -758,11 +777,30 @@ def _run_topic_clustering(
     *,
     progress: ProgressCallback | None,
     should_stop: ShouldStopCallback | None,
+    calls: StageCalls | None = None,
 ) -> None:
     """`collection_service.py:409-616`'s STEP 3 body, verbatim logic.
     Reads scored primaries FRESH from the DB (bypasses `articles`) so it
     works identically on a full run and a standalone `{"topic"}` rerun.
+
+    `cluster_topics_chunk`/`consolidate_labels`/`find_duplicates_batch`
+    each RAISE on a whole-call failure now (see their docstrings) rather
+    than swallowing it — so every call site below is wrapped locally to
+    apply the exact same neutral fallback those methods used to return
+    internally, and to record it via `calls`. This function has no
+    single `parallel_map` loop to hang that off of the way translate/
+    judge/dedup do, so it's done call-by-call instead. A local catch is
+    required, not just letting the exception propagate: the ONE caller
+    of this function (`run_llm_enrichment`) already wraps the whole call
+    in a top-level try/except that treats ANY exception as "skip topic
+    clustering entirely" — without a local catch, one bad chunk would
+    abort every remaining topic/standout/fold decision for the day.
     """
+
+    def _record(ok: bool, error: str = "") -> None:
+        if calls is not None:
+            calls.record(ok=ok, error=error)
+
     prim_rows = conn.execute(
         """SELECT a.id, a.title, a.title_en, a.llm_score, a.source, COALESCE(ab.content_text, '') AS content_text
            FROM articles a LEFT JOIN article_bodies ab ON ab.article_id = a.id
@@ -791,7 +829,14 @@ def _run_topic_clustering(
         chunk = prim[ci * chunk_size : (ci + 1) * chunk_size]
         if progress:
             progress(ci, n_chunks + 1, "Grouping topics")
-        labs = client.cluster_topics_chunk(chunk, known)
+        try:
+            labs = client.cluster_topics_chunk(chunk, known)
+        except Exception as exc:  # noqa: BLE001 - neutral fallback below, mirrors the method's own contract
+            logger.warning("cluster_topics_chunk_failed_leaving_untagged", extra={"error": str(exc)[:200]})
+            _record(False, str(exc))
+            labs = ["" for _ in chunk]
+        else:
+            _record(True)
         for a, lab in zip(chunk, labs, strict=False):
             lab = (lab or "").strip()
             nl = _norm_label(lab)
@@ -818,7 +863,14 @@ def _run_topic_clustering(
     label_map = {lab: norm_canon[_norm_label(lab)] for lab in distinct}
     canon_set = sorted(set(label_map.values()))
     if len(canon_set) > 1:
-        merged = client.consolidate_labels(canon_set)
+        try:
+            merged = client.consolidate_labels(canon_set)
+        except Exception as exc:  # noqa: BLE001 - neutral fallback below, mirrors the method's own contract
+            logger.warning("consolidate_labels_failed_skipping_merge", extra={"error": str(exc)[:200]})
+            _record(False, str(exc))
+            merged = {lab: lab for lab in canon_set}
+        else:
+            _record(True)
         label_map = {lab: merged.get(label_map[lab], label_map[lab]) for lab in distinct}
     if label_map:
         for aid, lab in list(labels_by_id.items()):
@@ -863,7 +915,14 @@ def _run_topic_clustering(
             if should_stop and should_stop():
                 break
             batch = members[start : start + fold_batch_size]
-            dupes = client.find_duplicates_batch(shown, batch)
+            try:
+                dupes = client.find_duplicates_batch(shown, batch)
+            except Exception as exc:  # noqa: BLE001 - neutral fallback below, mirrors the method's own contract
+                logger.warning("find_duplicates_batch_failed_no_folds", extra={"error": str(exc)[:200]})
+                _record(False, str(exc))
+                dupes = {}
+            else:
+                _record(True)
             survivors = []
             for ci, m in enumerate(batch):
                 si = dupes.get(ci)
@@ -882,7 +941,14 @@ def _run_topic_clustering(
                 rest = remaining[1:]
                 if not rest:
                     break
-                d2 = client.find_duplicates_batch([leadm], rest)
+                try:
+                    d2 = client.find_duplicates_batch([leadm], rest)
+                except Exception as exc:  # noqa: BLE001 - neutral fallback below, mirrors the method's own contract
+                    logger.warning("find_duplicates_batch_failed_no_folds", extra={"error": str(exc)[:200]})
+                    _record(False, str(exc))
+                    d2 = {}
+                else:
+                    _record(True)
                 nxt = []
                 for cj, m in enumerate(rest):
                     if d2.get(cj) == 0:

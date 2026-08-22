@@ -71,10 +71,25 @@ services:
         sync: false
       - key: SECRET_KEY
         sync: false
+      # EMAIL_PROVIDER selects which of the two blocks below actually
+      # sends OTP mail at runtime (app.services.email, app.config.Settings
+      # .email_provider) — "brevo" is what this deployment actually uses
+      # today, not "resend" (this file's own original default). Resend
+      # stays fully configured below rather than removed: it's a real,
+      # working alternative if this ever needs to switch back, at the
+      # cost of two now-inert secrets when it isn't the active choice.
+      - key: EMAIL_PROVIDER
+        value: brevo
       - key: RESEND_API_KEY
         sync: false
       - key: RESEND_FROM_EMAIL
         sync: false
+      - key: BREVO_API_KEY
+        sync: false
+      - key: BREVO_FROM_EMAIL
+        sync: false
+      - key: BREVO_FROM_NAME
+        value: ERM
       - key: GROQ_API_KEY
         sync: false
       - key: GEMINI_API_KEY
@@ -82,6 +97,11 @@ services:
       - key: MISTRAL_API_KEY
         sync: false
       - key: NVIDIA_API_KEY
+        sync: false
+      # Brent crude card on the long-term dashboard (app.services.macro) —
+      # degrades to an honest "unconfigured" state rather than failing
+      # the deploy if this is left blank, but the card is dead without it.
+      - key: OILPRICEAPI_KEY
         sync: false
       # SECURITY-CRITICAL — RT-5 (docs/red-team-findings.md), see
       # app.config.Settings.trusted_proxy_hops's own description and

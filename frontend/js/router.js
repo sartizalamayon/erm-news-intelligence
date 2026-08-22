@@ -11,6 +11,7 @@ import { mountPrompts } from "./screens/prompts.js";
 import { mountModels } from "./screens/models.js";
 import { mountManual } from "./screens/manual.js";
 import { mountRun } from "./screens/run.js";
+import { mountUsers } from "./screens/users.js";
 
 const SCREENS = {
   dash: mountDashboard,
@@ -23,6 +24,7 @@ const SCREENS = {
   models: mountModels,
   manual: mountManual,
   run: mountRun,
+  users: mountUsers,
 };
 
 export function mountScreen(key, root, ctx) {

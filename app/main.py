@@ -10,13 +10,20 @@ tests can construct fresh instances with different settings if needed;
 Middleware stack (see docs/security.md, news-intel-rebuild repo, for the
 full writeup) is added in a specific order because Starlette makes the
 LAST middleware added the OUTERMOST layer (first to see the request,
-last to see the response): CORS is added last on purpose so every
+last to see the response) — `add_middleware()` inserts at the FRONT of
+Starlette's internal list and `build_middleware_stack()` wraps in that
+list's order, so the add sequence below is deliberately the REVERSE of
+request-time execution order. CORS is added last on purpose so every
 response — including a 429 from the rate limiter or a 413 from the body
 size cap — still carries correct CORS headers back to the frontend
 origin, rather than looking like an opaque CORS failure to the browser.
-Actual add order below (first added = innermost): query/pagination
-bounds, request body size cap, general rate limit, security headers,
-CORS.
+Actual add order below (first added = runs LAST/innermost, closest to
+the route): request body size cap, NUL-byte rejection, query/pagination
+bounds, general rate limit, security headers, CORS — giving the real
+request-time order QueryBounds -> NulByte -> BodySizeLimit -> RateLimit
+-> SecurityHeaders -> CORS -> route, matching each guard's own stated
+reason for its position (see the inline comments at each add_middleware
+call).
 """
 
 from __future__ import annotations
@@ -30,7 +37,7 @@ from app.config import Settings, get_settings, validate_production_settings
 from app.errors import ConfigurationError
 from app.logging import configure_logging, get_logger
 from app.middleware.rate_limit import RateLimitMiddleware
-from app.middleware.request_limits import BodySizeLimitMiddleware, QueryBoundsMiddleware
+from app.middleware.request_limits import BodySizeLimitMiddleware, NulByteMiddleware, QueryBoundsMiddleware
 from app.middleware.security_headers import SecurityHeadersMiddleware
 
 logger = get_logger(__name__)
@@ -116,11 +123,21 @@ def create_app() -> FastAPI:
     )
 
     # ── Middleware (see module docstring for why this exact order) ────
+    # Added in the REVERSE of execution order (last added = outermost =
+    # runs first — see module docstring). BodySizeLimit is added FIRST
+    # here so it ends up innermost/last-to-run; QueryBounds is added
+    # LAST of these three so it ends up outermost/first-to-run.
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
+    # Runs BEFORE the body-size guard (added after it, so outer to it):
+    # a NUL makes the request malformed regardless of its size.
+    app.add_middleware(NulByteMiddleware)
+    # Runs before NulByte (added after it), so an over-long parameter is
+    # still reported as over-long rather than intercepted by the NUL
+    # check first.
     app.add_middleware(
         QueryBoundsMiddleware,
         max_param_length=settings.max_query_param_length,
     )
-    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
     app.add_middleware(
         RateLimitMiddleware,
         requests=settings.rate_limit_requests_per_window,

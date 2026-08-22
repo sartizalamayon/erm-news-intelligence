@@ -52,6 +52,16 @@ numbers agree on what "matched" means):
   wrong by two orders of magnitude -- see that module's docstring for
   the measured evidence. `high_count` reuses the same `llm_score >= 8`
   boundary as the score bands so "high" means one thing on this screen.
+- econ article_count (migrations/0025): the macro counterpart of the
+  watch rows -- headlines matching one of `app.db.econaxes`' six
+  curated economy axes (energy, trade/RMG, FX, banking, revenue/tax,
+  capital markets). Same counting rule, same `llm_score >= 8` critical
+  boundary and the same column shape as the watch rows minus
+  `group_key`, because the two boards are read side by side and a
+  telecom line has to be directly comparable to an economy line. Also
+  deliberately NOT derived from `articles.keywords` or `topic_tag`, for
+  the reason 0021's header gives: you cannot trend a theme whose name
+  changes between months.
 - coverage collected_count / collected_days (migrations/0021): whether
   a month was actually being monitored, as opposed to merely appearing
   in the corpus because a later crawl found backdated articles.
@@ -84,6 +94,12 @@ import sys
 from datetime import date
 
 from app.db.connection import DictConnection, get_connection
+from app.db.econaxes import (
+    all_axes,
+    axis_where_sql,
+    econ_prefilter_pattern,
+    normalized_text_sql,
+)
 from app.db.watchlist import (
     NORMALIZED_TEXT_SQL,
     all_entities,
@@ -377,6 +393,103 @@ def _upsert_watch(conn: DictConnection, month: date, month_end: date) -> int:
     return len(entities)
 
 
+def _upsert_econ(conn: DictConnection, month: date, month_end: date) -> int:
+    """One row per (month, economy axis) with volume AND severity --
+    migrations/0025's `rollup_monthly_econ`, the macro counterpart of
+    `_upsert_watch` above.
+
+    Same single-pass shape and for the same reason: six axes x a dozen
+    months of backfill would otherwise be ~70 separate regex scans for
+    numbers that come out of one. Same MATERIALIZED CTEs, so Postgres
+    cannot flatten them and re-derive the normalized headline text
+    inside every FILTER clause, and same combined-prefilter first pass
+    (`econaxes.econ_prefilter_pattern`) so the per-axis predicates only
+    ever run against headlines that mention the economy at all.
+
+    That prefilter runs against `normalized_text_sql`, NOT the stripped
+    `econ_text_sql`, and the difference is worth 2x on a real month.
+    `ECON_STRIP_RE` only ever removes characters, so it can never turn a
+    non-match into a match and filtering on the unstripped text stays a
+    strict superset -- which keeps a per-row `regexp_replace` off all
+    45,000 articles and pays for it only on the few hundred survivors.
+
+    The one structural difference from `_upsert_watch` is parameter
+    handling. `watchlist.entity_predicate_sql` weaves its patterns into
+    the SQL text; `econaxes.axis_where_sql` returns `%s` placeholders
+    plus the patterns as bind parameters, so this function has to
+    concatenate the per-axis param lists in the SAME order it
+    concatenates the per-axis SQL fragments. `flag_params` below is
+    built in the loop that builds `flags` precisely to keep those two
+    orders impossible to desynchronize.
+    """
+    axes = all_axes()
+    if not axes:  # pragma: no cover -- the axis list is never empty in practice
+        return 0
+
+    flags: list[str] = []
+    flag_params: list[str] = []
+    for index, axis in enumerate(axes):
+        clause, params = axis_where_sql(axis, table_alias="hits")
+        flags.append(f"{clause} AS e{index}")
+        flag_params.extend(params)
+
+    selects = ", ".join(
+        f"count(*) FILTER (WHERE y.e{index}) AS n{index}, "
+        f"count(*) FILTER (WHERE y.e{index} AND y.llm_score IS NOT NULL) AS s{index}, "
+        f"count(*) FILTER (WHERE y.e{index} AND y.llm_score >= 8) AS h{index}, "
+        f"coalesce(sum(y.llm_score) FILTER (WHERE y.e{index}), 0) AS t{index}"
+        for index in range(len(axes))
+    )
+    row = conn.execute(
+        f"""
+        WITH base AS MATERIALIZED (
+            SELECT a.llm_score, a.title, a.title_en
+            FROM articles a
+            WHERE a.day >= %s AND a.day < %s
+        ),
+        hits AS MATERIALIZED (
+            SELECT base.llm_score, base.title, base.title_en
+            FROM base WHERE {normalized_text_sql("base")} ~ %s
+        ),
+        y AS MATERIALIZED (
+            SELECT hits.llm_score, {", ".join(flags)} FROM hits
+        )
+        SELECT {selects} FROM y
+        """,  # noqa: S608
+        [month, month_end, econ_prefilter_pattern(), *flag_params],
+    ).fetchone()
+    row = row or {}
+
+    for index, axis in enumerate(axes):
+        conn.execute(
+            """
+            INSERT INTO rollup_monthly_econ
+                (month, axis, article_count, scored_count, high_count, score_sum)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (month, axis) DO UPDATE SET
+                article_count = EXCLUDED.article_count,
+                scored_count  = EXCLUDED.scored_count,
+                high_count    = EXCLUDED.high_count,
+                score_sum     = EXCLUDED.score_sum
+            """,
+            (
+                month,
+                axis.key,
+                int(row.get(f"n{index}") or 0),
+                int(row.get(f"s{index}") or 0),
+                int(row.get(f"h{index}") or 0),
+                float(row.get(f"t{index}") or 0),
+            ),
+        )
+    # Every axis is written every time (the aggregate always returns a
+    # value, zero or not), so there is no stale-key zero-out pass to do
+    # here -- same reasoning as the score bands and the watchlist above.
+    # An axis REMOVED from econaxes.py does leave rows behind; the read
+    # side selects by the current axis list, so those rows are inert
+    # rather than wrong.
+    return len(axes)
+
+
 def _upsert_coverage(conn: DictConnection, month: date, month_end: date) -> int:
     """The "were we actually watching this month" row. See
     migrations/0021's header for why a publication-date chart is
@@ -454,6 +567,7 @@ def compute_rollups_for_month(conn: DictConnection, month: date) -> dict[str, in
         "score_bands": _upsert_score_bands(conn, month, month_end),
         "themes": _upsert_themes(conn, month, month_end),
         "watch": _upsert_watch(conn, month, month_end),
+        "econ": _upsert_econ(conn, month, month_end),
         "coverage": _upsert_coverage(conn, month, month_end),
     }
     logger.info("rollups_computed", extra={"month": month.isoformat(), **counts})

@@ -64,15 +64,47 @@ throttling, and international bandwidth infrastructure. These are the
 line items an ERM register carries; "Geopolitical" and "Macroeconomy"
 are not.
 
-Adding an entity is a code change on purpose. Each pattern here was
-eyeballed against its real matches in the corpus before landing, and
-that review is the whole value of the file: a self-service admin field
-would re-import the precision problem this module exists to solve.
+Adding an entity here is still a code change on purpose. Each pattern
+in this file was eyeballed against its real matches in the corpus
+before landing, and that review is the whole value of the file.
+
+SELF-SERVICE ENTITIES, AND WHERE THE GUARD RAIL WENT
+────────────────────────────────────────────────────
+This file used to end by saying a self-service admin field "would
+re-import the precision problem this module exists to solve". The owner
+asked for self-service anyway, so the guard rail moved instead of being
+removed: an operator may add an entity (migrations/0026, read back by
+`custom_entities` below), but `app/services/watchlist_admin.py` first
+runs the proposed pattern against the real corpus and shows its
+matches, guarded and unguarded, with both totals. The eyeball pass that
+used to happen in code review happens in the preview. Nothing reaches
+`watch_entities` that the operator has not seen matching real
+headlines.
+
+Two consequences for this module:
+
+  * `WATCH_GROUPS` and `all_entities()` are unchanged and still
+    code-only -- `app/db/rollups.py::_upsert_watch` and
+    `app/api/routers/dashboard.py` iterate them, and the entities they
+    return are exactly the fifteen defined below. Custom entities are
+    ADDITIVE, via `all_entities_with_custom(conn)`.
+  * A code-defined pattern is a module constant and can be interpolated
+    into SQL (`entity_predicate_sql`). A database-defined pattern is
+    DATA and must never be. `entity_where_sql` therefore returns the
+    SQL and its bind parameters separately, and is the only correct way
+    to run a custom entity's rules.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+from app.db.connection import DictConnection
+from app.errors import ValidationError
+from app.logging import get_logger
+
+logger = get_logger(__name__)
 
 # Headline text every pattern below runs against, as a SQL expression.
 #
@@ -86,9 +118,35 @@ from dataclasses import dataclass
 #   documented in the module docstring: অন্তরঙ্গ means "intimate" and
 #   ends with the exact characters তরঙ্গ, so celebrity stories otherwise
 #   land in the spectrum-policy row.
-NORMALIZED_TEXT_SQL = (
-    "lower(replace(coalesce(a.title, '') || ' ~ ' || coalesce(a.title_en, ''), 'অন্তরঙ্গ', ' '))"
+#
+# The template exists because `entity_where_sql` (added for custom
+# entities) has to build the same expression for a caller's own table
+# alias. One definition, so the two can never drift apart -- a preview
+# that normalized text differently from the rollup would show the
+# operator matches the dashboard then fails to reproduce.
+_TEXT_SQL_TEMPLATE = (
+    "lower(replace(coalesce({alias}.title, '') || ' ~ ' || coalesce({alias}.title_en, ''), 'অন্তরঙ্গ', ' '))"
 )
+
+NORMALIZED_TEXT_SQL = _TEXT_SQL_TEMPLATE.format(alias="a")
+
+# A SQL identifier we are willing to splice into a query string.
+_SAFE_ALIAS = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+
+def normalized_text_sql(table_alias: str = "a") -> str:
+    """`NORMALIZED_TEXT_SQL` for an arbitrary table alias.
+
+    `table_alias` is spliced into SQL, so it is checked against a
+    conservative identifier pattern rather than trusted. Callers pass a
+    literal from their own code ("a", "art"); anything else is a bug,
+    and a bug that reaches this function is one that would otherwise
+    reach the query planner.
+    """
+    if not _SAFE_ALIAS.match(table_alias):
+        raise ValidationError(f"unsafe SQL table alias {table_alias!r}")
+    return _TEXT_SQL_TEMPLATE.format(alias=table_alias)
+
 
 # A headline mentions telecom at all. Used as the `context` for tokens
 # that are real in this domain but ambiguous in isolation -- "GP" is the
@@ -111,6 +169,19 @@ TELECOM_CONTEXT_STRICT = (
     r"(btrc|বিটিআরসি|telecom|টেলিকম|টেলিযোগাযোগ|mobile operator|মোবাইল অপারেটর|spectrum|স্পেকট্রাম|তরঙ্গ"
     r"|\ysims?\y|সিম কার্ড|handset|মোবাইল ফোন|মোবাইল সেট|\ygp\y"
     r"|grameenphone|গ্রামীণফোন|banglalink|বাংলালিংক|teletalk|টেলিটক|robi axiata|আজিয়াটা)"
+)
+
+
+# Mobile-financial-services cue. Required by the Bangla tokens for the
+# two wallets below, because both spell ordinary words: নগদ is "cash"
+# and বিকাশ is "development". Unguarded, নগদ collects cash robberies and
+# Bangladesh Bank's cash-margin circulars, and বিকাশ collects economic
+# development and the given name Bikash -- 78 and 84 raw matches against
+# 33 and 46 real ones. This is the রবি/তরঙ্গ problem in a third place.
+MFS_CONTEXT = (
+    r"(\ymfs\y|mobile financial|মোবাইল ফাইন্যান্সিয়াল|এমএফএস|mobile banking|মোবাইল ব্যাংকিং"
+    r"|\ywallet\y|ওয়ালেট|\ybkash\y|\ynagad\y|\yrocket\y|রকেট|\yupay\y|cashless|ক্যাশলেস"
+    r"|\yqr\y|কিউআর|সার্ভিস চার্জ|service charge|মার্চেন্ট|merchant|পেমেন্ট|payment)"
 )
 
 
@@ -189,6 +260,22 @@ OPERATORS = WatchGroup(
             label="Starlink",
             note="Satellite entrant. Substitution risk at the edge of the licensed market.",
             rules=(WatchRule(r"(starlink|স্টারলিংক)"),),
+        ),
+        WatchEntity(
+            key="airtel",
+            label="Airtel / Cirkle",
+            note=(
+                "Robi's second brand, renamed Cirkle in 2026. Tracked separately from "
+                "Robi: a brand relaunch is its own competitive event."
+            ),
+            rules=(
+                WatchRule(r"(\yairtel\y|এয়ারটেল|\ycirkle\y)"),
+                # সার্কেল on its own is just "circle" -- clubs, cricket
+                # circles, administrative circles. Admitted only next to
+                # a telecom cue, which is what picks up the Bangla
+                # rebrand coverage ("এয়ারটেলের নতুন পরিচয় সার্কেল").
+                WatchRule(r"সার্কেল", context=TELECOM_CONTEXT),
+            ),
         ),
     ),
 )
@@ -275,7 +362,38 @@ REGULATORY = WatchGroup(
 )
 
 
-WATCH_GROUPS: tuple[WatchGroup, ...] = (OPERATORS, REGULATORY)
+MFS = WatchGroup(
+    key="mfs",
+    title="Wallets and payments",
+    blurb=(
+        "The two mobile-financial-services players an operator competes with for the same "
+        "subscriber wallet. The scoring rubric already treats MFS as top-tier; this is the board "
+        "that makes their moves countable."
+    ),
+    entities=(
+        WatchEntity(
+            key="bkash",
+            label="bKash",
+            note="Bangla token guarded: বিকাশ also means development, and Bikash is a given name.",
+            rules=(
+                WatchRule(r"\ybkash\y"),
+                WatchRule(r"বিকাশ", context=MFS_CONTEXT),
+            ),
+        ),
+        WatchEntity(
+            key="nagad",
+            label="Nagad",
+            note="Bangla token guarded: নগদ is the ordinary word for cash.",
+            rules=(
+                WatchRule(r"\ynagad\y"),
+                WatchRule(r"নগদ", context=MFS_CONTEXT),
+            ),
+        ),
+    ),
+)
+
+
+WATCH_GROUPS: tuple[WatchGroup, ...] = (OPERATORS, REGULATORY, MFS)
 
 
 def all_entities() -> list[tuple[WatchGroup, WatchEntity]]:
@@ -315,3 +433,132 @@ def entity_predicate_sql(entity: WatchEntity, text_sql: str = NORMALIZED_TEXT_SQ
             one = f"({one} AND {text_sql} ~ '{rule.context}')"
         clauses.append(one)
     return "(" + " OR ".join(clauses) + ")"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Custom (database-defined) entities -- migrations/0026_watch_entities.sql
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def entity_where_sql(entity: WatchEntity, table_alias: str = "a") -> tuple[str, list[str]]:
+    """The SQL boolean for "this row mentions `entity`", with every
+    pattern BOUND rather than interpolated.
+
+    Returns `(sql, params)`: `sql` contains `%s` placeholders in the
+    order `params` lists them, so a caller writes
+
+        where_sql, params = entity_where_sql(entity)
+        conn.execute(f"SELECT count(*) FROM articles a WHERE {where_sql}", params)
+
+    This is the counterpart to `entity_predicate_sql`, and the two exist
+    separately on purpose. `entity_predicate_sql` inlines its patterns,
+    which is safe ONLY because the patterns it is ever given come from
+    this module's own frozen dataclasses; `app/db/rollups.py` needs that
+    form because it builds one aggregate with a dozen `count(*) FILTER
+    (WHERE ...)` clauses, where a positional parameter per pattern would
+    be unreadable and easy to mis-order. A custom entity's pattern comes
+    out of a database row that an operator's form put there, so it is
+    data: it goes in as a parameter, always, even though
+    `app/services/watchlist_admin.py` has already escaped every regex
+    metacharacter out of it. Escaping is the first line of defence, not
+    the only one.
+
+    Semantics match `entity_predicate_sql` exactly: a rule with a
+    `context` requires BOTH patterns to match the same headline, and the
+    entity matches if ANY rule matches. An entity with no rules yields
+    `false` -- it cannot match anything, and saying so in SQL is safer
+    than returning an empty string a caller might splice into a WHERE.
+    """
+    text = normalized_text_sql(table_alias)
+    clauses: list[str] = []
+    params: list[str] = []
+    for rule in entity.rules:
+        if rule.context:
+            clauses.append(f"({text} ~ %s AND {text} ~ %s)")
+            params.append(rule.pattern)
+            params.append(rule.context)
+        else:
+            clauses.append(f"{text} ~ %s")
+            params.append(rule.pattern)
+    if not clauses:
+        return "false", []
+    return "(" + " OR ".join(clauses) + ")", params
+
+
+_CODE_ENTITY_KEYS = frozenset(entity.key for group in WATCH_GROUPS for entity in group.entities)
+_GROUPS_BY_KEY = {group.key: group for group in WATCH_GROUPS}
+
+
+def custom_entities(conn: DictConnection) -> list[tuple[WatchGroup, WatchEntity]]:
+    """The operator-added entities from `watch_entities`, shaped exactly
+    like `all_entities()`'s rows so every consumer can treat the two the
+    same way.
+
+    Two classes of row are dropped rather than returned, both defending
+    against a hand-written INSERT that skipped
+    `app/services/watchlist_admin.py::create` (which refuses both):
+
+      * a key that shadows a code-defined entity. Two entities sharing
+        one key collide on `rollup_monthly_watch`'s (month, group_key,
+        entity) primary key, and one silently overwrites the other's
+        counts -- a wrong number on a risk dashboard, which is the exact
+        failure mode this whole module exists to prevent.
+      * a `group_key` no group in code has. The group supplies the title
+        and blurb the dashboard renders around the entity; there is
+        nothing to render it in.
+
+    Both are logged at warning level, and the rows stay in the table so
+    the admin screen can still list and delete them.
+    """
+    rows = conn.execute(
+        """
+        SELECT e.id, e.group_key, e.key, e.label, e.note, r.pattern, r.context
+        FROM watch_entities e
+        LEFT JOIN watch_entity_rules r ON r.entity_id = e.id
+        ORDER BY e.group_key, e.key, r.position, r.id
+        """
+    ).fetchall()
+
+    # {entity key: (group_key, label, note, [rules])}, insertion-ordered
+    # by the query's ORDER BY.
+    collected: dict[str, tuple[str, str, str, list[WatchRule]]] = {}
+    for row in rows:
+        key = row["key"]
+        entry = collected.setdefault(key, (row["group_key"], row["label"], row["note"], []))
+        if row["pattern"] is not None:
+            entry[3].append(WatchRule(pattern=row["pattern"], context=row["context"]))
+
+    out: list[tuple[WatchGroup, WatchEntity]] = []
+    for key, (group_key, label, note, rules) in collected.items():
+        if key in _CODE_ENTITY_KEYS:
+            logger.warning("watch_entity_shadows_code_key", extra={"entity": key})
+            continue
+        group = _GROUPS_BY_KEY.get(group_key)
+        if group is None:
+            logger.warning("watch_entity_unknown_group", extra={"entity": key, "group_key": group_key})
+            continue
+        out.append((group, WatchEntity(key=key, label=label, note=note, rules=tuple(rules))))
+    return out
+
+
+def all_entities_with_custom(conn: DictConnection) -> list[tuple[WatchGroup, WatchEntity]]:
+    """`all_entities()` plus the operator-added ones, ordered group by
+    group (code-defined entities first within each group, then custom
+    ones by key) so a dashboard can render the merged list in one pass
+    and a custom entity never appears above the curated ones it sits
+    beside.
+
+    `all_entities()` is deliberately NOT redefined in terms of this
+    function: callers that must stay code-only -- anything that
+    interpolates patterns into SQL, and any test asserting the fixed
+    vocabulary -- keep the version that cannot be changed from a form.
+    """
+    by_group: dict[str, list[WatchEntity]] = {}
+    for group, entity in custom_entities(conn):
+        by_group.setdefault(group.key, []).append(entity)
+
+    out: list[tuple[WatchGroup, WatchEntity]] = []
+    for group in WATCH_GROUPS:
+        out.extend((group, entity) for entity in group.entities)
+        out.extend((group, entity) for entity in sorted(by_group.get(group.key, []), key=lambda e: e.key))
+    return out

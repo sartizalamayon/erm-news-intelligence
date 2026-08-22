@@ -31,6 +31,7 @@ export const ROUTABLE_SCREENS = [
   "prompts",
   "models",
   "manual",
+  "users",
 ];
 
 /**
@@ -53,6 +54,19 @@ export const DASH_MODES = ["short", "long"];
 export const DEFAULT_DASH_MODE = "short";
 
 /**
+ * The Long-term view is four sub-tabs, each addressable as a third path
+ * segment (`/dash/long/economy`). They are separately linkable for the
+ * same reason the Long-term tab itself is: someone reads a number on the
+ * Economy board, and the way they hand it to a colleague is the URL.
+ *
+ * `risk` is the landing tab and stays implicit — `/dash/long` and
+ * `/dash/long/risk` are the same view, and the shorter one is what the
+ * app writes back to the address bar.
+ */
+export const LONG_TABS = ["risk", "market", "economy", "telecom"];
+export const DEFAULT_LONG_TAB = "risk";
+
+/**
  * Build the path for a screen. The Dashboard carries its tab as a
  * second segment (`/dash/long`) so the long-term view is linkable too;
  * `short` is the default and stays implicit to keep the common URL clean.
@@ -63,7 +77,14 @@ export const DEFAULT_DASH_MODE = "short";
  */
 export function pathForScreen(screen, opts = {}) {
   const key = ROUTABLE_SCREENS.includes(screen) ? screen : DEFAULT_SCREEN;
-  if (key === "dash" && opts.dashMode === "long") return "/dash/long";
+  if (key === "dash" && opts.dashMode === "long") {
+    const tab = opts.longTab;
+    // DEFAULT_LONG_TAB is deliberately not spelled out in the URL, so
+    // the tab a reader lands on has one canonical address rather than
+    // two that render identically.
+    if (tab && tab !== DEFAULT_LONG_TAB && LONG_TABS.includes(tab)) return `/dash/long/${tab}`;
+    return "/dash/long";
+  }
   return `/${key}`;
 }
 
@@ -79,17 +100,22 @@ export function screenForPath(pathname) {
   const parts = String(pathname || "")
     .split("/")
     .filter(Boolean);
-  const [head, sub] = parts;
+  const [head, sub, tab] = parts;
   if (head && Object.hasOwn(LEGACY_PATHS, head)) {
-    return { screen: LEGACY_PATHS[head], dashMode: DEFAULT_DASH_MODE };
+    return { screen: LEGACY_PATHS[head], dashMode: DEFAULT_DASH_MODE, longTab: DEFAULT_LONG_TAB };
   }
   if (!head || !ROUTABLE_SCREENS.includes(head)) {
-    return { screen: DEFAULT_SCREEN, dashMode: DEFAULT_DASH_MODE };
+    return { screen: DEFAULT_SCREEN, dashMode: DEFAULT_DASH_MODE, longTab: DEFAULT_LONG_TAB };
   }
   if (head === "dash") {
-    return { screen: "dash", dashMode: DASH_MODES.includes(sub) ? sub : DEFAULT_DASH_MODE };
+    const dashMode = DASH_MODES.includes(sub) ? sub : DEFAULT_DASH_MODE;
+    // An unknown third segment falls back to the landing tab rather than
+    // rendering nothing, for the same reason an unknown screen falls back
+    // to the Dashboard: a bad URL should land somewhere useful.
+    const longTab = dashMode === "long" && LONG_TABS.includes(tab) ? tab : DEFAULT_LONG_TAB;
+    return { screen: "dash", dashMode, longTab };
   }
-  return { screen: head, dashMode: DEFAULT_DASH_MODE };
+  return { screen: head, dashMode: DEFAULT_DASH_MODE, longTab: DEFAULT_LONG_TAB };
 }
 
 /**
@@ -106,14 +132,14 @@ export function screenForPath(pathname) {
  * @param {{ is_admin?: boolean } | null} user
  */
 export function canAccess(screen, user) {
-  const adminOnly = new Set(["run", "sources", "keywords", "prompts", "models"]);
+  const adminOnly = new Set(["run", "sources", "keywords", "prompts", "models", "users"]);
   if (!adminOnly.has(screen)) return true;
   return !!(user && user.is_admin);
 }
 
 /** Current screen/mode from `window.location`. */
 export function readLocation(loc = typeof window !== "undefined" ? window.location : null) {
-  if (!loc) return { screen: DEFAULT_SCREEN, dashMode: DEFAULT_DASH_MODE };
+  if (!loc) return { screen: DEFAULT_SCREEN, dashMode: DEFAULT_DASH_MODE, longTab: DEFAULT_LONG_TAB };
   return screenForPath(loc.pathname);
 }
 

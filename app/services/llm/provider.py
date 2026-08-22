@@ -113,19 +113,31 @@ class LLMClient:
     # ── 1.2 judge_batch() — the LIVE relevance-scoring call ────────────
 
     def judge_batch(self, items: list[dict]) -> list[Judgment]:
+        """On a whole-call failure this RAISES rather than swallowing —
+        see `translate_titles_batch`'s docstring for why: a caller that
+        wants `StageCalls` accounting (`enrichment.py`'s scoring step)
+        needs to see the failure, not a fallback value indistinguishable
+        from a real judgment.
+        """
         if not items:
             return []
         system = prompts.judge_batch_system(_current_base_system(self.conn), len(items))
         prompt = prompts.judge_batch_prompt(items)
         try:
             raw = self.transport._generate(prompt, system=system, fmt="json")
-        except Exception as e:  # noqa: BLE001
-            return parsing.judge_batch_whole_call_fallback(list(range(len(items))), e)
+        except Exception as e:  # noqa: BLE001 - re-raised for accounting
+            logger.warning("judge_batch_failed", extra={"count": len(items), "error": str(e)[:200]})
+            raise
         return parsing.parse_judge_batch(raw, len(items))
 
     # ── 1.3 cluster_topics_chunk() — topic labelling, Phase 1 ──────────
 
     def cluster_topics_chunk(self, items: list[dict], known_labels: list[str]) -> list[str]:
+        """On a whole-call failure this RAISES — see `judge_batch`'s
+        docstring. `_run_topic_clustering` catches it, applies the same
+        neutral fallback (every item untagged), and records it in
+        `StageCalls`.
+        """
         if not items:
             return []
         system = prompts.cluster_topics_system(
@@ -136,13 +148,19 @@ class LLMClient:
             raw = self.transport._generate(
                 prompt, system=system, fmt="json", num_predict=prompts.CLUSTER_TOPICS_NUM_PREDICT
             )
-        except Exception:  # noqa: BLE001
-            return parsing.cluster_topics_chunk_whole_call_fallback(list(range(len(items))))
+        except Exception as exc:  # noqa: BLE001 - re-raised for accounting
+            logger.warning("cluster_topics_chunk_failed", extra={"count": len(items), "error": str(exc)[:200]})
+            raise
         return parsing.parse_cluster_topics_chunk(raw, len(items))
 
     # ── 1.4 consolidate_labels() — topic-label merge ────────────────────
 
     def consolidate_labels(self, labels: list[str]) -> dict[str, str]:
+        """On a whole-call failure this RAISES — see `judge_batch`'s
+        docstring. `_run_topic_clustering` catches it, applies the same
+        neutral fallback (identity mapping, no consolidation), and
+        records it in `StageCalls`.
+        """
         filtered = [label for label in labels if label]
         if len(filtered) < 2:
             return {label: label for label in filtered}
@@ -152,13 +170,19 @@ class LLMClient:
             raw = self.transport._generate(
                 prompt, system=system, fmt="json", num_predict=prompts.CONSOLIDATE_LABELS_NUM_PREDICT
             )
-        except Exception:  # noqa: BLE001
-            return parsing.consolidate_labels_whole_call_fallback(filtered)
+        except Exception as exc:  # noqa: BLE001 - re-raised for accounting
+            logger.warning("consolidate_labels_failed", extra={"count": len(filtered), "error": str(exc)[:200]})
+            raise
         return parsing.parse_consolidate_labels(raw, filtered)
 
     # ── 1.5 find_duplicates_batch() — topic-fold / standout decision ───
 
     def find_duplicates_batch(self, shown: list[dict], candidates: list[dict]) -> dict[int, int]:
+        """On a whole-call failure this RAISES — see `judge_batch`'s
+        docstring. `_run_topic_clustering` catches it, applies the same
+        neutral fallback (no duplicates found), and records it in
+        `StageCalls`.
+        """
         if not candidates:
             return {}
         shown_ref = shown[: prompts.FIND_DUPLICATES_SHOWN_CAP]
@@ -173,8 +197,12 @@ class LLMClient:
                 num_predict=prompts.FIND_DUPLICATES_NUM_PREDICT,
                 num_ctx=num_ctx,
             )
-        except Exception:  # noqa: BLE001
-            return parsing.find_duplicates_batch_whole_call_fallback()
+        except Exception as exc:  # noqa: BLE001 - re-raised for accounting
+            logger.warning(
+                "find_duplicates_batch_failed",
+                extra={"candidates": len(candidates), "error": str(exc)[:200]},
+            )
+            raise
         return parsing.parse_find_duplicates_batch(raw, len(candidates), len(shown_ref))
 
     # ── 1.6 summarize() — DEAD (zero callers) ───────────────────────────
@@ -213,10 +241,21 @@ class LLMClient:
         preserve order, and defaults any missing index to that item's
         ORIGINAL title.
 
-        On a whole-call failure every title falls back to itself, which
-        is the same observable outcome as `translate_title`'s documented
-        `""` fallback (the caller keeps the original) — see
-        p3-contract.md §7.
+        On a whole-call failure this RAISES rather than swallowing the
+        error itself. `stage_translate` (via `parallel_map`) catches it,
+        applies the same per-article fallback — original title kept,
+        p3-contract.md §7 — and records it in `StageCalls` so the
+        substitution is VISIBLE instead of reading as success.
+
+        This used to catch the exception here and return `list(titles)`
+        unchanged, which is indistinguishable from a real translation at
+        the call site: a batch that 404'd every time came back as a
+        plausible `list[str]`, so `StageCalls` saw no exception and
+        recorded `ok=True`. The run panel reported "N/N calls ok" while
+        every headline stayed untranslated — the exact incident
+        `StageCalls` exists to catch (see
+        tests/test_p3_enrichment_failure_accounting.py), just one layer
+        below where it could see it.
         """
         if not titles:
             return []
@@ -226,21 +265,12 @@ class LLMClient:
         prompt = prompts.translate_titles_batch_prompt(titles)
         try:
             raw = self.transport._generate(prompt, system=system, fmt="json")
-        except Exception as exc:  # noqa: BLE001 - mirrors judge_batch's blanket except
-            # LOGGED, unlike the legacy blanket-except call sites. The
-            # fallback here is indistinguishable from success at the
-            # database level — every article simply keeps its original
-            # title — so without this line a systemic failure (an expired
-            # key, a dead model, a dropped DB connection breaking the
-            # quota lookup) reads as "nothing needed translating" for an
-            # entire run. That exact confusion cost real debugging time:
-            # a closed connection surfaced as 25/25 titles "translated"
-            # to themselves in 0.00s.
+        except Exception as exc:  # noqa: BLE001 - logged for grep-ability, re-raised for accounting
             logger.warning(
-                "translate_batch_failed_keeping_originals",
+                "translate_batch_failed",
                 extra={"count": len(titles), "error_type": type(exc).__name__, "error": str(exc)[:200]},
             )
-            return list(titles)
+            raise
         return parsing.parse_translate_titles_batch(raw, titles)
 
     # ── 1.8 draft_bullet() — report-bullet drafting ─────────────────────
@@ -268,12 +298,18 @@ class LLMClient:
     # ── 1.10 verify_group() — same-event verification ──────────────────
 
     def verify_group(self, headlines: list[str]) -> list[int]:
+        """On a whole-call failure this RAISES — see `judge_batch`'s
+        docstring. `stage_llm_verify_groups` catches it, applies the same
+        neutral fallback (leave the proposed group intact), and records
+        it in `StageCalls`.
+        """
         if len(headlines) <= 1:
             return [0] * len(headlines)
         system = prompts.verify_group_system(_stage_prompt(self.conn, routing.DEDUP_VERIFICATION))
         prompt = prompts.verify_group_prompt(headlines)
         try:
             raw = self.transport._generate(prompt, system=system, fmt="json")
-        except Exception:  # noqa: BLE001
-            return parsing.verify_group_whole_call_fallback(len(headlines))
+        except Exception as exc:  # noqa: BLE001 - re-raised for accounting
+            logger.warning("verify_group_failed", extra={"count": len(headlines), "error": str(exc)[:200]})
+            raise
         return parsing.parse_verify_group(raw, len(headlines))

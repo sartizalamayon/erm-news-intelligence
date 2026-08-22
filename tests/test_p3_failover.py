@@ -172,23 +172,31 @@ def test_both_quota_exhausted_raises_rate_limited_error() -> None:
 # ── composed with LLMClient — the whole-batch fallback still fires ──────
 
 
-def test_failover_exhaustion_still_produces_the_documented_llm_client_fallback() -> None:
+def test_failover_exhaustion_propagates_so_stage_calls_can_see_it() -> None:
     """End-to-end: both providers down -> FailoverTransport raises ->
-    LLMClient.judge_batch's OWN except Exception (p3-contract.md §3)
-    catches it and returns the neutral-score fallback — proving
-    failover composes with, rather than breaks, the frozen contract.
+    `judge_batch` now RAISES too (see its docstring), rather than
+    catching it and returning a neutral-score fallback that read
+    identically to a real judgment.
+
+    This replaces a prior version of this test that asserted the
+    opposite — `judge_batch` swallowing total failover exhaustion into a
+    fake-successful-looking result. That was the exact "N/N calls ok"
+    class of bug found live in the translate stage (base_url 404s on
+    every call, run panel still reported success): `StageCalls`
+    (`app.services.enrichment`) can only see a stage's failures if the
+    exception actually reaches it. The per-article neutral fallback
+    (never drop an article, p3-contract.md §7) still happens — just one
+    layer up, in `enrichment.py`'s judge step, which is what actually
+    calls `judge_batch` in production and is the thing with `StageCalls`
+    accounting to update.
     """
     primary = _RaisingTransport(exc=ProviderRateLimitedError("groq down", provider="groq"))
     secondary = _RaisingTransport(exc=ProviderRateLimitedError("gemini down", provider="gemini"))
     failover = _failover(primary, secondary)
     client = LLMClient(transport=failover, name="failover-test")
 
-    result = client.judge_batch([{"title_en": "A"}, {"title_en": "B"}])
-    assert result == [
-        Judgment(relevant=True, score=5, reason=result[0].reason),
-        Judgment(relevant=True, score=5, reason=result[0].reason),
-    ]
-    assert "gemini down" in result[0].reason
+    with pytest.raises(ProviderRateLimitedError, match="gemini down"):
+        client.judge_batch([{"title_en": "A"}, {"title_en": "B"}])
 
 
 def test_failover_success_on_secondary_is_transparent_to_llm_client() -> None:

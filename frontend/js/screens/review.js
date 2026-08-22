@@ -557,9 +557,20 @@ export function mountReview(root, { navigate }) {
     root.querySelectorAll("[data-toggle-day]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const day = btn.getAttribute("data-toggle-day");
-        if (s.collapsedDays.has(day)) s.collapsedDays.delete(day);
-        else s.collapsedDays.add(day);
-        render();
+        const nowCollapsed = !s.collapsedDays.has(day);
+        if (nowCollapsed) s.collapsedDays.add(day);
+        else s.collapsedDays.delete(day);
+        // Deliberately NOT a call to render(): see renderList()'s
+        // comment on the same change. The items are already in the
+        // DOM (rendered once, kept there) — collapsing/expanding is
+        // just a visibility flip on the one group's container plus the
+        // chevron rotation and aria-expanded on this one button, O(1)
+        // regardless of how many thousands of articles are loaded.
+        const itemsEl = root.querySelector(`[data-group-items="${CSS.escape(day)}"]`);
+        if (itemsEl) itemsEl.style.display = nowCollapsed ? "none" : "";
+        btn.setAttribute("aria-expanded", nowCollapsed ? "false" : "true");
+        const chevron = btn.querySelector(".date-group-chevron");
+        if (chevron) chevron.style.transform = `rotate(${nowCollapsed ? -90 : 0}deg)`;
       });
     });
     bind();
@@ -633,18 +644,31 @@ export function mountReview(root, { navigate }) {
           trueCount !== undefined && trueCount > loaded
             ? `${formatNumber(loaded)} of ${formatNumber(trueCount)}`
             : formatNumber(trueCount ?? loaded);
+        // The items container is ALWAYS rendered (never conditionally
+        // omitted) — only its visibility toggles, via the CSS on
+        // data-group-items below. Collapsing/expanding a group is a
+        // pure display:none flip done directly in the DOM by the click
+        // handler (see the data-toggle-day binding), not a call back
+        // into this function: with thousands of loaded articles across
+        // many expanded groups, re-running renderList() (and the
+        // root.innerHTML rebuild it feeds) on every single collapse
+        // click made each click cost proportional to the WHOLE loaded
+        // list, not the one group being toggled — reliably hanging the
+        // tab once enough articles were loaded via "Load more".
         return `
         <div class="date-group">
           <button class="date-group-header" data-toggle-day="${escapeHtml(group.date)}"
                   aria-expanded="${collapsed ? "false" : "true"}"
                   style="width:100%;background:none;border:0;cursor:pointer;font:inherit;color:inherit;text-align:left;">
             <span style="display:inline-flex;align-items:center;gap:7px;">
-              <span style="display:inline-block;width:9px;transition:transform .15s;transform:rotate(${collapsed ? -90 : 0}deg);">&#9662;</span>
+              <span class="date-group-chevron" style="display:inline-block;width:9px;transition:transform .15s;transform:rotate(${collapsed ? -90 : 0}deg);">&#9662;</span>
               ${escapeHtml(fmtDateHeader(group.date))}
             </span>
             <span class="mono" style="font-size:10px;color:var(--tx4);">${escapeHtml(countLabel)}</span>
           </button>
-          ${collapsed ? "" : group.items.map((a) => articleRowHtml(a)).join("")}
+          <div class="date-group-items" data-group-items="${escapeHtml(group.date)}" style="${collapsed ? "display:none;" : ""}">
+            ${group.items.map((a) => articleRowHtml(a)).join("")}
+          </div>
         </div>`;
       })
       .join("");

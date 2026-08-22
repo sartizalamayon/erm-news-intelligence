@@ -2329,7 +2329,14 @@ def health_overview(conn: DictConnection) -> dict[str, Any]:
     rows = health_sources(conn)
     latest_run = conn.execute("SELECT started_at, total_matched FROM runs ORDER BY started_at DESC LIMIT 1").fetchone()
     return {
-        "healthy": sum(1 for r in rows if r["status"] == "healthy"),
+        # "healthy" == fetching correctly, NOT "found something new this
+        # run" — a source that fetched fine but had nothing new (status
+        # "quiet") is not broken, so it counts here too. Previously only
+        # literal "healthy" counted, which made this number collapse
+        # toward zero any time collection was re-run soon after itself
+        # (everything already-seen -> "quiet"), reading as a mass outage
+        # on a day where the only real problem was 1-2 actual errors.
+        "healthy": sum(1 for r in rows if r["status"] in ("healthy", "quiet")),
         "needs_attention": sum(1 for r in rows if r["status"] == "error"),
         "fetched_last_run": sum(r["fetched"] for r in rows),
         "matched_last_run": latest_run["total_matched"] if latest_run else 0,
@@ -2722,6 +2729,21 @@ def _run_pipeline_in_background(*, fetch: bool, match: bool, enrich: bool, trigg
                 _run_match_subphase(conn)
             if enrich:
                 _run_enrich_subphase(conn)
+            # The long-term dashboard reads exclusively from
+            # rollup_monthly_* (app/db/rollups.py), which used to be
+            # refreshed ONLY by the separate scheduled batch entrypoint
+            # (app/batch/run_daily.py) -- never by this, the actual "Run
+            # collection" button every admin run goes through. On a
+            # deployment that relies on manual runs rather than a
+            # guaranteed-running cron, the whole dashboard silently went
+            # stale forever. Best-effort: a rollup miss must not fail an
+            # otherwise-successful collection run.
+            try:
+                from app.db.rollups import compute_rollups_for_day
+
+                compute_rollups_for_day(conn, _today_dhaka())
+            except Exception as exc:  # noqa: BLE001 - best-effort, run result matters more
+                logger.warning("rollup_refresh_after_run_failed", extra={"error": str(exc)[:200]})
         with _run_lock:
             _run_state["status"] = "done"
             _run_state["phase"] = "done"

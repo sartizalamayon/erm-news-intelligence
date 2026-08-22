@@ -210,7 +210,7 @@ export function mountSources(root) {
         .join("")}</div>`;
     }
     return `<div class="grid-4" style="margin-bottom:20px;">
-      <div class="card card-sm"><div class="kpi-value" style="color:var(--actx);">${formatNumber(o.healthy)}</div><div class="kpi-label">Healthy</div></div>
+      <div class="card card-sm"><div class="kpi-value" style="color:var(--actx);">${formatNumber(o.healthy)}</div><div class="kpi-label">Fetching OK</div></div>
       <div class="card card-sm" style="border-color:${o.needs_attention ? "var(--red)" : "var(--line)"}">
         <div class="kpi-value" style="color:${o.needs_attention ? "var(--red)" : "var(--tx)"};">${formatNumber(o.needs_attention)}</div>
         <div class="kpi-label">Need attention</div>
@@ -267,7 +267,14 @@ export function mountSources(root) {
         </div>
         <div>
           <label class="field-label" for="srcFormMethods">Methods, comma separated (sitemap, rss, api, gnews, id_enum, wp_rest)</label>
-          <input id="srcFormMethods" class="text-input" style="padding:9px 12px;font-size:13px;" value="${escapeHtml(src ? (src.methods || []).join(", ") : "")}" />
+          <input id="srcFormMethods" class="text-input" autocomplete="off" style="padding:9px 12px;font-size:13px;" value="${escapeHtml(src ? (src.methods || []).join(", ") : "")}" />
+          <p class="hint" style="margin:6px 0 0;">
+            This is a label, not a live setting — it doesn't make the source fetch anything by itself.
+            Every source's real fetch logic is a hand-written Python plugin (this codebase has no generic
+            "just fetch this URL" mode; every site needs its own handling for pagination, dates and
+            anti-bot quirks). A source added here stays "no fetch plugin registered" — visible, matched
+            articles never appear — until a developer writes that plugin and links it to this row.
+          </p>
         </div>
         <div>
           <label class="field-label" for="srcFormLang">Language</label>

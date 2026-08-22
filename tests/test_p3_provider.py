@@ -17,6 +17,8 @@ No LLM tokens are spent.
 
 from __future__ import annotations
 
+import pytest
+
 from app.services.llm.provider import LLMClient
 from app.services.llm.types import Judgment, Summary
 from tests.helpers.fake_llm import (
@@ -57,13 +59,18 @@ def test_judge_batch_empty_items_returns_empty_without_a_call() -> None:
     assert fake.call_log == []
 
 
-def test_judge_batch_transport_failure_falls_back_to_neutral_for_every_item() -> None:
+def test_judge_batch_transport_failure_raises_for_stage_calls_accounting() -> None:
+    """A whole-call failure RAISES rather than being swallowed into a
+    fallback value indistinguishable from success — the caller
+    (`enrichment.py`'s judge step) is what applies the neutral-score
+    fallback, and it only does so because it can see the failure. See
+    tests/test_p3_enrichment_failure_accounting.py for the incident this
+    prevents (same class of bug, originally found in translate).
+    """
     client, fake = _client(mode="rate_limited")
     items = [{"title_en": "A"}, {"title_en": "B"}, {"title_en": "C"}]
-    result = client.judge_batch(items)
-    assert len(result) == 3
-    assert all(j.score == 5 and j.relevant is True for j in result)
-    assert all(j.reason == result[0].reason for j in result)  # same error string on every item
+    with pytest.raises(Exception):  # noqa: B017 - the real transport error type, not asserted here
+        client.judge_batch(items)
     assert len(fake.call_log) == 1  # the call WAS attempted before failing
 
 
@@ -123,10 +130,14 @@ def test_cluster_topics_chunk_empty_items_short_circuits() -> None:
     assert fake.call_log == []
 
 
-def test_cluster_topics_chunk_failure_all_untagged() -> None:
+def test_cluster_topics_chunk_transport_failure_raises_for_stage_calls_accounting() -> None:
+    """See test_judge_batch_transport_failure_raises_for_stage_calls_accounting
+    — same fix, same reason. `_run_topic_clustering` catches this and
+    applies the all-untagged fallback itself.
+    """
     client, _ = _client(mode="server_error")
-    result = client.cluster_topics_chunk([{"title_en": "A"}, {"title_en": "B"}], known_labels=[])
-    assert result == ["", ""]
+    with pytest.raises(Exception):  # noqa: B017
+        client.cluster_topics_chunk([{"title_en": "A"}, {"title_en": "B"}], known_labels=[])
 
 
 # ── consolidate_labels ───────────────────────────────────────────────────
@@ -178,10 +189,14 @@ def test_find_duplicates_batch_empty_candidates_short_circuits() -> None:
     assert fake.call_log == []
 
 
-def test_find_duplicates_batch_failure_folds_nothing() -> None:
+def test_find_duplicates_batch_transport_failure_raises_for_stage_calls_accounting() -> None:
+    """See test_judge_batch_transport_failure_raises_for_stage_calls_accounting
+    — same fix, same reason. `_run_topic_clustering` catches this and
+    applies the folds-nothing fallback itself.
+    """
     client, _ = _client(mode="rate_limited")
-    result = client.find_duplicates_batch([], [{"title_en": "A"}])
-    assert result == {}
+    with pytest.raises(Exception):  # noqa: B017
+        client.find_duplicates_batch([], [{"title_en": "A"}])
 
 
 def test_find_duplicates_batch_shown_capped_at_30() -> None:
@@ -209,10 +224,14 @@ def test_verify_group_success() -> None:
     assert result == [0, 1, 0]
 
 
-def test_verify_group_failure_is_all_separate() -> None:
+def test_verify_group_transport_failure_raises_for_stage_calls_accounting() -> None:
+    """See test_judge_batch_transport_failure_raises_for_stage_calls_accounting
+    — same fix, same reason. `stage_llm_verify_groups` catches this and
+    leaves the proposed group intact, its own documented fallback.
+    """
     client, _ = _client(mode="timeout")
-    result = client.verify_group(["A", "B", "C"])
-    assert result == [0, 1, 2]
+    with pytest.raises(Exception):  # noqa: B017
+        client.verify_group(["A", "B", "C"])
 
 
 # ── translate_title ───────────────────────────────────────────────────────

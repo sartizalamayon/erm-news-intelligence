@@ -16,6 +16,9 @@ export const state = {
 
   screen: "login", // one of the 10 screen keys (Daily Risk Insight/"brief" removed, see this task's report)
   dashMode: "short",
+  // Which of the four Long-term sub-tabs is showing. Ignored while
+  // dashMode is "short"; see route.js LONG_TABS.
+  longTab: "risk",
 
   progress: "", // active job/run status text, shell header (§2)
   // Latest GET /health/pipeline/run/status snapshot, published by
@@ -53,6 +56,7 @@ export const SCREEN_TITLES = {
   keywords: ["Keywords", "Administration · bilingual search terms"],
   prompts: ["AI prompts", "Administration · scoring guidance and examples"],
   models: ["AI models", "Administration · providers, keys and per-feature routing"],
+  users: ["User management", "Administration · accounts, roles and access"],
 };
 
 export const NAV_STRUCTURE = [
@@ -74,6 +78,7 @@ export const NAV_STRUCTURE = [
       { key: "keywords", label: "Keywords", icon: "⌗" },
       { key: "prompts", label: "AI prompts", icon: "◈" },
       { key: "models", label: "AI models", icon: "⌘" },
+      { key: "users", label: "User management", icon: "☺" },
     ],
   },
   {

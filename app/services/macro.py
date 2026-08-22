@@ -57,6 +57,17 @@ USD_BDT_URL = "https://open.er-api.com/v6/latest/USD"
 WORLDBANK_INFLATION_URL = (
     "https://api.worldbank.org/v2/country/BD/indicator/FP.CPI.TOTL.ZG?format=json&per_page=5"
 )
+# Bangladesh's official exchange rate, period average, annual. The ONLY
+# free publisher of a BDT rate with any history at all: open.er-api.com
+# gives today's spot and no past, and every timeseries API that covers
+# BDT (exchangerate.host and friends) now requires a paid key. So the
+# dashboard's FX line compares a live spot against this annual average
+# rather than drawing a monthly trend it cannot source. An annual figure
+# with a year of publication lag is a weak reference — but it is a real,
+# citable one, which is the whole difference from inventing a series.
+WORLDBANK_FX_ANNUAL_URL = (
+    "https://api.worldbank.org/v2/country/BD/indicator/PA.NUS.FCRF?format=json&per_page=5"
+)
 OILPRICEAPI_URL = "https://api.oilpriceapi.com/v1/prices/latest?by_code=BRENT_CRUDE_USD"
 
 # Cache TTLs — deliberately generous. None of these three sources update
@@ -65,6 +76,22 @@ OILPRICEAPI_URL = "https://api.oilpriceapi.com/v1/prices/latest?by_code=BRENT_CR
 USD_BDT_TTL_SECONDS = 6 * 3600  # 6h
 BRENT_TTL_SECONDS = 6 * 3600  # 6h
 INFLATION_TTL_SECONDS = 24 * 3600  # 1 day
+FX_ANNUAL_TTL_SECONDS = 24 * 3600  # 1 day — annual data; a daily refetch is already generous
+
+
+@dataclass(frozen=True)
+class AnnualValue:
+    """One annual World Bank reading, with the year it belongs to.
+
+    Separate from `MacroValue` because the YEAR is load-bearing here: a
+    dashboard that says "against the annual average of 121.92" without
+    naming the year is citing a figure the reader cannot check, and the
+    lag is around a year.
+    """
+
+    value: float
+    year: int
+    fetched_at: datetime
 
 
 @dataclass(frozen=True)
@@ -79,6 +106,9 @@ class MacroValue:
 # simple — no DB table, no extra dependency; a single dict is enough for
 # 3 keys with hour-scale TTLs.
 _cache: dict[str, tuple[MacroValue, float]] = {}
+# Annual readings carry a year alongside the value, so they cannot share
+# the MacroValue cache above without widening its type for every caller.
+_annual_cache: dict[str, tuple[AnnualValue, float]] = {}
 
 
 def _cached(key: str, ttl_seconds: float, do_fetch: Callable[[], MacroValue | None]) -> MacroValue | None:
@@ -98,6 +128,7 @@ def _clear_cache_for_tests() -> None:
     leak a cached value into the next test.
     """
     _cache.clear()
+    _annual_cache.clear()
 
 
 def fetch_usd_bdt() -> MacroValue | None:
@@ -171,3 +202,43 @@ def fetch_brent(api_key: str) -> MacroValue | None:
             return None
 
     return _cached("brent", BRENT_TTL_SECONDS, _do_fetch)
+
+
+def fetch_annual_exchange_rate() -> AnnualValue | None:
+    """Bangladesh official exchange rate (BDT per USD, period average),
+    World Bank PA.NUS.FCRF. Annual, ~1yr publication lag; the most recent
+    year with a non-null value is used. Cached ~1 day. Returns None on
+    any failure — never raises.
+
+    Used as the reference level for the dashboard's FX risk line, which
+    has a live spot rate and no monthly series to trend it against.
+    """
+
+    def _do_fetch() -> AnnualValue | None:
+        try:
+            resp = requests.get(WORLDBANK_FX_ANNUAL_URL, timeout=REQUEST_TIMEOUT_SECONDS)
+            resp.raise_for_status()
+            payload = resp.json()
+            rows = payload[1] if isinstance(payload, list) and len(payload) > 1 and payload[1] else []
+            for row in rows:
+                if isinstance(row, dict) and row.get("value") is not None:
+                    return AnnualValue(
+                        value=float(row["value"]),
+                        year=int(row["date"]),
+                        fetched_at=datetime.now(timezone.utc),
+                    )
+            return None
+        except Exception:
+            logger.warning(
+                "macro.fetch_annual_exchange_rate: fetch failed, leaving indicator unchanged", exc_info=True
+            )
+            return None
+
+    hit = _annual_cache.get("fx_annual")
+    now = time.monotonic()
+    if hit is not None and hit[1] > now:
+        return hit[0]
+    value = _do_fetch()
+    if value is not None:
+        _annual_cache["fx_annual"] = (value, now + FX_ANNUAL_TTL_SECONDS)
+    return value

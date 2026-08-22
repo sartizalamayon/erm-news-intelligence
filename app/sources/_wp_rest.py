@@ -29,7 +29,7 @@ import requests
 from app.errors import SourceFetchError
 from app.sources._util import clean_title, is_recent, parse_dt
 from app.sources.base import FeedItem
-from app.sources.http import get
+from app.sources.http import get, get_or_raise
 
 MAX_PAGES = 20
 PER_PAGE = 100
@@ -40,23 +40,43 @@ def fetch_wp_rest(session: requests.Session, site_url: str, *, source: str) -> l
     items: list[FeedItem] = []
 
     for page in range(1, MAX_PAGES + 1):
+        # Declared up front because the two branches below have different
+        # return types: get_or_raise() always yields a Response (it raises
+        # instead of returning None), get() can yield None. Without the
+        # annotation mypy pins the variable to the page-1 branch's type
+        # and rejects the page-2 assignment, even though the `is None`
+        # guard immediately after it is correct.
+        response: requests.Response | None
         params = {"orderby": "date", "order": "desc", "per_page": PER_PAGE, "page": page}
-        response = get(
-            session,
-            api_base,
-            source=source,
-            params=params,
-            headers={"Accept": "application/json"},
-            # Falls through to http.DEFAULT_TIMEOUT's split
-            # connect/read budget rather than a flat 20s: a 100-post
-            # page is a genuinely large response (~2 MB) and deserves
-            # read headroom, while a dead host still fails on connect
-            # in 5s.
-        )
-        if response is None:
-            if page == 1:
-                raise SourceFetchError(f"wp_rest unreachable: {api_base}", source=source)
-            break
+        if page == 1:
+            # get_or_raise() on page 1 specifically: its SourceFetchError
+            # message names the ACTUAL failure (connect timeout vs read
+            # timeout vs DNS vs TLS — http._describe_failure()) rather
+            # than the bare "wp_rest unreachable: <url>" this used to
+            # raise by hand. That bare message sent an operator looking
+            # at "is the site down" with no way to tell that apart from
+            # "our own read timeout is too tight for this host" — the
+            # exact confusion http.py's own DEFAULT_TIMEOUT split
+            # (see that module's docstring) exists to resolve, that this
+            # call site was throwing away.
+            response = get_or_raise(
+                session,
+                api_base,
+                source=source,
+                params=params,
+                headers={"Accept": "application/json"},
+                # Falls through to http.DEFAULT_TIMEOUT's split
+                # connect/read budget rather than a flat 20s: a 100-post
+                # page is a genuinely large response (~2 MB) and
+                # deserves read headroom, while a dead host still fails
+                # on connect in 5s.
+            )
+        else:
+            response = get(
+                session, api_base, source=source, params=params, headers={"Accept": "application/json"}
+            )
+            if response is None:
+                break
         if response.status_code == 400:
             break  # past the last page — normal end
         if response.status_code != 200:

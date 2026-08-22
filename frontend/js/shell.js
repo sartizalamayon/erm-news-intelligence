@@ -23,7 +23,7 @@ import { escapeHtml } from "./util.js";
 import { mountScreen } from "./router.js";
 import { api } from "./api.js";
 import { mountAccountPanel } from "./components/accountPanel.js";
-import { DEFAULT_SCREEN, canAccess, pathForScreen, pushRoute, readLocation } from "./route.js";
+import { DEFAULT_LONG_TAB, DEFAULT_SCREEN, canAccess, pathForScreen, pushRoute, readLocation } from "./route.js";
 
 let shellRoot = null;
 let railEl = null;
@@ -178,7 +178,11 @@ export function navigate(screenKey, opts = {}) {
   const target = canAccess(screenKey, state.user) ? screenKey : DEFAULT_SCREEN;
   const next = { screen: target, ...opts };
   setState(next);
-  pushRoute(target, { dashMode: next.dashMode ?? state.dashMode }, { replace: target !== screenKey });
+  pushRoute(
+    target,
+    { dashMode: next.dashMode ?? state.dashMode, longTab: next.longTab ?? state.longTab },
+    { replace: target !== screenKey }
+  );
 }
 
 /**
@@ -190,11 +194,11 @@ export function navigate(screenKey, opts = {}) {
  * straight back into the URL we just rejected.
  */
 export function applyRouteFromUrl() {
-  const { screen, dashMode } = readLocation();
+  const { screen, dashMode, longTab } = readLocation();
   const allowed = canAccess(screen, state.user) ? screen : DEFAULT_SCREEN;
-  setState({ screen: allowed, dashMode });
-  if (allowed !== screen || pathForScreen(allowed, { dashMode }) !== window.location.pathname) {
-    pushRoute(allowed, { dashMode }, { replace: true });
+  setState({ screen: allowed, dashMode, longTab });
+  if (allowed !== screen || pathForScreen(allowed, { dashMode, longTab }) !== window.location.pathname) {
+    pushRoute(allowed, { dashMode, longTab }, { replace: true });
   }
 }
 
@@ -207,17 +211,32 @@ export function bindHistoryNavigation() {
   window.addEventListener("popstate", () => {
     // State only — the browser already moved the history pointer, so
     // pushing here would fight it and make Back require two presses.
-    const { screen, dashMode } = readLocation();
+    const { screen, dashMode, longTab } = readLocation();
     const allowed = canAccess(screen, state.user) ? screen : DEFAULT_SCREEN;
-    setState({ screen: allowed, dashMode });
+    setState({ screen: allowed, dashMode, longTab });
   });
+}
+
+// The Long-term kicker names the sub-tab, because the four tabs carry
+// different windows — market runs twelve real months, the news-derived
+// boards only as far as collection reached — and the header is where a
+// reader looks to know which one they are reading.
+const LONG_KICKERS = {
+  risk: "Long term · risk lines",
+  market: "Long term · market · twelve months",
+  economy: "Long term · economy and companies",
+  telecom: "Long term · telecom watch",
+};
+
+function longKicker() {
+  return LONG_KICKERS[state.longTab] || LONG_KICKERS[DEFAULT_LONG_TAB];
 }
 
 function pageTitleFor() {
   if (state.screen === "dash") {
     return [
       "Dashboard",
-      state.dashMode === "short" ? "Short term · today and this fortnight" : "Long term · twelve-month trends",
+      state.dashMode === "short" ? "Short term · today and this fortnight" : longKicker(),
     ];
   }
   return SCREEN_TITLES[state.screen] || ["", ""];
@@ -228,6 +247,11 @@ function pageTitleFor() {
 // screen or dashboard tab actually changed — every other state change
 // (theme, rail, counts ticking in) leaves the mounted screen alone.
 function syncScreen() {
+  // The Long-term sub-tab is deliberately NOT part of this comparison.
+  // Switching sub-tabs must not tear down and remount the whole screen —
+  // the dashboard mount owns its own tab switching and fetches only the
+  // tab that was asked for, which is the entire reason the tabs were
+  // split into separate endpoints.
   if (currentMount && currentScreenKey === state.screen && currentDashMode === state.dashMode) {
     return;
   }

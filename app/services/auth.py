@@ -735,9 +735,12 @@ def login(conn: DictConnection, *, email: str, password: str, ip_address: str) -
         raise ValidationError(_GENERIC_LOGIN_ERROR)
 
     row = conn.execute(
-        "SELECT id, email, role, display_name, password_hash FROM users WHERE email = %s", (email,)
+        "SELECT id, email, role, display_name, password_hash, is_active FROM users WHERE email = %s", (email,)
     ).fetchone()
-    stored_hash = row["password_hash"] if row is not None else ""
+    # A deactivated account is treated identically to "wrong password" —
+    # same generic error, same no-enumeration property login() already
+    # guarantees for every other rejection reason.
+    stored_hash = row["password_hash"] if row is not None and row["is_active"] else ""
 
     if not verify_password(password, stored_hash):
         raise ValidationError(_GENERIC_LOGIN_ERROR)
@@ -920,7 +923,7 @@ def get_session_user(conn: DictConnection, token: str) -> AuthenticatedUser | No
         SELECT u.id AS id, u.email AS email, u.role AS role, u.display_name AS display_name, s.id AS session_id
         FROM sessions s
         JOIN users u ON u.id = s.user_id
-        WHERE s.token_hash = %s AND s.revoked_at IS NULL AND s.expires_at > now()
+        WHERE s.token_hash = %s AND s.revoked_at IS NULL AND s.expires_at > now() AND u.is_active
         """,
         (token_hash,),
     ).fetchone()

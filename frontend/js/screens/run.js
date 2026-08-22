@@ -271,7 +271,7 @@ export function mountRun(root) {
         </div>
         <div style="text-align:right;">
           <div id="rpElapsed" class="mono" style="font-size:11px;color:var(--tx3);"></div>
-          <div id="rpHint" class="hint" style="margin:2px 0 0;max-width:430px;"></div>
+          <p id="rpHint" class="hint" style="margin:2px 0 0;max-width:430px;"></p>
         </div>
       </div>
 

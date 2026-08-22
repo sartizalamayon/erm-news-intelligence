@@ -1,6 +1,7 @@
-// Dashboard — Short term + Long term tabs (frontend-contract.md §3.1/§3.2,
-// docs/dashboard-longterm-spec.md). Both endpoints are real and live —
-// app/api/routers/dashboard.py:
+// Dashboard — Short term + Long term (frontend-contract.md §3.1/§3.2).
+//
+// SHORT TERM is rendered here, from one endpoint
+// (app/api/routers/dashboard.py):
 //
 //   GET /dashboard/today ->
 //     { pendingCount, approvedCount, todayLabel,
@@ -8,48 +9,30 @@
 //       funnel: [{ phase, label, value, pct, note }, ...4],
 //       days14: [{ date: "YYYY-MM-DD", count }, ...14],
 //       relMix: [{ key: "red"|"yellow"|"green"|"magenta", count }, ...4],
-//       bySection: [{ label, count }, ...],  // one row per REAL configured section (get_risk_sections), not a fixed 5
+//       bySection: [{ label, count }, ...],  // one row per REAL configured section (get_risk_sections)
 //       topSources: [{ label, count }, ...] }
 //
-//   GET /dashboard/trends?range=12mo ->
-//     { trendCards: [{ label, unit, vals: [12 numbers], bad, decimals }, ...4],  // macro indicators
-//       coverage: [{ label, month, monitored, collectedDays, articles, collected, matched }, ...12],
-//       monitoredMonths: <int>, windowNote: "<one sentence>",
-//       watch: [{ key, title, blurb, rows: [{ label, note, counts: [12], total, monthsPresent,
-//                                             latest, previous, latestLabel, prevLabel,
-//                                             latestRate, prevRate, dir, dirBasis,
-//                                             avgScore, scored, high, escalating, severityNote }] }, ...2],
-//       months12: [{ label, segments: { <section>: count, ... }, monitored }, ...12],
-//       heatRows: [{ label, values: [12 floats 0..1], trend }, ...],
-//       standing: [{ name, note, count, months, dir: "up"|"down"|"flat" }, ...],
-//       relMixTrend: [{ label, highShare: 0..1, total }, ...12],  // global, not per-section — see RelMixTrendPointOut
-//       topSources: [{ label, count }, ...] }                    // 12mo aggregate, not per-section — see DashboardTrendsOut.topSources
+// LONG TERM is four sub-tabs and lives in ./dashboard_long.js, one
+// endpoint per tab. It used to be a single GET /dashboard/trends payload
+// rendered here; that endpoint still exists and still serves the old
+// shape, but nothing on this screen reads it any more. Three of the four
+// tabs are backed by data it never carried — real exchange history, the
+// economy axes, and the individual headlines behind every count — and a
+// reader looks at one tab at a time, so opening Risk lines should not
+// pay for the market fetch.
 //
-// LONG-TERM READING ORDER, and why it is not the old one. The reader is
-// Grameenphone's ERM function / CRO. `coverage` renders FIRST because
-// `articles.day` is a publication date: months before the collector
-// existed still carry backdated articles, and drawn as ordinary bars
-// they make the switch-on of monitoring look like a hundredfold surge in
-// risk. `watch` renders next because "what is BTRC doing" and "who else
-// is in the news" are the questions the role actually asks; the older
-// section/theme/source charts stay, below, as supporting texture.
-//
-// Bar-width / heatmap-cell scaling is computed here from the REAL
-// maximum in the returned set (util.pctOfMax) — not the prototype's
-// hardcoded-denominator bugs (§8 item 4: `/214`, `/12`).
+// Bar-width / heatmap-cell scaling is computed from the REAL maximum in
+// the returned set (util.pctOfMax), never a hardcoded denominator.
 
 import { api } from "../api.js";
-import { setState, state } from "../state.js";
+import { bindLongTab, fetchLongTab, longTabsHtml, renderLongTab } from "./dashboard_long.js";
+import { setState, state, subscribe } from "../state.js";
 import {
   escapeHtml,
-  formatNumber,
   pctOfMax,
   pctOfTotal,
   poly,
-  tier,
-  RISK_SECTIONS,
   ensureRiskSections,
-  sectionColor,
   fmtErr,
   skeletonRows,
   notWiredBanner,
@@ -91,179 +74,32 @@ function kpiSparklineHtml(vals) {
   </svg>`;
 }
 
-// LONG-TERM macro cards: TrendCardOut.status/asOf/note
-// (app/api/schemas/core.py, wired by app/services/macro.py) make where
-// the card's CURRENT value came from this request visible instead of
-// hidden — "live" (a real external fetch, cached a few hours),
-// "unconfigured" (a live source that needs setup, e.g. Brent's
-// oilpriceapi_key), or "rollup" (no live source layered on, e.g. a
-// fetch failure — never a fabricated number).
-const MACRO_STATUS_META = {
-  live: { label: "Live", color: "var(--green)" },
-  unconfigured: { label: "Not configured", color: "var(--amber)" },
-  // The live source failed AND nothing is stored for this month. The
-  // card must not print the gap-fill 0.0 as if it were a reading: an
-  // "Inflation 0.0%" is plausible enough that nobody looks twice.
-  no_data: { label: "No data", color: "var(--amber)" },
-};
-function macroStatusHtml(t) {
-  const meta = MACRO_STATUS_META[t.status];
-  const asOfText = t.asOf
-    ? new Date(t.asOf).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
-    : "";
-  const caption = [asOfText, t.note].filter(Boolean).join(" · ");
-  if (!meta && !caption) return "";
-  return `<div class="row" style="gap:6px;margin-top:9px;align-items:flex-start;">
-    ${meta ? `<span class="pill" style="flex:0 0 auto;background:color-mix(in oklab, ${meta.color} 20%, transparent);color:${meta.color};font-size:9px;padding:2px 7px;">${meta.label}</span>` : ""}
-    ${caption ? `<span style="font-size:10px;color:var(--tx4);flex:1;min-width:0;line-height:1.3;">${escapeHtml(caption)}</span>` : ""}
-  </div>`;
-}
-
-// LONG-TERM: the monitoring-coverage strip.
-//
-// This block exists because every other 12-month series on the tab is
-// keyed on PUBLICATION date while the corpus is assembled by a crawler
-// that started on a particular day. Months before that day are not quiet
-// months, they are months nobody was watching, and the two look
-// identical once they are drawn as bars. So an unmonitored month is
-// rendered as an explicit "not monitored" cell rather than as a short
-// bar or a zero.
-function coverageStripHtml(coverage) {
-  if (!coverage.length) return `<div class="state-body">No coverage data returned.</div>`;
-  const maxDays = Math.max(1, ...coverage.map((c) => c.collectedDays || 0));
-  return coverage
-    .map((c) => {
-      if (!c.monitored) {
-        return `<div class="months-col" title="${escapeHtml(c.label)}: no collection ran. The ${formatNumber(
-          c.articles
-        )} article(s) dated this month were found later by a crawl.">
-          <div style="width:100%;height:100%;display:flex;flex-direction:column;justify-content:flex-end;">
-            <div style="height:4px;border-radius:2px;background:repeating-linear-gradient(45deg,var(--gridline),var(--gridline) 3px,transparent 3px,transparent 6px);"></div>
-          </div>
-          <span class="chart-daylabel" style="opacity:.7;">${escapeHtml(c.label)}</span>
-        </div>`;
-      }
-      const h = Math.round(((c.collectedDays || 0) / maxDays) * 100);
-      return `<div class="months-col" title="${escapeHtml(c.label)}: collection ran on ${
-        c.collectedDays
-      } day(s), ${formatNumber(c.collected)} article(s) collected live, ${formatNumber(c.matched)} matched.">
-        <div style="width:100%;height:${h}%;border-radius:4px 4px 2px 2px;background:var(--ac);min-height:6px;"></div>
-        <span class="chart-daylabel" style="color:var(--tx2);font-weight:600;">${escapeHtml(c.label)}</span>
-      </div>`;
-    })
-    .join("");
-}
-
-const WATCH_DIR_META = {
-  up: { glyph: "▲", color: "var(--red)" },
-  down: { glyph: "▼", color: "var(--green)" },
-  flat: { glyph: "▬", color: "var(--tx3)" },
-  unknown: { glyph: "?", color: "var(--tx4)" },
-};
-
-// LONG-TERM: one watchlist entity's 12-month strip.
-//
-// Bar height is scaled against the busiest cell in the WHOLE board, not
-// per row, so two rows on the same board can be compared by eye. An
-// unmonitored month draws the same hatched baseline the coverage strip
-// uses, so a gap in the series reads as "we were not looking" rather
-// than "nothing happened".
-function watchSeriesHtml(counts, coverage, rowMax) {
-  return counts
-    .map((n, i) => {
-      const cov = coverage[i] || {};
-      const label = escapeHtml(cov.label || "");
-      if (!cov.monitored) {
-        return `<div class="watch-cell" title="${label}: not monitored"><span class="watch-cell-void"></span></div>`;
-      }
-      const h = rowMax > 0 ? Math.round((n / rowMax) * 100) : 0;
-      const bg = n > 0 ? "var(--ac)" : "var(--gridline)";
-      return `<div class="watch-cell" title="${label}: ${n} identified">
-        <span class="watch-cell-bar" style="height:${n > 0 ? Math.max(8, h) : 3}%;background:${bg};"></span>
-      </div>`;
-    })
-    .join("");
-}
-
-function watchBoardHtml(group, coverage) {
-  const rows = group.rows || [];
-  if (!rows.length) return `<div class="state-body">No watchlist data returned.</div>`;
-  const rowMax = Math.max(1, ...rows.flatMap((r) => r.counts || []));
-  const anyEscalating = rows.some((r) => r.escalating);
-  const seen = rows.filter((r) => r.total > 0).length;
-
-  const body = rows
-    .map((r) => {
-      const meta = WATCH_DIR_META[r.dir] || WATCH_DIR_META.unknown;
-      // Severity is a real mean or the word n/a. It is never 0.0: on a
-      // 0 to 10 relevance scale a printed 0.0 reads as "assessed, and
-      // harmless", which is the opposite of "not assessed".
-      const sev = r.avgScore === null || r.avgScore === undefined ? "n/a" : r.avgScore.toFixed(1);
-      const sevColor = r.avgScore === null || r.avgScore === undefined ? "var(--tx4)" : tier(r.avgScore).color;
-      const presence =
-        r.total > 0 ? `${r.monthsPresent} of ${coverage.filter((c) => c.monitored).length} monitored mo` : "not seen";
-      return `<div class="watch-row">
-        <div class="watch-head">
-          <div class="row" style="gap:8px;align-items:center;">
-            <span class="watch-name">${escapeHtml(r.label)}</span>
-            ${
-              r.escalating
-                ? `<span class="pill" style="background:var(--redsoft);color:var(--red);font-size:9px;padding:2px 7px;">Escalating</span>`
-                : ""
-            }
-          </div>
-          <div class="watch-note">${escapeHtml(r.note)}</div>
-        </div>
-        <div class="watch-cells" title="${escapeHtml(r.dirBasis)}">${watchSeriesHtml(
-          r.counts || [],
-          coverage,
-          rowMax
-        )}</div>
-        <div class="watch-stat"><span class="watch-stat-num">${formatNumber(r.total)}</span><span class="watch-stat-lbl">found</span></div>
-        <div class="watch-stat"><span class="watch-stat-num" style="color:${sevColor}">${escapeHtml(
-          sev
-        )}</span><span class="watch-stat-lbl">severity</span></div>
-        <div class="watch-stat"><span class="watch-stat-num" style="color:${meta.color}">${meta.glyph}</span><span class="watch-stat-lbl">${escapeHtml(
-          r.latestLabel
-        )} vs ${escapeHtml(r.prevLabel)}</span></div>
-        <div class="watch-why">${escapeHtml(r.dirBasis)}<br>${escapeHtml(r.severityNote)} Present in ${escapeHtml(
-          presence
-        )}.${
-          r.backdated > 0
-            ? ` ${formatNumber(r.backdated)} of the ${formatNumber(
-                r.total
-              )} were published in months we were not monitoring and surfaced later, so they carry no bar above.`
-            : ""
-        }</div>
-      </div>`;
-    })
-    .join("");
-
-  // A board with nothing escalating must SAY so. Silence would read as
-  // "the check was not run".
-  const verdict = anyEscalating
-    ? "Rows marked Escalating rose on both volume per collection day and mean severity."
-    : `Nothing here is escalating on both axes: no row rose in coverage per collection day AND in mean severity. ${seen} of ${rows.length} appeared at all.`;
-
-  return `${body}<div class="watch-verdict">${escapeHtml(verdict)}</div>`;
-}
-
 export function mountDashboard(root, { navigate }) {
   let alive = true;
   const mode = state.dashMode || "short";
-  let lastData = null; // cached last-loaded payload
+  let lastData = null; // cached last-loaded payload (short-term tab)
+  let loadedLongTab = null; // which long sub-tab the DOM currently shows
+  let unsubscribe = null;
   ensureRiskSections();
-  render(loadingShell(mode));
-  load();
+
+  if (mode === "long") {
+    loadLong();
+    // shell.js does not remount on a longTab change, by design, so the
+    // sub-tabs are this mount's job to follow.
+    unsubscribe = subscribe(() => {
+      if (alive && (state.dashMode || "short") === "long") loadLong();
+    });
+  } else {
+    render(loadingShell(mode));
+    load();
+  }
 
   async function load() {
     try {
-      const path = mode === "short" ? "/dashboard/today" : "/dashboard/trends";
-      const data = await api.get(path, mode === "short" ? undefined : { query: { range: "12mo" } });
+      const data = await api.get("/dashboard/today");
       if (!alive) return;
       lastData = data || {};
-      if (mode === "short") renderShort(lastData);
-      else renderLong(lastData);
+      renderShort(lastData);
     } catch (err) {
       if (!alive) return;
       renderError(err);
@@ -320,6 +156,8 @@ export function mountDashboard(root, { navigate }) {
     `;
   }
 
+  // Short-term only. The long-term tabs render their own skeleton from
+  // loadLong(), because each of the four has a different shape.
   function loadingShell(m) {
     const isAdmin = !!(state.user && state.user.is_admin);
     if (m === "short") {
@@ -549,278 +387,59 @@ export function mountDashboard(root, { navigate }) {
   }
 
   // ── Long term ───────────────────────────────────────────────────
-  function renderLong(data) {
-    const isAdmin = !!(state.user && state.user.is_admin);
-    // MACRO-DASHBOARD: each card now also carries where its CURRENT
-    // value came from this request -- TrendCardOut.status
-    // ("live"/"manual"/"unconfigured"/"rollup", app/api/schemas/core.py)
-    // plus an optional asOf timestamp and a human note. Surfaced as a
-    // small badge + caption under the sparkline so staleness/"not real
-    // data yet" is visible rather than hidden behind a plain number.
-    const trendCards = (data.trendCards || []).map((t) => {
-      const vals = t.vals || [];
-      const first = vals[0] ?? 0;
-      const last = vals[vals.length - 1] ?? 0;
-      const pc = first ? ((last - first) / first) * 100 : 0;
-      const rising = pc >= 0;
-      const bad = !!t.bad;
-      const badDirection = bad ? rising : !rising;
-      const decimals = t.decimals !== undefined ? t.decimals : 1;
-      // With no reading there is also no change to report: a delta
-      // computed from two fill values is "0.0%", which reads as a
-      // measured flat month rather than an absence.
-      const known = t.status !== "no_data";
-      return {
-        label: t.label,
-        unit: known ? t.unit : "",
-        value: known ? last.toFixed(decimals) : "n/a",
-        rawValue: known ? last : null,
-        delta: known ? (rising ? "▲ " : "▼ ") + Math.abs(pc).toFixed(1) + "%" : "",
-        color: badDirection ? "var(--red)" : "var(--green)",
-        fillColor: badDirection ? "var(--redsoft)" : "var(--greensoft)",
-        // No sparkline either: a flat line across twelve zeroes draws
-        // a confident picture of data that was never collected.
-        points: known ? poly(vals, 240, 56, false) : "",
-        area: known ? poly(vals, 240, 56, true) : "",
-        status: t.status || "rollup",
-        asOf: t.asOf || "",
-        note: t.note || "",
-      };
-    });
-    const trendHtml = trendCards.length
-      ? trendCards
-          .map(
-            (t) => `<div class="card card-sm">
-        <div class="trend-card-head">
-          <div class="trend-card-label">${escapeHtml(t.label)}</div>
-          <div class="trend-card-delta" style="color:${t.color}">${escapeHtml(t.delta)}</div>
-        </div>
-        <div class="row" style="align-items:baseline;gap:6px;">
-          <div class="trend-card-value">${escapeHtml(t.value)}</div>
-          <div class="trend-card-unit">${escapeHtml(t.unit)}</div>
-        </div>
-        <svg viewBox="0 0 240 56" preserveAspectRatio="none" style="width:100%;height:48px;margin-top:14px;display:block;overflow:visible;">
-          <polyline points="${t.area}" fill="${t.fillColor}" stroke="none"></polyline>
-          <polyline points="${t.points}" fill="none" stroke="${t.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></polyline>
-        </svg>
-        ${macroStatusHtml(t)}
-      </div>`
-          )
-          .join("")
-      : `<div class="card card-sm"><div class="state-body">No trend data returned.</div></div>`;
+  // ── Long term ───────────────────────────────────────────────────
+  // Four sub-tabs, one endpoint each. All rendering lives in
+  // screens/dashboard_long.js; this function only orchestrates fetch,
+  // render and rebind, and owns the shell (header, loading, errors) that
+  // the Short-term tab shares.
+  //
+  // Switching sub-tabs does NOT remount the screen — shell.js
+  // deliberately excludes longTab from its remount comparison — so this
+  // mount watches state and re-fetches itself when the tab changes.
+  // Without that the address bar would move and the screen would not.
+  function renderLongShell(tab, inner) {
+    render(
+      header(!!(state.user && state.user.is_admin)) +
+        longTabsHtml(tab) +
+        `<div class="stack" style="margin-top:18px;">${inner}</div>`
+    );
+    bindLongTab(root, tab, { navigate, reload: () => loadLong(true) });
+  }
 
-    const coverage = data.coverage || [];
-    const monitoredCount = data.monitoredMonths || 0;
-    const windowNote = data.windowNote || "";
-    const watchGroups = data.watch || [];
-
-    const months = data.months12 || [];
-    const monthTotals = months.map((m) => Object.values(m.segments || {}).reduce((a, b) => a + b, 0));
-    const monthMax = Math.max(1, ...monthTotals);
-    // Union of every section actually present in the 12 months of data,
-    // ordered by RISK_SECTIONS where possible (stable legend order) with
-    // any section RISK_SECTIONS doesn't know about yet appended after —
-    // so a brand-new admin-created section still renders/stacks/colors
-    // correctly even if the frontend's cached section list (util.js's
-    // ensureRiskSections()) hasn't caught up yet. This is the long-term
-    // chart's own half of the hardcoded-sections fix: RISK_SECTIONS used
-    // to be the ONLY source for which sections this chart would ever draw.
-    const seenSections = new Set();
-    months.forEach((m) => Object.keys(m.segments || {}).forEach((k) => seenSections.add(k)));
-    const secOrder = [...RISK_SECTIONS.filter((k) => seenSections.has(k)), ...[...seenSections].filter((k) => !RISK_SECTIONS.includes(k))];
-    // An unmonitored month is drawn as the same hatched stub the
-    // coverage strip uses, NOT as a short stacked bar. Those months hold
-    // only backdated articles a later crawl surfaced, so a bar there
-    // invites the reader to compare a month we watched against a month
-    // we did not, which is the single most misleading thing this chart
-    // used to do.
-    const monthsHtml = months
-      .map((m, i) => {
-        const total = monthTotals[i] || 0;
-        if (!m.monitored) {
-          return `<div class="months-col" title="${escapeHtml(m.label)}: not monitored, ${total} backdated article(s) only">
-            <div style="width:100%;height:4px;border-radius:2px;background:repeating-linear-gradient(45deg,var(--gridline),var(--gridline) 3px,transparent 3px,transparent 6px);"></div>
-            <span class="chart-daylabel" style="opacity:.7;">${escapeHtml(m.label)}</span>
-          </div>`;
-        }
-        const segs = secOrder
-          .map((k) => {
-            const v = (m.segments || {})[k] || 0;
-            const h = total ? (v / total) * 100 : 0;
-            return `<div style="height:${h}%;background:${sectionColor(k)}"></div>`;
-          })
-          .join("");
-        return `<div class="months-col">
-          <div class="months-stack" style="height:${Math.round((total / monthMax) * 100)}%;" title="${escapeHtml(m.label)} · ${total} matched">${segs}</div>
-          <span class="chart-daylabel" style="color:var(--tx2);font-weight:600;">${escapeHtml(m.label)}</span>
-        </div>`;
-      })
-      .join("");
-    const legendHtml = secOrder
-      .map((k) => `<div class="row" style="gap:7px;"><span style="width:8px;height:8px;border-radius:2px;background:${sectionColor(k)}"></span><span style="font-size:11.5px;color:var(--tx2);">${escapeHtml(k)}</span></div>`)
-      .join("");
-
-    // Relevance-mix trend (dashboard-longterm-spec.md item 2): monthly
-    // share of high-scoring (>=8) matched coverage. GLOBAL, not
-    // per-section — see RelMixTrendPointOut's docstring
-    // (app/api/schemas/core.py) for the rollup-schema gap that makes a
-    // per-section cut unavailable this round.
-    const relMixTrend = data.relMixTrend || [];
-    // Unmonitored months are hatched here for a sharper reason than on
-    // the other charts: this series is a SHARE. An unmonitored month
-    // holding one backdated article that scored 9 renders as a
-    // full-height 100% bar, so before this fix the tallest, most
-    // alarming bars on the chart were the ones with a single article
-    // behind them.
-    const relMixHtml = relMixTrend
-      .map((p) => {
-        const sharePct = Math.round((p.highShare || 0) * 100);
-        if (!p.monitored) {
-          return `<div class="chart-col" title="${escapeHtml(p.label)}: not monitored, no share to report">
-            <div style="width:100%;height:4px;border-radius:2px;background:repeating-linear-gradient(45deg,var(--gridline),var(--gridline) 3px,transparent 3px,transparent 6px);"></div>
-            <span class="chart-daylabel" style="opacity:.7;">${escapeHtml(p.label)}</span>
-          </div>`;
-        }
-        return `<div class="chart-col" title="${escapeHtml(p.label)} · ${sharePct}% high of ${p.total} matched">
-          <div class="chart-bar" style="height:${sharePct}%;background:var(--red);"></div>
-          <span class="chart-daylabel" style="color:var(--tx2);font-weight:600;">${escapeHtml(p.label)}</span>
-        </div>`;
-      })
-      .join("");
-
-    // Top sources, 12 months (spec item 5) — aggregate across the whole
-    // window (rollup_monthly_source has no section column; see
-    // DashboardTrendsOut.topSources's docstring).
-    const topSources12 = data.topSources || [];
-    const topSources12Html = topSources12
-      .map(
-        (s, i) => `<div>
-          <div class="row-between" style="margin-bottom:6px;"><span style="font-size:12.5px;color:var(--tx2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(
-            s.label
-          )}</span><span style="font-size:12.5px;font-weight:600;flex:0 0 auto;padding-left:8px;">${s.count}</span></div>
-          <div class="bar-track bar-track-sm"><div class="bar-fill" style="width:${pctOfMax(
-            s.count,
-            topSources12,
-            (x) => x.count
-          )};background:${i === 0 ? "var(--ac3)" : "var(--ac)"};"></div></div>
-        </div>`
-      )
-      .join("");
-
-    const heatRows = data.heatRows || [];
-    const heatHtml = heatRows
-      .map((h) => {
-        const vals = h.values || [];
-        const trend = h.trend || autoTrend(vals);
-        const trendColor = trend === "▲" ? "var(--red)" : trend === "▼" ? "var(--green)" : "var(--tx3)";
-        const cells = vals
-          .map((v) => `<div class="heat-cell" style="background:color-mix(in oklab, var(--ac2) ${Math.round(v * 100)}%, var(--gridline));" title="${Math.round(v * 100)}% of peak"></div>`)
-          .join("");
-        return `<div class="heat-row">
-          <span class="heat-label">${escapeHtml(h.label)}</span>
-          <div class="heat-cells">${cells}</div>
-          <span class="heat-trend" style="color:${trendColor}">${trend}</span>
-        </div>`;
-      })
-      .join("");
-
-    const standing = data.standing || [];
-    const standingHtml = standing.length
-      ? standing
-          .map((t) => {
-            const width = pctOfMax(t.count, standing, (x) => x.count);
-            const fill = t.dir === "up" ? "var(--red)" : t.dir === "down" ? "var(--green)" : "var(--ac2)";
-            const badgeStrong = (t.months || 0) >= 9;
-            return `<div class="standing-card">
-          <div class="row-between" style="align-items:flex-start;">
-            <div class="standing-name">${escapeHtml(t.name)}</div>
-            <span class="pill" style="background:${badgeStrong ? "var(--acsoft)" : "var(--gridline)"};color:${badgeStrong ? "var(--actx)" : "var(--tx3)"}">${t.months} mo</span>
-          </div>
-          <div class="standing-note">${escapeHtml(t.note)}</div>
-          <div class="row" style="gap:10px;margin-top:12px;">
-            <div class="bar-track" style="height:5px;flex:1;"><div class="bar-fill" style="width:${width};background:${fill};height:100%;"></div></div>
-            <span class="mono" style="font-size:10px;color:var(--tx3);">${t.count} arts</span>
-          </div>
-        </div>`;
-          })
-          .join("")
-      : `<div class="state-body">No standing-theme data returned.</div>`;
-
-    const watchHtml = watchGroups.length
-      ? watchGroups
-          .map(
-            (g) => `<div class="card" style="margin-bottom:16px;">
-        <h3>${escapeHtml(g.title)}</h3>
-        <p class="hint">${escapeHtml(g.blurb)}</p>
-        ${watchBoardHtml(g, coverage)}
-      </div>`
-          )
-          .join("")
-      : `<div class="card" style="margin-bottom:16px;"><div class="state-body">No watchlist data returned.</div></div>`;
-
-    render(`
-      ${header(isAdmin)}
-      <div class="card" style="margin-bottom:16px;">
-        <div class="row-between" style="align-items:flex-start;gap:16px;margin-bottom:4px;">
-          <div>
-            <h3 style="margin-bottom:6px;">Monitoring coverage</h3>
-            <p class="hint" style="margin-bottom:0;">Which of these 12 months the collector actually ran in. Read every chart below inside this frame.</p>
-          </div>
-          <div style="text-align:right;flex:0 0 auto;">
-            <div style="font-size:22px;font-weight:700;letter-spacing:-.6px;color:${monitoredCount ? "var(--tx)" : "var(--amber)"};">${monitoredCount} of 12</div>
-            <div class="mono" style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--tx3);margin-top:3px;">months monitored</div>
-          </div>
-        </div>
-        <div class="months-cols" style="height:96px;margin-top:16px;">${coverageStripHtml(coverage)}</div>
-        <p class="hint" style="margin:16px 0 0;">${escapeHtml(windowNote)}</p>
-      </div>
-      ${watchHtml}
-      <div class="grid-3" style="margin-bottom:16px;">${trendHtml}</div>
-      <div class="card" style="margin-bottom:16px;">
-        <h3>Coverage volume by section · 12 months</h3>
-        <p class="hint">Matched articles per month, stacked by section, for the months that were monitored. Hatched months were not collected in, so they carry only backdated articles and are not comparable.</p>
-        <div class="months-cols">${monthsHtml || `<div class="state-body">No data.</div>`}</div>
-        <div class="row wrap" style="gap:16px;margin-top:18px;padding-top:14px;border-top:1px solid var(--line);">${legendHtml}</div>
-      </div>
-      <div class="grid-2-long" style="margin-bottom:16px;">
-        <div class="card">
-          <h3>Relevance mix · 12 months</h3>
-          <p class="hint">Share of matched coverage scoring high (8 to 10) each month, across all sections. Only months that were monitored carry a bar.</p>
-          <div class="chart-cols">${relMixHtml || `<div class="state-body">No data.</div>`}</div>
-        </div>
-        <div class="card">
-          <h3>Theme intensity</h3>
-          <p class="hint">How often each risk theme surfaced, month by month.</p>
-          <div class="stack" style="gap:7px;">${heatHtml || `<div class="state-body">No data.</div>`}</div>
-        </div>
-      </div>
-      <div class="grid-2" style="margin-bottom:16px;">
-        <div class="card">
-          <h3>Standing themes</h3>
-          <p class="hint">Free-text themes the AI stage wrote, which vary in wording between articles, so treat these as a rough grouping rather than a register. The named entities above are the stable version of this question.</p>
-          <div class="grid-2">${standingHtml}</div>
-        </div>
-        <div class="card">
-          <h3 style="margin-bottom:18px;">Top sources · 12 months</h3>
-          <div class="stack" style="gap:14px;">${topSources12Html || `<div class="state-body">No data.</div>`}</div>
-        </div>
-      </div>
-    `);
+  async function loadLong(force = false) {
+    const tab = state.longTab || "risk";
+    if (!force && tab === loadedLongTab) return;
+    loadedLongTab = tab;
+    renderLongShell(tab, `<div class="card">${skeletonRows(6)}</div>`);
+    try {
+      const data = await fetchLongTab(tab);
+      // The user may have switched tabs while this was in flight. Render
+      // only if the answer still matches what the screen is showing.
+      if (!alive || (state.longTab || "risk") !== tab) return;
+      renderLongShell(tab, renderLongTab(tab, data));
+    } catch (err) {
+      if (!alive || (state.longTab || "risk") !== tab) return;
+      renderLongShell(
+        tab,
+        `<div class="card">
+           <div class="banner banner-error"><div>
+             <div style="font-weight:600;margin-bottom:4px;">This tab could not load.</div>
+             <div style="font-size:12.5px;">${escapeHtml(fmtErr(err))}</div>
+           </div></div>
+           <button type="button" id="longRetry" class="btn btn-outline">Try again</button>
+         </div>`
+      );
+      root.querySelector("#longRetry")?.addEventListener("click", () => loadLong(true));
+    }
   }
 
   function sameDay(a, b) {
     return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
   }
-  function autoTrend(vals) {
-    if (!vals.length) return "▬";
-    const d = vals[vals.length - 1] - vals[0];
-    if (Math.abs(d) < 0.05) return "▬";
-    return d > 0 ? "▲" : "▼";
-  }
-
   return {
     destroy() {
       alive = false;
+      if (unsubscribe) unsubscribe();
     },
   };
 }
