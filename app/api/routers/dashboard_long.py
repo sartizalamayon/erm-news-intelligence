@@ -124,14 +124,20 @@ class _Window:
         return f"{span} · {self.collection_days} collection days"
 
     @property
-    def since_effective(self) -> date:
+    def since_effective(self) -> date | None:
         """Read from the first MONITORED month, not the calendar start.
 
         Months before the collector ran hold only backdated articles a
         later crawl happened to surface. Counting them would mix a
         sample of the news with an accident of crawling.
+
+        None when NO month was monitored. It used to fall back to the
+        calendar window, which is the exact mixing this property exists
+        to prevent: a board then counted backdated articles and printed
+        them under a heading reading "No monitored months yet", beside
+        provenance text saying nothing news-derived was a trend.
         """
-        return self.monitored[0] if self.monitored else self.since
+        return self.monitored[0] if self.monitored else None
 
 
 def _window(conn: DictConnection) -> _Window:
@@ -161,6 +167,59 @@ def _evidence_out(items: list[evidence_service.EvidenceItem]) -> list[EvidenceOu
     ]
 
 
+
+def _rollup_stats(
+    conn: DictConnection, *, table: str, key_col: str, key: str, months: list[date]
+) -> evidence_service.BoardStats | None:
+    """Durable counts for one board row, from its monthly rollup.
+
+    WHY THIS EXISTS. `evidence_service.board_stats` reads live `articles`,
+    and raw article rows do not survive `raw_retention_days` (90 by
+    default — app/db/settings.py). Reading only the live table means that
+    once the product is older than that window, a month in which a real
+    risk event happened reports `items: 0, critical: 0, mean: null` — a
+    genuine event rendered as a quiet month. The rollup tables
+    (migrations 0021 and 0025) exist precisely so the COUNTS outlive the
+    articles, and this is the function that finally reads them.
+
+    Returns None when the row has no rollup coverage at all, so the
+    caller can fall back to live stats. That is the normal state for a
+    custom watchlist entity: `app/db/rollups.py::_upsert_watch` iterates
+    the CODE-defined groups, so a self-service entity has no rollup rows
+    until someone backfills, and falling back keeps it usable meanwhile.
+
+    `table` and `key_col` are module constants chosen by the caller, never
+    request data. Filtering `rollup_monthly_watch` on `entity` alone is
+    safe because entity keys are unique across groups: the code-defined
+    ones are, and `watch_entities.key` is UNIQUE table-wide precisely so
+    two entities can never collide on that rollup's (month, group, entity)
+    primary key.
+    """
+    if not months:
+        return None
+    row = conn.execute(
+        f"""
+        SELECT coalesce(sum(article_count), 0) AS items,
+               coalesce(sum(scored_count), 0) AS scored,
+               coalesce(sum(high_count), 0) AS critical,
+               coalesce(sum(score_sum), 0) AS score_sum
+        FROM {table} WHERE {key_col} = %s AND month = ANY(%s)
+        """,  # noqa: S608 -- table/key_col are module constants, key and months are bound
+        (key, months),
+    ).fetchone()
+    if row is None:
+        return None
+    items, scored = int(row["items"]), int(row["scored"])
+    if items == 0 and scored == 0:
+        return None
+    return evidence_service.BoardStats(
+        items=items,
+        scored=scored,
+        critical=int(row["critical"]),
+        mean=(float(row["score_sum"]) / scored) if scored else None,
+    )
+
+
 def _board_row(
     conn: DictConnection,
     *,
@@ -169,11 +228,36 @@ def _board_row(
     note: str,
     where: str,
     params: list[str],
-    since: date,
+    win: _Window,
+    rollup: tuple[str, str, str] | None = None,
     is_us: bool = False,
     is_new: bool = False,
 ) -> BoardRowOut:
-    stats = evidence_service.board_stats(conn, where, params, since=since)
+    """One board row: durable counts, live headlines.
+
+    The COUNTS come from the monthly rollup where one exists, so they
+    keep their meaning after the articles behind them are purged. The
+    HEADLINES always come from live `articles`, because that is the only
+    place they exist — which is what makes `critExpired` a real state
+    rather than a decorative one: a row can legitimately report critical
+    items it can no longer show you.
+    """
+    since = win.since_effective
+    # No monitored month means there is nothing to count. Returning zeros
+    # is correct here and is NOT the "absence drawn as a measurement"
+    # defect: the board's own window chip reads "No monitored months yet",
+    # so the row says nothing happened because nobody looked.
+    if since is None:
+        return BoardRowOut(key=key, name=name, note=note, items=0, scored=0, critical=0, mean=None,
+                           isUs=is_us, isNew=is_new)
+
+    stats = None
+    if rollup is not None:
+        table, key_col, rollup_key = rollup
+        stats = _rollup_stats(conn, table=table, key_col=key_col, key=rollup_key, months=win.monitored)
+    if stats is None:
+        stats = evidence_service.board_stats(conn, where, params, since=since)
+
     crit = (
         evidence_service.critical_items(conn, where, params, since=since, limit=CRIT_PER_ROW)
         if stats.critical
@@ -229,8 +313,12 @@ def long_risk(user: AuthenticatedUser = Depends(get_current_user)) -> RiskTabOut
             news_window=win.label,
             brent_key=settings.oilpriceapi_key,
         )
-        moved = evidence_service.critical_items(
-            conn, "TRUE", [], since=win.since_effective, limit=5, min_score=8.0
+        # No monitored month means no sample to draw from — an empty list
+        # is the honest answer, and the provenance panel below says why.
+        moved = (
+            evidence_service.critical_items(conn, "TRUE", [], since=win.since_effective, limit=5, min_score=8.0)
+            if win.since_effective is not None
+            else []
         )
         totals_row = conn.execute(
             "SELECT coalesce(sum(article_count), 0) AS articles, coalesce(sum(matched_count), 0) AS matched, "
@@ -303,6 +391,19 @@ def long_market(user: AuthenticatedUser = Depends(get_current_user)) -> MarketTa
             rows = market_service.monthly_closes(conn, code, since)
             closes_by_code[code] = {r.month: r.close for r in rows}
             months = sorted(set(months) | set(closes_by_code[code]))
+            # The series is built from stored closes and does NOT depend on
+            # the quote: a failed quote scrape used to take the whole
+            # twelve-month chart down with it, even though every close
+            # needed to draw it was already in the database.
+            if len(rows) >= 2 and rows[0].close > 0:
+                base = rows[0].close
+                series.append(
+                    IndexSeriesOut(
+                        code=code,
+                        label=(q.name.split()[0] if q and q.name else code),
+                        values=[round(r.close / base * 100.0, 2) for r in rows],
+                    )
+                )
             if q is None:
                 continue
             span = q.week52_high - q.week52_low
@@ -319,19 +420,15 @@ def long_market(user: AuthenticatedUser = Depends(get_current_user)) -> MarketTa
                     marketCapMn=q.market_cap_mn,
                     freeFloatMn=q.free_float_mn,
                     asOf=q.as_of.isoformat(),
-                    belowHighPct=((q.week52_high - q.last) / q.week52_high * 100.0) if q.week52_high else 0.0,
-                    rangePos=((q.last - q.week52_low) / span) if span > 0 else 0.0,
+                    # None, not 0.0, when the 52-week range is degenerate
+                    # (a newly listed or barely traded instrument). 0.0
+                    # draws as "pinned at its 52-week low", which is a
+                    # claim about the stock; the truth is that there is no
+                    # position to report.
+                    belowHighPct=((q.week52_high - q.last) / q.week52_high * 100.0) if q.week52_high else None,
+                    rangePos=((q.last - q.week52_low) / span) if span > 0 else None,
                 )
             )
-            if len(rows) >= 2 and rows[0].close > 0:
-                base = rows[0].close
-                series.append(
-                    IndexSeriesOut(
-                        code=code,
-                        label=q.name.split()[0] if q.name else code,
-                        values=[round(r.close / base * 100.0, 2) for r in rows],
-                    )
-                )
 
         trading_days = market_service.stored_day_count(conn, MARKET_CODES[0])
 
@@ -448,12 +545,18 @@ def long_economy(user: AuthenticatedUser = Depends(get_current_user)) -> Economy
                     note=axis.note,
                     where=where,
                     params=params,
-                    since=win.since_effective,
+                    win=win,
+                    rollup=("rollup_monthly_econ", "axis", axis.key),
                 )
             )
     rows = _sorted_rows(rows)
-    loud = max(rows, key=lambda r: r.items, default=None)
-    sharp = next((r for r in rows if r.mean is not None), None)
+    # The loudest axis is chosen from those that have a mean at all. An
+    # axis can legitimately be the busiest AND entirely unscored — that
+    # is the documented Airtel state — and formatting a None mean with
+    # ":.1f" turned the whole tab into a 500.
+    scored_rows = [r for r in rows if r.mean is not None]
+    loud = max(scored_rows, key=lambda r: r.items, default=None)
+    sharp = next((r for r in scored_rows), None)
     verdict = ""
     if loud is not None and sharp is not None and loud.key != sharp.key:
         verdict = (
@@ -511,7 +614,8 @@ def _group_board(conn: DictConnection, group_key: str, win: _Window) -> BoardOut
                 note=entity.note,
                 where=where,
                 params=params,
-                since=win.since_effective,
+                win=win,
+                rollup=("rollup_monthly_watch", "entity", entity.key),
                 is_us=entity.key == "grameenphone",
                 is_new=group.key == "mfs" or entity.key == "airtel",
             )
@@ -545,21 +649,21 @@ def long_telecom(user: AuthenticatedUser = Depends(get_current_user)) -> Telecom
             if group.key != "operators":
                 continue
             per_operator.append(watchlist.entity_where_sql(entity))
-        # The whole disjunction gets ONE more layer of parentheses. Without
-        # it the caller's "day >= %s AND llm_score >= %s AND " prefix binds
-        # to the FIRST arm only, because AND binds tighter than OR — every
-        # other operator then bypasses both the window and the score floor,
-        # and unscored rows come back with a NULL score. That is exactly
-        # the bug this line was written to fix.
         # ONE item per operator, then sorted by score — not the global
         # top six. Ranking every operator's items together returns six
         # near-duplicate reports of whichever operator had the loudest
         # week (the first build returned the same Grameenphone launch
         # six times from six outlets), which tells a reader nothing about
         # the other four. A board about peers has to show peers.
+        #
+        # Querying per operator also sidesteps the AND/OR precedence trap
+        # entirely: there is no combined disjunction here for a caller's
+        # "day >= %s AND llm_score >= %s AND " prefix to bind to.
         initiatives: list[evidence_service.EvidenceItem] = []
         seen_urls: set[str] = set()
         for entity_where, entity_params in per_operator:
+            if win.since_effective is None:
+                break
             top = evidence_service.critical_items(
                 conn, entity_where, entity_params, since=win.since_effective, limit=1, min_score=4.0
             )
@@ -613,6 +717,11 @@ def watchlist_preview(
     know a guard vocabulary exists to find out that নগদ also means cash —
     the screen shows them the difference and lets them decide.
     """
+    # Preview and create must fail identically — a term that previews
+    # cleanly and then refuses to save sends the operator hunting for a
+    # problem in their terms that is really in the board they picked.
+    if body.groupKey and body.groupKey not in _DEFAULT_GUARD_FOR_GROUP:
+        raise HTTPException(status_code=422, detail=f"No such board: {body.groupKey}.")
     guard_key = body.context or _DEFAULT_GUARD_FOR_GROUP.get(body.groupKey or "")
     try:
         with get_connection() as conn:

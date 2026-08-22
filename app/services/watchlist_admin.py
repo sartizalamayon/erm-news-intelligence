@@ -217,6 +217,17 @@ def _clean_terms(terms: list[str], *, field: str, bangla: bool) -> list[str]:
             )
         if len(term) > MAX_TERM_LENGTH:
             raise ValidationError(f"{field} term {raw!r} is longer than {MAX_TERM_LENGTH} characters")
+        # A term with no letter or digit in it survives escaping as a
+        # string of backslashed punctuation, which is a valid pattern
+        # that can never match a headline. The entity then saves happily
+        # and reports zero forever -- indistinguishable, on the board,
+        # from an entity nobody is writing about. MIN_TERM_LENGTH already
+        # guards the opposite failure (a pattern that matches everything);
+        # this guards the one that matches nothing.
+        if not any(ch.isalnum() for ch in term):
+            raise ValidationError(
+                f"{field} term {raw!r} has no letters or digits in it, so it could never match a headline"
+            )
         if bangla and not is_bengali(term):
             raise ValidationError(
                 f"{field} term {raw!r} has no Bangla in it -- put Latin-script terms in the English field"

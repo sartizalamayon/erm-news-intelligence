@@ -86,8 +86,14 @@ export function mountDashboard(root, { navigate }) {
     loadLong();
     // shell.js does not remount on a longTab change, by design, so the
     // sub-tabs are this mount's job to follow.
+    // `state.screen` is checked as well as the mode. setState() notifies
+    // listeners BEFORE shell.js's syncScreen has had a chance to destroy
+    // this mount, so a navigation AWAY from the dashboard reaches this
+    // listener while the mount is still alive. Without the screen check
+    // it starts a fetch for a screen the user has just left, and the
+    // response paints the dashboard over whatever mounted in its place.
     unsubscribe = subscribe(() => {
-      if (alive && (state.dashMode || "short") === "long") loadLong();
+      if (alive && state.screen === "dash" && (state.dashMode || "short") === "long") loadLong();
     });
   } else {
     render(loadingShell(mode));
@@ -140,7 +146,7 @@ export function mountDashboard(root, { navigate }) {
               (m) => `
             <button data-mode="${m}" class="seg-btn ${mode === m ? "active" : ""}" style="flex-direction:column;align-items:flex-start;gap:1px;padding:8px 16px;height:auto;">
               <span style="font-size:13px;font-weight:600;">${m === "short" ? "Short term" : "Long term"}</span>
-              <span style="font-size:10.5px;opacity:.75;">${m === "short" ? "Today · 14 days" : "Economic trends · 12 months"}</span>
+              <span style="font-size:10.5px;opacity:.75;">${m === "short" ? "Today · 14 days" : "Risk lines · 12 months"}</span>
             </button>`
             )
             .join("")}
@@ -413,12 +419,13 @@ export function mountDashboard(root, { navigate }) {
     renderLongShell(tab, `<div class="card">${skeletonRows(6)}</div>`);
     try {
       const data = await fetchLongTab(tab);
-      // The user may have switched tabs while this was in flight. Render
-      // only if the answer still matches what the screen is showing.
-      if (!alive || (state.longTab || "risk") !== tab) return;
+      // The user may have switched tabs — or left the dashboard entirely —
+      // while this was in flight. Render only if the answer still matches
+      // what the screen is showing.
+      if (!alive || state.screen !== "dash" || (state.longTab || "risk") !== tab) return;
       renderLongShell(tab, renderLongTab(tab, data));
     } catch (err) {
-      if (!alive || (state.longTab || "risk") !== tab) return;
+      if (!alive || state.screen !== "dash" || (state.longTab || "risk") !== tab) return;
       renderLongShell(
         tab,
         `<div class="card">

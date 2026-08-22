@@ -77,6 +77,11 @@ export function mountReview(root, { navigate }) {
     srcMenuOpen: false,
     checked: new Set(),
     selId: null,
+    // Set when another screen asked for a specific article ("Open in
+    // review" on the Long-term dashboard). It survives the list load so
+    // the reader lands on the item they clicked rather than on whatever
+    // happens to be first.
+    focusId: null,
     dupOpen: false,
     topicOpen: false,
     items: [],
@@ -90,6 +95,18 @@ export function mountReview(root, { navigate }) {
     bulkBusy: false,
     error: null,
   };
+
+  // Consume the one-shot focus instruction from another screen ("Open in
+  // review" on the Long-term dashboard). Viewing mode is widened to
+  // "all" because the article may already be approved or rejected, and
+  // the default pending filter would hide the very row the reader
+  // clicked. Cleared immediately so a later remount does not re-focus.
+  if (state.focusArticle) {
+    s.focusId = Number(state.focusArticle);
+    s.selId = s.focusId;
+    s.viewMode = "all";
+    setState({ focusArticle: null });
+  }
 
   const debouncedFetch = debounce(() => fetchList(), 300);
   // Declared HERE, not next to armInfiniteScroll below: render() runs at
@@ -133,6 +150,22 @@ export function mountReview(root, { navigate }) {
       s.dayCounts = (data && data.days) || [];
       s.loading = false;
       s.loadingMore = false;
+      // An article opened from the dashboard may sit on a later page of
+      // the queue, or may not match the current filters at all. Silently
+      // falling back to the first row would land the reader on someone
+      // else's article while the URL and their intent said otherwise —
+      // so fetch the one they asked for and put it at the top.
+      if (s.focusId && !append && !s.items.some((a) => a.id === s.focusId)) {
+        try {
+          const one = await api.get(`/articles/${s.focusId}`);
+          if (alive && one && one.id) s.items.unshift({ ...one, _detailLoaded: true });
+        } catch (err) {
+          // The id may have been purged since the dashboard rendered it.
+          // Fall through to the normal selection rather than erroring the
+          // whole screen over one missing row.
+          s.focusId = null;
+        }
+      }
       if (s.selId && !s.items.some((a) => a.id === s.selId)) s.selId = null;
       if (!s.selId && s.items.length && !append) s.selId = s.items[0].id;
       render();

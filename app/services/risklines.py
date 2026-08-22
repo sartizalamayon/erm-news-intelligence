@@ -48,7 +48,7 @@ without leaving the screen.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 from app.db import econaxes, watchlist
 from app.db.connection import DictConnection
@@ -66,8 +66,13 @@ def _twelve_months_back(today: date | None = None) -> date:
     Market lines own this window rather than inheriting the caller's,
     because the exchange does not stop publishing when the collector
     stops running.
+
+    Dhaka, not server-local: every other "what is today" in this codebase
+    is pinned to Asia/Dhaka (UTC+6, no DST), and a server running in UTC
+    would otherwise shift this window boundary by a whole month during
+    the hours either side of a Dhaka midnight.
     """
-    d = today or date.today()
+    d = today or (datetime.now(timezone.utc) + timedelta(hours=6)).date()
     total = d.year * 12 + (d.month - 1) - 11
     return date(total // 12, total % 12 + 1, 1)
 
@@ -109,10 +114,12 @@ def _no_read(key: str, label: str, why: str, window: str, window_kind: str) -> R
 
 
 def _normalise(values: list[float]) -> tuple[float, ...]:
-    """Scale a series into 0..1 for the card's inline strip.
+    """Scale a COUNT series into 0..1 against its own maximum.
 
-    An all-zero or single-point series returns empty rather than a flat
-    line, so the card falls back to its hatched rule.
+    Zero is meaningful for a count — a month with no items should draw
+    as nothing — so the floor is a true zero rather than the series
+    minimum. An all-zero or single-point series returns empty instead of
+    a flat line, so the card falls back to its hatched rule.
     """
     finite = [v for v in values if v is not None]
     if len(finite) < 2:
@@ -123,24 +130,82 @@ def _normalise(values: list[float]) -> tuple[float, ...]:
     return tuple(max(0.0, v) / top for v in finite)
 
 
+def _normalise_range(values: list[float]) -> tuple[float, ...]:
+    """Scale an INDEX series into 0..1 against its own min and max.
+
+    An index rebased to 100 that falls to 82 spans 0.82..1.0 of its
+    maximum, which draws as twelve bars of near-identical height — a
+    picture of a flat year, when the year was in fact a 17% decline.
+    Zero is not a meaningful floor for an index, so the floor is the
+    series minimum and the shape becomes readable. A series with no
+    spread at all returns empty rather than a row of full bars.
+    """
+    finite = [v for v in values if v is not None]
+    if len(finite) < 2:
+        return ()
+    lo, hi = min(finite), max(finite)
+    if hi - lo <= 0:
+        return ()
+    # A floor of 0.08 keeps the lowest bar visible as a bar rather than
+    # vanishing into the card background and reading as missing data.
+    return tuple(0.08 + 0.92 * ((v - lo) / (hi - lo)) for v in finite)
+
+
 # ── individual lines ─────────────────────────────────────────────────
 
 
-def _regulatory_line(conn: DictConnection, since: date, window: str) -> RiskLine:
+def _regulatory_board(
+    conn: DictConnection, group: watchlist.WatchGroup, months: list[date], since: date
+) -> list[tuple[str, int, int, float | None]]:
+    """(label, critical, scored, mean) for every entity on a board.
+
+    ONE query against `rollup_monthly_watch` rather than one regex scan
+    of live `articles` per entity. Both correctness and cost: the rollup
+    counts outlive `raw_retention_days`, and seven regex scans over the
+    whole article table took ~3s of a single dashboard request.
+
+    Falls back to live stats for the whole board when the rollup has no
+    rows for this window at all, which is the state right after an
+    entity is added and before the next rollup runs.
+    """
+    rows = conn.execute(
+        "SELECT entity, sum(article_count) AS items, sum(scored_count) AS scored, "
+        "sum(high_count) AS critical, sum(score_sum) AS score_sum "
+        "FROM rollup_monthly_watch WHERE group_key = %s AND month = ANY(%s) GROUP BY entity",
+        (group.key, months),
+    ).fetchall()
+    by_entity = {r["entity"]: r for r in rows}
+
+    out: list[tuple[str, int, int, float | None]] = []
+    for entity in group.entities:
+        row = by_entity.get(entity.key)
+        if row is not None and (int(row["items"]) or int(row["scored"])):
+            scored = int(row["scored"])
+            mean = (float(row["score_sum"]) / scored) if scored else None
+            out.append((entity.label, int(row["critical"]), scored, mean))
+            continue
+        where, params = watchlist.entity_where_sql(entity)
+        stats = evidence_service.board_stats(conn, where, params, since=since)
+        out.append((entity.label, stats.critical, stats.scored, stats.mean))
+    return out
+
+
+def _regulatory_line(
+    conn: DictConnection, since: date | None, window: str, monitored: list[date]
+) -> RiskLine:
     """Critical regulatory items across the whole regulatory board."""
+    if since is None:
+        return _no_read(
+            "regulatory", "Regulatory & licence", "No month in this window was monitored.", window, "news"
+        )
     group = next((g for g in watchlist.WATCH_GROUPS if g.key == "regulatory"), None)
     if group is None:  # pragma: no cover - only reachable if the module is gutted
         return _no_read("regulatory", "Regulatory & licence", "The regulatory board is not configured.", window, "news")
 
-    total_critical = 0
-    total_scored = 0
-    per_entity: list[tuple[str, int, float | None]] = []
-    for entity in group.entities:
-        where, params = watchlist.entity_where_sql(entity)
-        stats = evidence_service.board_stats(conn, where, params, since=since)
-        total_critical += stats.critical
-        total_scored += stats.scored
-        per_entity.append((entity.label, stats.critical, stats.mean))
+    board = _regulatory_board(conn, group, monitored, since)
+    total_critical = sum(c for _, c, _, _ in board)
+    total_scored = sum(sc for _, _, sc, _ in board)
+    per_entity: list[tuple[str, int, float | None]] = [(lbl, c, m) for lbl, c, _, m in board]
 
     if total_scored == 0:
         return _no_read(
@@ -239,7 +304,7 @@ def _competitive_line(conn: DictConnection) -> RiskLine:
         window=window,
         window_kind="market",
         tone="bad" if behind else "ok",
-        spark=_normalise(us_idx),
+        spark=_normalise_range(us_idx),
     )
 
 
@@ -288,12 +353,12 @@ def _fx_line(conn: DictConnection) -> RiskLine:
     )
 
 
-def _energy_line(conn: DictConnection, since: date, window_news: str, brent_key: str) -> RiskLine:
+def _energy_line(conn: DictConnection, since: date | None, window_news: str, brent_key: str) -> RiskLine:
     """Brent spot, with the energy news axis as its supporting evidence."""
     live = macro_service.fetch_brent(brent_key) if brent_key else None
     axis = next((a for a in econaxes.ECON_AXES if a.key == "energy"), None)
     axis_note = ""
-    if axis is not None:
+    if axis is not None and since is not None:
         where, params = econaxes.axis_where_sql(axis)
         stats = evidence_service.board_stats(conn, where, params, since=since)
         if stats.items:
@@ -397,7 +462,7 @@ def _political_line(
 def build_risk_lines(
     conn: DictConnection,
     *,
-    since: date,
+    since: date | None,
     monitored: list[date],
     coverage_days: dict[date, int],
     news_window: str,
@@ -405,7 +470,7 @@ def build_risk_lines(
 ) -> list[RiskLine]:
     """All five lines. One failing line never takes the others down."""
     builders = (
-        ("regulatory", lambda: _regulatory_line(conn, since, news_window)),
+        ("regulatory", lambda: _regulatory_line(conn, since, news_window, monitored)),
         ("competitive", lambda: _competitive_line(conn)),
         ("fx", lambda: _fx_line(conn)),
         ("energy", lambda: _energy_line(conn, since, news_window, brent_key)),

@@ -196,8 +196,12 @@ class InstrumentOut(BaseModel):
     marketCapMn: float
     freeFloatMn: float | None = None
     asOf: str
-    belowHighPct: float
-    rangePos: float
+    # Both are None when the 52-week range is degenerate (high == low),
+    # which happens for a newly listed or barely traded instrument. 0.0
+    # would render as "pinned at its 52-week low" — a claim about the
+    # stock rather than an admission that there is no position to report.
+    belowHighPct: float | None = None
+    rangePos: float | None = None
 
 
 class IndexSeriesOut(BaseModel):

@@ -19,6 +19,11 @@ export const state = {
   // Which of the four Long-term sub-tabs is showing. Ignored while
   // dashMode is "short"; see route.js LONG_TABS.
   longTab: "risk",
+  // An article id handed to the Review queue by another screen ("Open in
+  // review" on the Long-term dashboard). Consumed and cleared by
+  // screens/review.js on mount — it is a one-shot instruction, not a
+  // persistent selection.
+  focusArticle: null,
 
   progress: "", // active job/run status text, shell header (§2)
   // Latest GET /health/pipeline/run/status snapshot, published by

@@ -368,7 +368,13 @@ function indexedChart(labels, series) {
 }
 
 function instrumentPanel(inst) {
-  const pos = Math.max(0, Math.min(1, inst.rangePos));
+  // A degenerate 52-week range (high === low) has no position to draw.
+  // Rendering it at 0 would say "pinned at its 52-week low", which is a
+  // claim about the stock rather than an admission that there is no
+  // reading — so the bar goes hatched instead, like every other absent
+  // measurement on this screen.
+  const hasRange = inst.rangePos !== null && inst.rangePos !== undefined;
+  const pos = hasRange ? Math.max(0, Math.min(1, inst.rangePos)) : 0;
   const up = inst.changePct >= 0;
   return `
     <div>
@@ -386,17 +392,22 @@ function instrumentPanel(inst) {
           };">${up ? "▲" : "▼"} ${Math.abs(inst.changePct).toFixed(2)}%</div>
         </div>
       </div>
-      <div class="range-bar">
-        <div class="range-mark" style="left:${(pos * 100).toFixed(1)}%;background:${
-          pos < 0.34 ? "var(--red)" : pos > 0.66 ? "var(--green)" : "var(--amber)"
-        };"></div>
-      </div>
-      <div class="range-axis">
-        <span>${escapeHtml(inst.w52Low.toFixed(2))}</span>
-        <span style="color:${inst.belowHighPct > 15 ? "var(--red)" : "var(--tx3)"};">
-          ${inst.belowHighPct.toFixed(1)}% BELOW HIGH</span>
-        <span>${escapeHtml(inst.w52High.toFixed(2))}</span>
-      </div>
+      ${
+        hasRange
+          ? `<div class="range-bar">
+               <div class="range-mark" style="left:${(pos * 100).toFixed(1)}%;background:${
+                 pos < 0.34 ? "var(--red)" : pos > 0.66 ? "var(--green)" : "var(--amber)"
+               };"></div>
+             </div>
+             <div class="range-axis">
+               <span>${escapeHtml(inst.w52Low.toFixed(2))}</span>
+               <span style="color:${inst.belowHighPct > 15 ? "var(--red)" : "var(--tx3)"};">
+                 ${inst.belowHighPct.toFixed(1)}% BELOW HIGH</span>
+               <span>${escapeHtml(inst.w52High.toFixed(2))}</span>
+             </div>`
+          : `<div class="hatch" title="No 52-week range reported for this instrument"></div>
+             <div class="range-axis"><span>No 52-week range reported</span></div>`
+      }
       <div class="row" style="gap:20px;margin-top:12px;">
         <div>
           <div style="font-size:12.5px;font-weight:600;">&#2547;${formatNumber(Math.round(inst.marketCapMn))}<span
