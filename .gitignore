@@ -40,3 +40,6 @@ secrets.json
 *.db
 *.db-wal
 *.db-shm
+
+# Agent worktrees — scratch checkouts, never part of the repo.
+.claude/worktrees/
