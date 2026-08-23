@@ -53,8 +53,21 @@ os.environ.setdefault("SECRET_KEY", "")
 # production credentials, and results changed depending on whether the
 # developer had a `.env` at all. Derived from the provider registry
 # rather than hand-listed, so adding a provider cannot reopen the hole.
+#
+# `<PROVIDER>_MODEL` is blanked for the same reason and it is NOT
+# cosmetic: `Settings.<provider>_model` shadows
+# `provider_registry.DEFAULT_PROVIDER_DEFINITIONS[...].default_model`
+# whenever it is non-empty (app/config.py explains the full mechanism).
+# Leaving the model vars alone meant a developer with a corrected
+# `GROQ_MODEL` in `.env` ran the whole suite against that value, while
+# CI — which has no `.env` — ran against the code default. Every
+# assertion about which model a transport ends up on was therefore
+# machine-dependent, and the production default could rot without a
+# single test turning red. Blank them and the suite always sees exactly
+# what production sees.
 for _provider in ("groq", "gemini", "mistral", "nvidia", "cerebras", "openai", "anthropic"):
     os.environ.setdefault(f"{_provider.upper()}_API_KEY", "")
+    os.environ.setdefault(f"{_provider.upper()}_MODEL", "")
 
 
 @pytest.fixture

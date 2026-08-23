@@ -82,8 +82,8 @@ class Settings(BaseSettings):
         description="Symmetric (Fernet) key used to encrypt admin-entered "
         "LLM provider API keys at rest, per ADR §9.1's security "
         "requirement. Owned operationally by ARCH-DB; generate with "
-        "`python -c \"from cryptography.fernet import Fernet; "
-        "print(Fernet.generate_key().decode())\"`.",
+        '`python -c "from cryptography.fernet import Fernet; '
+        'print(Fernet.generate_key().decode())"`.',
     )
 
     # ── Database (Supabase Postgres — ADR §1 / §9.4) ────────────────
@@ -98,12 +98,45 @@ class Settings(BaseSettings):
 
     # ── LLM providers (ADR §9.1, ruled: Groq primary, Google AI Studio
     # secondary; multi-provider with admin-configurable routing) ──────
+    #
+    # `<provider>_model` defaults are EMPTY on purpose, and must stay
+    # that way. `app.services.llm.registry._env_credentials` reads them
+    # generically as `getattr(settings, f"{provider}_model")`, and
+    # `load_provider_account` prefers that value over
+    # `provider_registry.DEFAULT_PROVIDER_DEFINITIONS[...].default_model`
+    # — so a non-empty default here SHADOWS the registry, which is the
+    # only place model ids are ever live-verified.
+    #
+    # That shadowing was live, and it was production-only. These two
+    # fields used to default to `qwen/qwen3.6-27b` and
+    # `gemini-2.0-flash`; `provider_registry` had already moved off both
+    # (to `llama-3.1-8b-instant` and `gemini-flash-lite-latest`) and
+    # documents `gemini-2.0-flash` as verified-dead — HTTP 404 "no longer
+    # available" on every key. render.yaml declares neither `GROQ_MODEL`
+    # nor `GEMINI_MODEL`, so production would have taken these defaults
+    # while every developer machine took the corrected values from its
+    # own `.env`: Gemini is the SECONDARY for all five features, so the
+    # entire failover path would have 404'd on first use, and Groq would
+    # have run on 1,000 RPD instead of 14,400 against a ~1,100 req/day
+    # workload. Nothing would have caught it before the deploy.
+    #
+    # Add a provider by adding it to `provider_registry`, never by
+    # putting its model id here. `nvidia` already has no `_model` field
+    # at all, which is the shape to copy.
     groq_api_key: str = Field(default="", repr=False, description="console.groq.com API key (bootstrap/CI fallback).")
-    groq_model: str = Field(default="qwen/qwen3.6-27b", description="Ruled model per ADR §9.1.")
+    groq_model: str = Field(
+        default="",
+        description="OPTIONAL override of the model id used for Groq. Blank "
+        "(the default) means 'use whatever `app.services.llm.provider_registry."
+        "DEFAULT_PROVIDER_DEFINITIONS` says', which is the only live-verified "
+        "source of model ids in this codebase. Set this only to pin a "
+        "different model than the registry's.",
+    )
     gemini_api_key: str = Field(default="", repr=False, description="Google AI Studio API key (bootstrap/CI fallback).")
     gemini_model: str = Field(
-        default="gemini-2.0-flash",
-        description="Placeholder pending P3-LLM confirming the exact model id against provider-limits.md.",
+        default="",
+        description="OPTIONAL override of the model id used for Gemini. Blank "
+        "(the default) means 'use the provider registry's', per `groq_model`.",
     )
     mistral_api_key: str = Field(
         default="",
@@ -114,7 +147,9 @@ class Settings(BaseSettings):
         "exposed by the API; treat it as unknown, never assume unlimited.",
     )
     mistral_model: str = Field(
-        default="mistral-small-latest", description="Live-verified working model per provider-limits-VERIFIED.md."
+        default="",
+        description="OPTIONAL override of the model id used for Mistral. Blank "
+        "(the default) means 'use the provider registry's', per `groq_model`.",
     )
     nvidia_api_key: str = Field(
         default="",
@@ -303,9 +338,7 @@ def validate_production_settings(settings: Settings) -> None:
         missing.append("one of MISTRAL_API_KEY / GEMINI_API_KEY / GROQ_API_KEY / NVIDIA_API_KEY")
 
     if missing:
-        raise ConfigurationError(
-            "Missing required production configuration: " + ", ".join(missing)
-        )
+        raise ConfigurationError("Missing required production configuration: " + ", ".join(missing))
 
 
 @lru_cache
