@@ -614,8 +614,17 @@ _GROUP_BLURBS = {
 }
 
 
-def _group_board(conn: DictConnection, group_key: str, win: _Window) -> BoardOut:
-    pairs = [(g, e) for g, e in watchlist.all_entities_with_custom(conn) if g.key == group_key]
+def _group_board(
+    conn: DictConnection,
+    group_key: str,
+    win: _Window,
+    entities: list[tuple[watchlist.WatchGroup, watchlist.WatchEntity]],
+) -> BoardOut:
+    """One watch board. `entities` is the caller's ALREADY-READ entity
+    list, not re-read here on purpose: see `long_telecom` for why one
+    payload has to be built from exactly one read of it.
+    """
+    pairs = [(g, e) for g, e in entities if g.key == group_key]
     rows: list[BoardRowOut] = []
     for group, entity in pairs:
         where, params = watchlist.entity_where_sql(entity)
@@ -650,9 +659,41 @@ def _group_board(conn: DictConnection, group_key: str, win: _Window) -> BoardOut
 def long_telecom(user: AuthenticatedUser = Depends(get_current_user)) -> TelecomTabOut:
     with get_connection() as conn:
         win = _window(conn)
-        peers = _group_board(conn, "operators", win)
-        wallets = _group_board(conn, "mfs", win)
-        regulatory = _group_board(conn, "regulatory", win)
+
+        # ONE read of the entity list for the whole payload.
+        #
+        # This used to be read six separate times on this one connection
+        # — once per board, once for the initiatives loop, once for
+        # `watchlist.entities`. Under READ COMMITTED (the default, and
+        # what this connection runs at) every statement takes a FRESH
+        # snapshot, so an admin's `POST /watchlist` or
+        # `DELETE /watchlist/{id}` committing part-way through this
+        # handler produced a payload that contradicted itself: an entity
+        # listed in `watchlist.entities` with no row on the board it
+        # names, or a board row for an entity the same payload says does
+        # not exist. The window is small but entirely real — the add
+        # flow is a form on this very screen.
+        #
+        # Reading once and threading the result through is the fix that
+        # does not touch transaction semantics. Raising the isolation
+        # level would work too, but the 85 tests in the two sibling
+        # files pin `get_connection` to a single already-open
+        # connection, and the isolation level cannot be changed once a
+        # transaction has begun.
+        entity_pairs = watchlist.all_entities_with_custom(conn)
+        # Read adjacent to the list above rather than at the end of the
+        # handler where it used to sit. These two still take separate
+        # snapshots, so the `custom` flag and `id` on a chip can lag a
+        # concurrent create or delete by one statement; keeping them
+        # next to each other shrinks that window from the whole handler
+        # to a single statement. Closing it completely means carrying
+        # the row id through `watchlist.custom_entities`, which is a
+        # wider change than this one.
+        custom_ids = {(c.group_key, c.key): c.id for c in watchlist_admin.list_custom(conn)}
+
+        peers = _group_board(conn, "operators", win, entity_pairs)
+        wallets = _group_board(conn, "mfs", win, entity_pairs)
+        regulatory = _group_board(conn, "regulatory", win, entity_pairs)
 
         # Operator initiatives: the highest-scoring items tagged to ANY
         # operator, which is what surfaces a launch or a partnership. No
@@ -660,7 +701,7 @@ def long_telecom(user: AuthenticatedUser = Depends(get_current_user)) -> Telecom
         # land here and the reader separates them by reading the reason —
         # which is exactly why the reason is on the row.
         per_operator: list[tuple[str, list[str]]] = []
-        for group, entity in watchlist.all_entities_with_custom(conn):
+        for group, entity in entity_pairs:
             if group.key != "operators":
                 continue
             per_operator.append(watchlist.entity_where_sql(entity))
@@ -690,7 +731,6 @@ def long_telecom(user: AuthenticatedUser = Depends(get_current_user)) -> Telecom
         initiatives.sort(key=lambda i: (-i.score, -i.day.toordinal()))
 
         groups = [{"key": g.key, "title": g.title} for g in watchlist.WATCH_GROUPS]
-        custom_ids = {(c.group_key, c.key): c.id for c in watchlist_admin.list_custom(conn)}
         entities = [
             WatchEntityOut(
                 id=custom_ids.get((g.key, e.key)),
@@ -700,7 +740,7 @@ def long_telecom(user: AuthenticatedUser = Depends(get_current_user)) -> Telecom
                 note=e.note,
                 custom=(g.key, e.key) in custom_ids,
             )
-            for g, e in watchlist.all_entities_with_custom(conn)
+            for g, e in entity_pairs
         ]
 
     return TelecomTabOut(

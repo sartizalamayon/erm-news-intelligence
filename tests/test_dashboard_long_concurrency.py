@@ -46,24 +46,35 @@ Two consequences worth knowing before reading any test below:
     noted here because it IS the real sustained-request ceiling for a
     single browser on the deployed instance.
 
-WHAT WAS FOUND
-──────────────
-One defect, in two shapes, both encoded as `xfail(strict=True)`:
+WHAT WAS FOUND, AND FIXED
+─────────────────────────
+One defect, in two shapes, now covered by two passing tests:
 
   * `test_a_create_committed_mid_read_leaves_the_payload_self_consistent`
   * `test_a_delete_committed_mid_read_leaves_the_payload_self_consistent`
 
-`GET /dashboard/long/telecom` (dashboard_long.py:650-716) reads the
-watch-entity list SIX separate times on one connection — once per board
-at :653-655, once for the initiatives loop at :668, once via
-`watchlist_admin.list_custom` at :694 and once more for the payload's
-`watchlist.entities` at :696. Under READ COMMITTED every one of those
-statements takes a fresh snapshot, so a `POST /watchlist` or
-`DELETE /watchlist/{id}` that commits between the first and the last
-produces a payload that contradicts itself: an entity listed in
+`GET /dashboard/long/telecom` used to read the watch-entity list SIX
+separate times on one connection — once per board, once for the
+initiatives loop, once via `watchlist_admin.list_custom`, once more for
+the payload's `watchlist.entities`. Under READ COMMITTED every one of
+those statements takes a fresh snapshot, so a `POST /watchlist` or
+`DELETE /watchlist/{id}` committing between the first and the last
+produced a payload that contradicted itself: an entity listed in
 `watchlist.entities` with no row on the board it belongs to, or a board
-row for an entity the same payload says does not exist. Observed and
-expected are pinned in each test's docstring.
+row for an entity the same payload said did not exist.
+
+The handler now reads that list ONCE and builds the whole payload from
+it, so a mid-read write leaves the response one commit stale rather than
+self-contradictory. Both tests assert `state["calls"] == 1`, which is
+what keeps the old shape from creeping back: add a second read and they
+fail.
+
+ONE NARROWER WINDOW IS LEFT, deliberately. `watchlist_admin.list_custom`
+is still a second statement, so the `custom` flag and `id` on a chip can
+lag a concurrent create or delete by one read. It sits adjacent to the
+entity read to keep that window to a single statement. Closing it means
+carrying the row id through `watchlist.custom_entities`; no test here
+covers it, and this file does not claim it is covered.
 
 No socket is opened: `tests/conftest.py` blocks them process-wide, and
 every macro/market fetcher is monkeypatched exactly as the sibling
@@ -649,13 +660,16 @@ def _write_after_nth_entity_read(
     call inside a request.
 
     This is how a genuine interleaving is made deterministic instead of
-    hoped for. `GET /dashboard/long/telecom` calls that function once per
-    board and again for the payload's entity list; firing the write after
-    the FIRST call places the commit between the operators board
-    (`dashboard_long.py:653`) and every later read on the same
-    connection, which is exactly the window a real concurrent admin write
-    lands in. Nothing in `app/` is modified — the real function still
-    runs and still returns its real result.
+    hoped for. `GET /dashboard/long/telecom` now reads that list exactly
+    ONCE and builds the whole payload from it, so firing the write after
+    the FIRST call puts the commit in the worst place it can land: after
+    the handler has its entity list, with the boards, the initiatives
+    loop and `watchlist.entities` all still to be built from it. A
+    payload assembled from one read stays self-consistent anyway, which
+    is the point.
+
+    Nothing in `app/` is modified — the real function still runs and
+    still returns its real result.
     """
     real = watchlist_db.all_entities_with_custom
     state = {"calls": 0}
@@ -671,30 +685,26 @@ def _write_after_nth_entity_read(
     return state
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "dashboard_long.py:650-716 — GET /dashboard/long/telecom reads the watch-entity list six times on one "
-        "READ COMMITTED connection. A POST /watchlist that commits after the operators board is built "
-        "(:653) and before watchlist.entities is built (:696) returns a payload listing an entity that has "
-        "no row on its own board."
-    ),
-)
 def test_a_create_committed_mid_read_leaves_the_payload_self_consistent(
     live: LiveApp, monkeypatch: pytest.MonkeyPatch
 ):
-    """DEFECT — torn read across `GET /dashboard/long/telecom`.
+    """A create committing mid-read cannot tear the payload.
 
-    Interleaving: a Telecom read builds the operators board from the
-    entity list as it stands, then an admin's `POST /watchlist` for a new
-    OPERATORS entity commits, then the same read builds
-    `watchlist.entities` from a second, newer snapshot.
+    Interleaving: the Telecom handler reads the entity list, then an
+    admin's `POST /watchlist` for a new OPERATORS entity commits, then
+    the handler builds all three boards, the initiatives loop and
+    `watchlist.entities` — every one of them from the list it already
+    holds.
 
-    Expected: one payload, one view of the world — every entity in
-    `watchlist.entities` has a row on the board it names.
-    Observed: `watchlist.entities` carries the new entity and the peers
-    board does not, so the screen renders a watchlist chip for a row that
-    is not on the board underneath it.
+    The new entity is therefore absent from the whole payload rather
+    than present in half of it, and the next read picks it up. That is
+    the correct outcome: a screen may be one commit stale, but it may
+    not contradict itself.
+
+    This was a real defect until the handler was changed to read the
+    list once. Six separate READ COMMITTED reads meant a create landing
+    in the middle returned a `watchlist.entities` chip with no row on
+    the board underneath it.
     """
     _seed(live.conn, count=200)
     created: list[int] = []
@@ -711,33 +721,33 @@ def test_a_create_committed_mid_read_leaves_the_payload_self_consistent(
     response = live.client.get("/dashboard/long/telecom")
     assert response.status_code == 200, response.text
     assert created, "the mid-read create never fired"
-    assert state["calls"] >= 2, f"only {state['calls']} entity reads in one request — the hook is in the wrong place"
+    assert state["calls"] == 1, (
+        f"{state['calls']} entity reads in one request — the handler is supposed to read the list "
+        "exactly once and build the whole payload from it"
+    )
 
     complaints = _self_consistency_complaints(response.json())
     assert not complaints, "the payload contradicts itself:\n  " + "\n  ".join(complaints)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "dashboard_long.py:650-716 — the mirror of the create case. A DELETE /watchlist/{id} that commits "
-        "after the board at :653 and before watchlist.entities at :696 returns a board row for an entity the "
-        "same payload says does not exist."
-    ),
-)
 def test_a_delete_committed_mid_read_leaves_the_payload_self_consistent(
     live: LiveApp, monkeypatch: pytest.MonkeyPatch
 ):
-    """DEFECT — the same torn read, in the other direction.
+    """The mirror case: a delete committing mid-read.
 
-    Interleaving: a custom operators entity exists; a Telecom read builds
-    the peers board including it; the admin's `DELETE /watchlist/{id}`
-    commits; the same read builds `watchlist.entities` without it.
+    Interleaving: a custom operators entity exists; the Telecom handler
+    reads the entity list including it; the admin's
+    `DELETE /watchlist/{id}` commits; the handler builds the whole
+    payload from the list it already holds.
 
-    Expected: every board row is an entity the payload also lists.
-    Observed: the peers board keeps a row for the deleted entity while
-    `watchlist.entities` has already dropped it — a row the screen cannot
-    open, explain or remove.
+    The deleted entity therefore appears CONSISTENTLY — on the peers
+    board and in `watchlist.entities` both — for this one response, and
+    is gone from the next. Stale beats self-contradictory: the row the
+    reader sees is a row the same payload can explain.
+
+    Before the handler read the list once, the peers board kept the row
+    while `watchlist.entities` had already dropped it, leaving a row the
+    screen could not open, explain or remove.
     """
     _seed(live.conn, count=200)
     created = live.client.post(
@@ -754,7 +764,10 @@ def test_a_delete_committed_mid_read_leaves_the_payload_self_consistent(
 
     response = live.client.get("/dashboard/long/telecom")
     assert response.status_code == 200, response.text
-    assert state["calls"] >= 2
+    assert state["calls"] == 1, (
+        f"{state['calls']} entity reads in one request — the handler is supposed to read the list "
+        "exactly once and build the whole payload from it"
+    )
 
     complaints = _self_consistency_complaints(response.json())
     assert not complaints, "the payload contradicts itself:\n  " + "\n  ".join(complaints)
@@ -885,7 +898,7 @@ def test_a_delete_between_the_start_and_the_end_of_a_board_read_never_raises(
 
     response = live.client.get("/dashboard/long/telecom")
     assert fired == [204], f"the mid-read delete did not run cleanly: {fired}"
-    assert state["calls"] >= 2
+    assert state["calls"] == 1, f"expected exactly one entity read per request, got {state['calls']}"
     assert response.status_code == 200, response.text
     # And the boards it did manage to build are still well-formed.
     payload = response.json()
