@@ -103,7 +103,9 @@ from app.db.econaxes import (
 from app.db.watchlist import (
     NORMALIZED_TEXT_SQL,
     all_entities,
+    custom_entities,
     entity_predicate_sql,
+    entity_where_sql,
     prefilter_pattern,
 )
 from app.logging import configure_logging, get_logger
@@ -393,6 +395,76 @@ def _upsert_watch(conn: DictConnection, month: date, month_end: date) -> int:
     return len(entities)
 
 
+def _upsert_watch_custom(conn: DictConnection, month: date, month_end: date) -> int:
+    """The same rows, for entities that came from the database.
+
+    WHY THIS IS A SEPARATE PASS. `_upsert_watch` above builds its FILTER
+    clauses by INTERPOLATING each entity's regex into the SQL, which is
+    safe there and only there: those patterns are frozen module
+    constants in `app.db.watchlist`. A self-service entity's patterns are
+    admin input living in `watch_entities`, so they must be BOUND, never
+    interpolated -- which is exactly why `watchlist.entity_where_sql`
+    exists alongside `entity_predicate_sql`. Rather than widen the hot
+    path (one materialised scan serving fifteen entities over a
+    45k-article month) to carry parameters, custom entities get their own
+    small pass. There are normally none, and a handful at most.
+
+    WHY IT HAS TO EXIST AT ALL. Without it, `rollup_monthly_watch` never
+    gets a row for a custom entity, so the durable-count guarantee the
+    long-term boards rest on simply does not apply to admin-added rows:
+    once the articles behind them age past `raw_retention_days`, a real
+    risk event on a custom entity renders as a quiet month, and nothing
+    on the screen distinguishes it from a genuinely quiet one. That is
+    the precise failure `_rollup_stats` was written to prevent, applied
+    inconsistently.
+    """
+    pairs = custom_entities(conn)
+    if not pairs:
+        return 0
+
+    written = 0
+    for group, entity in pairs:
+        where_sql, params = entity_where_sql(entity)
+        row = conn.execute(
+            f"""
+            SELECT count(*) AS n,
+                   count(*) FILTER (WHERE a.review_status != 'filtered_out') AS m,
+                   count(a.llm_score) AS s,
+                   count(*) FILTER (WHERE a.llm_score >= 8) AS h,
+                   coalesce(sum(a.llm_score), 0) AS t
+            FROM articles a
+            WHERE a.day >= %s AND a.day < %s AND {where_sql}
+            """,  # noqa: S608 -- where_sql is built by entity_where_sql with %s placeholders; params are bound
+            [month, month_end, *params],
+        ).fetchone()
+        row = row or {}
+        conn.execute(
+            """
+            INSERT INTO rollup_monthly_watch
+                (month, group_key, entity, article_count, matched_count, scored_count, high_count, score_sum)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (month, group_key, entity) DO UPDATE SET
+                article_count = EXCLUDED.article_count,
+                matched_count = EXCLUDED.matched_count,
+                scored_count  = EXCLUDED.scored_count,
+                high_count    = EXCLUDED.high_count,
+                score_sum     = EXCLUDED.score_sum
+            """,
+            (
+                month,
+                group.key,
+                entity.key,
+                int(row.get("n") or 0),
+                int(row.get("m") or 0),
+                int(row.get("s") or 0),
+                int(row.get("h") or 0),
+                float(row.get("t") or 0),
+            ),
+        )
+        written += 1
+    return written
+
+
 def _upsert_econ(conn: DictConnection, month: date, month_end: date) -> int:
     """One row per (month, economy axis) with volume AND severity --
     migrations/0025's `rollup_monthly_econ`, the macro counterpart of
@@ -566,7 +638,7 @@ def compute_rollups_for_month(conn: DictConnection, month: date) -> dict[str, in
         "sources": _upsert_sources(conn, month, month_end),
         "score_bands": _upsert_score_bands(conn, month, month_end),
         "themes": _upsert_themes(conn, month, month_end),
-        "watch": _upsert_watch(conn, month, month_end),
+        "watch": _upsert_watch(conn, month, month_end) + _upsert_watch_custom(conn, month, month_end),
         "econ": _upsert_econ(conn, month, month_end),
         "coverage": _upsert_coverage(conn, month, month_end),
     }
