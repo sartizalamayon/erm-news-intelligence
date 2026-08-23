@@ -130,6 +130,36 @@ jobs:
       - name: Test
         run: pytest
 
+      - name: Set up Node (frontend tests)
+        # Only needed on ONE matrix leg: tests/frontend/** is pure
+        # JavaScript and has nothing to do with the Python version, so
+        # running it twice would just double the wall clock and give two
+        # identical results.
+        if: matrix.python-version == '3.12'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Test (frontend)
+        # This step is the whole reason tests/frontend/** is worth
+        # having, and it did not exist until 2026-08-24. The suite ran
+        # only when somebody remembered to type the command by hand, so
+        # it had been RED for the life of the long-term-dashboard
+        # feature: `route.test.mjs` still asserted the two-key shape
+        # that predated `longTab`, and `copy.test.mjs` — a lint over the
+        # real source — was flagging six em dashes that had crept back
+        # into two screens. Both were invisible to every gate this
+        # workflow ran.
+        #
+        # No install step and no `npm ci` on purpose: these use
+        # `node:test`/`node:assert`, both built into Node, and
+        # `frontend/` deliberately has no package.json, no bundler and
+        # no node_modules (tests/frontend/README.md explains why that
+        # property is worth protecting). Nothing to cache, nothing to
+        # audit, no supply chain.
+        if: matrix.python-version == '3.12'
+        run: node --test "tests/frontend/"*.test.mjs
+
       - name: Batch entrypoint smoke check
         # DoD #1: the batch CLI must be runnable independently of the web
         # app. Runs the real no-op (app.batch.run_daily.main) end to end,

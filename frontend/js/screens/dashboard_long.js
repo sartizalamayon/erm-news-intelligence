@@ -187,7 +187,7 @@ function boardRow(row, boardKey) {
         <div class="board-num">${formatNumber(row.items)}</div>
         <div class="board-num" style="color:var(--tx2);">${formatNumber(row.scored)}</div>
         <div>${critCell}</div>
-        <div class="board-mean" style="color:${color};">${hasMean ? row.mean.toFixed(1) : "—"}</div>
+        <div class="board-mean" style="color:${color};">${hasMean ? row.mean.toFixed(1) : "n/a"}</div>
         <div class="board-chev" data-chev="${escapeHtml(boardKey)}-${escapeHtml(row.key)}">
           ${
             canOpen
@@ -447,12 +447,12 @@ function renderMarket(data) {
           const mom = m.moms[c];
           const momTxt =
             mom === null || mom === undefined
-              ? `<span style="color:var(--tx4);">—</span>`
+              ? `<span style="color:var(--tx4);">n/a</span>`
               : `<span style="color:${mom >= 0 ? "var(--green)" : "var(--red)"};">${
                   mom >= 0 ? "+" : "−"
                 }${Math.abs(mom).toFixed(1)}%</span>`;
           return `<div class="mono" style="text-align:right;font-size:12.5px;font-weight:600;">${
-            close === null || close === undefined ? "—" : close.toFixed(2)
+            close === null || close === undefined ? "n/a" : close.toFixed(2)
           }</div>
           <div class="mono" style="text-align:right;font-size:11.5px;font-weight:600;">${momTxt}</div>`;
         })

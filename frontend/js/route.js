@@ -72,7 +72,7 @@ export const DEFAULT_LONG_TAB = "risk";
  * `short` is the default and stays implicit to keep the common URL clean.
  *
  * @param {string} screen
- * @param {{ dashMode?: string }} [opts]
+ * @param {{ dashMode?: string, longTab?: string }} [opts]
  * @returns {string} an absolute path, always starting with "/"
  */
 export function pathForScreen(screen, opts = {}) {
@@ -94,7 +94,9 @@ export function pathForScreen(screen, opts = {}) {
  * URL should land somewhere useful rather than nowhere.
  *
  * @param {string} pathname
- * @returns {{ screen: string, dashMode: string }}
+ * @returns {{ screen: string, dashMode: string, longTab: string }} `longTab`
+ *   is always present, on every screen, so a caller can read it without
+ *   checking `dashMode` first.
  */
 export function screenForPath(pathname) {
   const parts = String(pathname || "")

@@ -269,11 +269,11 @@ export function mountSources(root) {
           <label class="field-label" for="srcFormMethods">Methods, comma separated (sitemap, rss, api, gnews, id_enum, wp_rest)</label>
           <input id="srcFormMethods" class="text-input" autocomplete="off" style="padding:9px 12px;font-size:13px;" value="${escapeHtml(src ? (src.methods || []).join(", ") : "")}" />
           <p class="hint" style="margin:6px 0 0;">
-            This is a label, not a live setting — it doesn't make the source fetch anything by itself.
+            This is a label, not a live setting. It doesn't make the source fetch anything by itself.
             Every source's real fetch logic is a hand-written Python plugin (this codebase has no generic
             "just fetch this URL" mode; every site needs its own handling for pagination, dates and
-            anti-bot quirks). A source added here stays "no fetch plugin registered" — visible, matched
-            articles never appear — until a developer writes that plugin and links it to this row.
+            anti-bot quirks). A source added here stays "no fetch plugin registered": it is visible, but
+            matched articles never appear, until a developer writes that plugin and links it to this row.
           </p>
         </div>
         <div>

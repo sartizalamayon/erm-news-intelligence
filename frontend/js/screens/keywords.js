@@ -32,8 +32,10 @@
 //     zero patterns.
 //
 // `term_bn` can be "" for English-only terms (§3.8: "treat as a real
-// 'no Bengali equivalent' state, not missing data") — rendered as an
-// em-dash, matching the prototype's own "—" placeholder.
+// 'no Bengali equivalent' state, not missing data"). Rendered as "n/a",
+// which is this app's one missing-value marker everywhere. The prototype
+// used "—" here; em and en dashes are prohibited in UI copy by owner's
+// call and linted by tests/frontend/copy.test.mjs.
 
 import { API_BASE } from "../config.js";
 import { api, ApiError } from "../api.js";

@@ -14,8 +14,10 @@ import assert from "node:assert/strict";
 
 import {
   DEFAULT_DASH_MODE,
+  DEFAULT_LONG_TAB,
   DEFAULT_SCREEN,
   LEGACY_PATHS,
+  LONG_TABS,
   ROUTABLE_SCREENS,
   canAccess,
   pathForScreen,
@@ -50,10 +52,54 @@ test("paths round-trip back to their screen", () => {
 });
 
 test("round-trips survive both directions for the dashboard tabs", () => {
+  // `longTab` is part of every parse result, not just the long-term
+  // ones, so a caller can read it without a mode check first. This
+  // assertion is exhaustive on purpose: it was written against the
+  // two-key shape that predated long-term tabs, and stayed red and
+  // unnoticed for the whole life of the feature because CI had no step
+  // that ran this suite.
   const long = screenForPath(pathForScreen("dash", { dashMode: "long" }));
-  assert.deepEqual(long, { screen: "dash", dashMode: "long" });
+  assert.deepEqual(long, { screen: "dash", dashMode: "long", longTab: DEFAULT_LONG_TAB });
   const short = screenForPath(pathForScreen("dash", { dashMode: "short" }));
-  assert.deepEqual(short, { screen: "dash", dashMode: "short" });
+  assert.deepEqual(short, { screen: "dash", dashMode: "short", longTab: DEFAULT_LONG_TAB });
+});
+
+test("every long-term tab round-trips through its own URL", () => {
+  // The point of putting the tab in the path: a CRO looking at the
+  // Economy board hands a colleague the URL and they land on Economy.
+  for (const tab of LONG_TABS) {
+    const path = pathForScreen("dash", { dashMode: "long", longTab: tab });
+    assert.deepEqual(
+      screenForPath(path),
+      { screen: "dash", dashMode: "long", longTab: tab },
+      `tab ${tab} via ${path}`
+    );
+  }
+});
+
+test("the landing tab has exactly one canonical URL", () => {
+  // `/dash/long` and `/dash/long/risk` render the same view, so the app
+  // must only ever write the short one back to the address bar.
+  assert.equal(pathForScreen("dash", { dashMode: "long", longTab: DEFAULT_LONG_TAB }), "/dash/long");
+  assert.equal(pathForScreen("dash", { dashMode: "long" }), "/dash/long");
+  assert.deepEqual(screenForPath("/dash/long"), screenForPath(`/dash/long/${DEFAULT_LONG_TAB}`));
+});
+
+test("a bad tab segment lands on the landing tab, not a blank board", () => {
+  for (const bad of ["/dash/long/nope", "/dash/long/../etc", "/dash/long/RISK", "/dash/long//"]) {
+    const out = screenForPath(bad);
+    assert.ok(LONG_TABS.includes(out.longTab), `${bad} -> a real tab`);
+  }
+  assert.equal(screenForPath("/dash/long/nope").longTab, DEFAULT_LONG_TAB);
+});
+
+test("a tab segment is ignored on the short-term dashboard", () => {
+  // `/dash/short/market` is not a thing; it must not smuggle a tab in.
+  assert.deepEqual(screenForPath("/dash/short/market"), {
+    screen: "dash",
+    dashMode: "short",
+    longTab: DEFAULT_LONG_TAB,
+  });
 });
 
 test("garbage input lands on the dashboard instead of a blank screen", () => {
