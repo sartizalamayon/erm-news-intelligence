@@ -1,0 +1,62 @@
+-- 0027_retire_seeded_model_ids.sql
+--
+-- 0006 seeded a model id per provider. Both have since died, and the
+-- seed outranks every other source of truth, so a first production
+-- deploy would have run on them.
+--
+--     INSERT INTO provider_configs (provider, model, role) VALUES
+--         ('groq',   'qwen/qwen3.6-27b', 'primary'),
+--         ('gemini', 'gemini-2.0-flash', 'secondary')
+--
+-- `app.services.llm.registry.load_provider_account` resolves
+-- `model = row["model"] or env_model`, then falls back to
+-- `provider_registry.DEFAULT_PROVIDER_DEFINITIONS[...].default_model`
+-- only if BOTH are empty. A non-empty seeded row therefore beats the
+-- env var AND the registry -- and the registry is the only place a
+-- model id is ever probed against a live key.
+--
+-- What the two seeded ids are now:
+--
+--   gemini-2.0-flash    DEAD. Verified 2026-08-14: HTTP 404 "This model
+--                       models/gemini-2.0-flash is no longer available"
+--                       on every key this project holds. Gemini is the
+--                       secondary for all five features and the
+--                       `dedup_verification` / `summarization` primary,
+--                       so the whole failover path 404s on first use,
+--                       as does the admin console's "test this
+--                       provider" button (build_probe_client passes
+--                       model=None and takes whatever this row says).
+--
+--   qwen/qwen3.6-27b    Superseded. 1,000 RPD against a ~1,100 req/day
+--                       workload, and a REASONING model whose thinking
+--                       tokens are pure waste for the short JSON
+--                       verdicts this pipeline asks for. The registry
+--                       moved to llama-3.1-8b-instant: 14,400 RPD,
+--                       500,000 TPD, no <think> block. Currently masked
+--                       because every routing entry happens to carry an
+--                       explicit per-feature override -- route one
+--                       feature to groq WITHOUT an override and the
+--                       stale id resurfaces.
+--
+-- The fix is to empty the column rather than to write today's correct
+-- id into it. `model TEXT NOT NULL DEFAULT ''` (0006) already makes ''
+-- the "unset" value, and '' is falsy in that `or` chain, so an empty
+-- row means "ask provider_registry" -- which is exactly the property
+-- that stops this from rotting a third time. Writing a fresh id here
+-- would just reseat the same trap for whoever deprecates the next
+-- model.
+--
+-- Guarded by the stale value, not just the provider: an admin who has
+-- deliberately pinned a model through the console keeps it. This runs
+-- on databases that have never been touched by an admin (the common
+-- case, and the one that matters for the first deploy) and does
+-- nothing on the ones that have.
+--
+-- Idempotent, and safe to re-run: after it has run once the WHERE
+-- clause matches nothing.
+
+UPDATE provider_configs
+   SET model = '',
+       updated_at = now()
+ WHERE (provider = 'gemini' AND model = 'gemini-2.0-flash')
+    OR (provider = 'groq'   AND model = 'qwen/qwen3.6-27b');

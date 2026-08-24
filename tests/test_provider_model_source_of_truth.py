@@ -35,6 +35,7 @@ import pytest
 from pydantic_core import PydanticUndefined
 
 from app.config import Settings
+from app.db.testing import migrated_schema, pg_available
 from app.services.llm.provider_registry import DEFAULT_PROVIDER_DEFINITIONS
 from app.services.llm.registry import _env_credentials
 
@@ -127,3 +128,99 @@ def test_conftest_blanks_model_env_so_a_developers_dotenv_cannot_mask_the_defaul
             "tests/conftest.py must blank it, or model-resolution "
             "assertions become machine-dependent."
         )
+
+
+# ── The DB seed, which outranks everything above ────────────────────────
+#
+# Blanking the config.py defaults was necessary and NOT sufficient.
+# `load_provider_account` resolves `model = row["model"] or env_model`
+# before it ever consults the registry, so a seeded `provider_configs`
+# row beats both. 0006 seeded one per provider and both had since died;
+# 0027 empties them. These tests run against a real migrated schema
+# because the seed IS a migration -- asserting on it any other way would
+# assert on a fiction.
+
+pytestmark_db = pytest.mark.skipif(not pg_available(), reason="no reachable Postgres (set TEST_DATABASE_URL)")
+
+
+@pytestmark_db
+def test_migrations_leave_no_model_id_seeded_in_the_database() -> None:
+    """The seed must be empty, not 'currently correct'.
+
+    An empty column means `load_provider_account` asks the registry.
+    A column holding today's right answer means the next deprecation
+    silently reintroduces the same failure, which is what happened to
+    `gemini-2.0-flash` between 0006 and this test.
+    """
+    with migrated_schema() as conn:
+        seeded = {
+            row["provider"]: row["model"]
+            for row in conn.execute("SELECT provider, model FROM provider_configs").fetchall()
+        }
+    offenders = {p: m for p, m in seeded.items() if m}
+    assert offenders == {}, (
+        f"provider_configs ships with model ids seeded: {offenders}. "
+        "A non-empty row outranks both the env var and "
+        "provider_registry.DEFAULT_PROVIDER_DEFINITIONS. Seed '' and let "
+        "the registry answer, or the next dead model reaches production "
+        "the same way gemini-2.0-flash did."
+    )
+
+
+@pytestmark_db
+def test_a_freshly_migrated_database_resolves_every_provider_to_the_registry() -> None:
+    """End to end, on the exact schema a first deploy gets."""
+    import os
+
+    from app.config import get_settings
+    from app.services.llm.registry import load_provider_account
+
+    previous = {k: os.environ.get(k) for k in ("GROQ_API_KEY", "GEMINI_API_KEY")}
+    try:
+        for k in previous:
+            os.environ[k] = "probe-key-not-a-real-credential"
+        get_settings.cache_clear()
+        with migrated_schema() as conn:
+            for provider in ("groq", "gemini"):
+                account = load_provider_account(conn, provider)
+                assert account is not None, f"{provider} did not resolve at all"
+                assert account.model == DEFAULT_PROVIDER_DEFINITIONS[provider].default_model, (
+                    f"{provider} resolved to {account.model!r}, not the registry's "
+                    f"{DEFAULT_PROVIDER_DEFINITIONS[provider].default_model!r}"
+                )
+    finally:
+        for k, v in previous.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        get_settings.cache_clear()
+
+
+@pytestmark_db
+def test_a_model_an_admin_pinned_on_purpose_is_never_overridden() -> None:
+    """The other half of 0027: it is guarded on the stale VALUE, not on
+    the provider, so a deliberate choice made through the admin console
+    survives the migration and every fallback below it.
+    """
+    import os
+
+    from app.config import get_settings
+    from app.services.llm.registry import load_provider_account
+
+    previous = os.environ.get("GEMINI_API_KEY")
+    try:
+        os.environ["GEMINI_API_KEY"] = "probe-key-not-a-real-credential"
+        get_settings.cache_clear()
+        with migrated_schema() as conn:
+            conn.execute("UPDATE provider_configs SET model = %s WHERE provider = 'gemini'", ("gemini-flash-latest",))
+            conn.commit()
+            account = load_provider_account(conn, "gemini")
+            assert account is not None
+            assert account.model == "gemini-flash-latest"
+    finally:
+        if previous is None:
+            os.environ.pop("GEMINI_API_KEY", None)
+        else:
+            os.environ["GEMINI_API_KEY"] = previous
+        get_settings.cache_clear()

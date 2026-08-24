@@ -19,7 +19,7 @@ from cryptography.fernet import Fernet
 from app.db.crypto import encrypt_api_key
 from app.db.testing import migrated_schema, pg_available
 from app.errors import ConfigurationError
-from app.services.llm.provider_registry import save_provider_credential
+from app.services.llm.provider_registry import DEFAULT_PROVIDER_DEFINITIONS, save_provider_credential
 from app.services.llm.registry import build_client_for_feature, load_provider_account
 from app.services.llm.routing import (
     SCORING,
@@ -56,7 +56,13 @@ def test_load_provider_account_decrypts_admin_entered_key(monkeypatch: pytest.Mo
         account = load_provider_account(conn, "groq")
         assert account is not None
         assert account.api_key == "gsk_real_admin_key_123"
-        assert account.model == "qwen/qwen3.6-27b"  # the seeded default from 0006_provider_configs.sql
+        # 0006 seeded 'qwen/qwen3.6-27b' here and this line asserted it,
+        # which is how the suite came to PIN a dead model id rather than
+        # catch it. 0027 empties the seeded column precisely so the
+        # registry -- the only place a model id is ever probed against a
+        # live key -- is what resolves. See
+        # tests/test_provider_model_source_of_truth.py.
+        assert account.model == DEFAULT_PROVIDER_DEFINITIONS["groq"].default_model
 
 
 def test_load_provider_account_falls_back_to_bootstrap_env_key(monkeypatch: pytest.MonkeyPatch) -> None:
