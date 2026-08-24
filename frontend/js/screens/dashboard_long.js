@@ -33,7 +33,8 @@
 // everything.
 
 import { api } from "../api.js";
-import { escapeHtml, formatNumber } from "../util.js";
+import { state } from "../state.js";
+import { escapeHtml, fmtErr, formatNumber } from "../util.js";
 
 export const LONG_TAB_LABELS = [
   ["risk", "Risk lines"],
@@ -138,13 +139,58 @@ function evidenceCard(title, blurb, chip, chipKind, items) {
  * Colour band for a mean severity. Fixed thresholds, NOT relative to the
  * month's maximum: an 8.7 has to look the same in a quiet month as in a
  * loud one, or the register cannot be compared across quarters.
+ *
+ * THE THRESHOLDS ARE 8 / 6 / 5 AND MUST STAY THAT WAY. They used to be
+ * 8 / 6.5 / 4 here and nowhere else, which is the one thing on this
+ * screen a reader cannot see is wrong. The scoring rubric
+ * (`app/services/llm/prompts.py`), `band_for` and its `_RED_MIN`
+ * constants (`app/services/evidence.py`), the `count(*) FILTER` clauses
+ * that write `rollup_monthly_score_band` (`app/db/rollups.py`),
+ * `util.js`'s `tier()` and `dashboard.js`'s `REL_TIER_META` all cut at
+ * 8 / 6 / 5. This function alone cut at 8 / 6.5 / 4, so a mean severity
+ * of 6.2 drew GREY on the Economy and Telecom boards while the same 6.2
+ * was an amber "Medium" pill in the review queue and counted as medium
+ * in the band rollup. Two numbers that are the same number, coloured as
+ * if they were not, on the screen whose whole job is comparing rows.
+ * DEPLOY.md's "things that will go stale" section names this function
+ * as one of the three places that must agree, and it did not.
+ * `tests/frontend/score-bands.test.mjs` now pins the agreement.
+ *
+ * The COLOURS are deliberately not `tier()`'s. A board row is a quiet
+ * register line, not a triage pill, so the bottom two bands stay as
+ * text greys rather than green and violet. Only the cut points are
+ * shared, and only the cut points decide which band a number lands in.
  */
 function meanColor(mean) {
   if (mean === null || mean === undefined) return "var(--tx4)";
   if (mean >= 8) return "var(--red)";
-  if (mean >= 6.5) return "var(--amber)";
-  if (mean >= 4) return "var(--tx3)";
+  if (mean >= 6) return "var(--amber)";
+  if (mean >= 5) return "var(--tx3)";
   return "var(--tx4)";
+}
+
+/**
+ * Bar height for one sparkline month, as a CSS percentage.
+ *
+ * A TRUE ZERO DRAWS NOTHING. `app/services/risklines.py::_normalise`
+ * scales a count series against its own maximum with a floor of a real
+ * zero, and its docstring says why in as many words: "a month with no
+ * items should draw as nothing". Both strips here then ignored that and
+ * rendered `Math.max(4, ...)`, so a month with zero items drew a 4%
+ * stub. On a strip whose whole job is showing where coverage stops,
+ * that turns a deliberate absence into a small positive reading, and it
+ * did it identically on the risk cards and the macro cards.
+ *
+ * The 4% floor is still right for every NON-zero value: a month that
+ * scored 1 against a maximum of 400 is a real reading, and rounding it
+ * to a 0% bar would hide it exactly as badly as drawing a phantom one.
+ * So the floor now applies above zero only, which is the distinction
+ * the backend was already making and the frontend was throwing away.
+ */
+function sparkHeightPct(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.max(4, Math.round(n * 100));
 }
 
 function boardRow(row, boardKey) {
@@ -240,7 +286,7 @@ function riskCard(line) {
     ? `<div class="risk-spark">${line.spark
         .map(
           (v) =>
-            `<div class="risk-spark-bar" style="height:${Math.max(4, Math.round(v * 100))}%;background:${
+            `<div class="risk-spark-bar" style="height:${sparkHeightPct(v)}%;background:${
               line.tone === "bad" ? "var(--red)" : line.tone === "warn" ? "var(--amber)" : "var(--ac2)"
             };opacity:.8;"></div>`
         )
@@ -287,7 +333,21 @@ function renderRisk(data) {
     ${evidenceCard(
       "What moved this week",
       "The highest-scoring items behind the lines above, each with the reason the model recorded when it scored it.",
-      data.movedWindow || "Most recent monitored days",
+      // A LITERAL, not a field. This read `data.movedWindow || "..."`,
+      // and `RiskTabOut` (app/api/schemas/dashboard_long.py) has no
+      // `movedWindow` — it carries `lines`, `moved` and `provenance`,
+      // full stop. So the left side was always `undefined` and the
+      // fallback was always what rendered: a per-card window that looked
+      // server-driven, could never be, and would have gone on looking
+      // server-driven to the next person who wondered why changing it on
+      // the backend did nothing. Every other chip on this screen is fed
+      // by a real field. This one is not, and now says so.
+      //
+      // The label is still true of what the card holds: `long_risk`
+      // selects `moved` with `critical_items(..., since=win.since_effective)`,
+      // so these are the top items from the collection window, and the
+      // provenance panel below spells that window out in full.
+      "Most recent monitored days",
       "news",
       data.moved || []
     )}
@@ -512,7 +572,7 @@ function macroCard(card) {
     card.status === "live" ? "var(--green)" : card.status === "annual" ? "var(--amber)" : "var(--tx4)";
   const body = card.hasSeries && (card.series || []).length
     ? `<div class="risk-spark" style="height:22px;margin-top:14px;">${card.series
-        .map((v) => `<div class="risk-spark-bar" style="height:${Math.max(4, Math.round(v * 100))}%;background:var(--ac2);opacity:.75;"></div>`)
+        .map((v) => `<div class="risk-spark-bar" style="height:${sparkHeightPct(v)}%;background:var(--ac2);opacity:.75;"></div>`)
         .join("")}</div>`
     : `<div style="height:22px;display:flex;align-items:center;margin-top:14px;"><div class="hatch"></div></div>`;
   return `
@@ -541,7 +601,29 @@ function renderEconomy(data) {
 
 // ── tab: Telecom watch ───────────────────────────────────────────────
 
-function watchlistCard(wl) {
+/**
+ * The watchlist panel at the foot of Telecom watch.
+ *
+ * `isAdmin` GATES THE ADD FLOW, and that is a correctness fix, not a
+ * tidy-up. `GET /dashboard/long/telecom` requires only
+ * `get_current_user`, so every analyst reaches this screen; but
+ * `POST /watchlist/preview` and `POST /watchlist` both sit behind
+ * `require_admin` (app/api/routers/dashboard_long.py). The card
+ * rendered "Add an entity" to everyone and the blurb told them in as
+ * many words that "Anyone can add one", so the honest reading of the
+ * screen was an invitation. An analyst who took it typed a name, typed
+ * terms in two scripts, picked a board, clicked "Check these terms" and
+ * got a red "Admin role required." banner: the whole form was work the
+ * server was never going to accept, and the screen had promised it
+ * would. The same flag hides the delete control on the chips, for the
+ * same reason: `DELETE /watchlist/{id}` is admin-only too.
+ *
+ * Admin-ness is read the way `route.js::canAccess` reads it and the way
+ * `dashboard.js` reads it for its own admin-only Run button:
+ * `!!(user && user.is_admin)`. As there, this is presentation only. The
+ * enforcement is the `require_admin` dependency on the three routes.
+ */
+function watchlistCard(wl, isAdmin) {
   const groups = wl.groups || [];
   const entities = wl.entities || [];
   const cards = groups
@@ -550,11 +632,18 @@ function watchlistCard(wl) {
       const chips = mine
         .map((e) => {
           const cls = e.custom ? "wl-chip wl-chip-custom" : e.key === "grameenphone" ? "wl-chip wl-chip-us" : "wl-chip";
-          const del = e.custom
-            ? ` <button type="button" class="btn-ghost js-wl-del" data-id="${escapeHtml(String(e.id))}"
+          const del =
+            e.custom && isAdmin
+              ? ` <button type="button" class="btn-ghost js-wl-del" data-id="${escapeHtml(String(e.id))}"
+                 data-label="${escapeHtml(e.label)}"
                  aria-label="Remove ${escapeHtml(e.label)}" style="font-size:11px;color:var(--red);padding:0 0 0 4px;">&times;</button>`
-            : "";
-          return `<span class="${cls}">${escapeHtml(e.label)}${del}</span>`;
+              : "";
+          // `data-wl-chip` is what the remove handler hides and puts
+          // back. Keyed on the entity id, which is the same id the
+          // DELETE is addressed to, so there is no second lookup table
+          // to keep in step.
+          const chipId = e.custom ? ` data-wl-chip="${escapeHtml(String(e.id))}"` : "";
+          return `<span class="${cls}"${chipId}>${escapeHtml(e.label)}${del}</span>`;
         })
         .join("");
       return `<div class="wl-group">
@@ -562,7 +651,8 @@ function watchlistCard(wl) {
             <div class="mono" style="font-size:9px;letter-spacing:1.4px;text-transform:uppercase;color:var(--tx3);">${escapeHtml(
               g.title
             )}</div>
-            <div class="mono" style="font-size:11px;font-weight:600;color:var(--tx2);">${mine.length}</div>
+            <div class="mono" style="font-size:11px;font-weight:600;color:var(--tx2);"
+                 data-wl-count="${escapeHtml(g.key)}">${mine.length}</div>
           </div>
           <div class="wl-chips">${chips}</div>
         </div>`;
@@ -574,17 +664,37 @@ function watchlistCard(wl) {
       <div class="row-between" style="align-items:flex-start;">
         <div style="min-width:0;">
           <h3>Watchlist</h3>
-          <p class="hint" style="margin-bottom:0;max-width:700px;">${entities.length} entities across
-            ${groups.length} boards. Anyone can add one, but no entity goes live until its terms have been run against
-            the archive and the matches look right.</p>
+          <p class="hint" style="margin-bottom:0;max-width:700px;"><span data-wl-total>${entities.length}</span> entities across
+            ${groups.length} boards. ${
+              isAdmin
+                ? "Administrators add and remove them, and no entity goes live until its terms have been run against the archive and the matches look right."
+                : "Administrators add and remove them, and no entity goes live until its terms have been run against the archive and the matches look right. Ask one if a board is missing something."
+            }</p>
         </div>
-        <button type="button" id="wlAddBtn" class="btn btn-soft" style="display:flex;align-items:center;gap:7px;">
-          <svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.9"
-               stroke-linecap="round" aria-hidden="true"><path d="M10 4.5v11M4.5 10h11"></path></svg>
-          Add an entity
-        </button>
+        ${
+          isAdmin
+            ? `<button type="button" id="wlAddBtn" class="btn btn-soft" style="display:flex;align-items:center;gap:7px;">
+                 <svg width="12" height="12" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.9"
+                      stroke-linecap="round" aria-hidden="true"><path d="M10 4.5v11M4.5 10h11"></path></svg>
+                 Add an entity
+               </button>`
+            : ""
+        }
       </div>
+      <div id="wlError" role="alert" aria-live="assertive"
+           style="display:none;font-size:12px;color:var(--red);background:color-mix(in oklab, var(--red) 12%, transparent);border:1px solid var(--red);border-radius:6px;padding:7px 10px;margin-top:14px;"></div>
       <div class="wl-groups" style="margin-top:20px;">${cards}</div>
+      ${isAdmin ? addPanelHtml(groups) : ""}
+    </div>`;
+}
+
+/**
+ * The add-an-entity form. Split out of `watchlistCard` when the card
+ * became conditional, so a non-admin's page does not carry a form whose
+ * every submit path the server refuses.
+ */
+function addPanelHtml(groups) {
+  return `
       <div id="wlAddPanel" class="wl-add hidden">
         <div class="mono" style="font-size:9px;letter-spacing:1.4px;text-transform:uppercase;color:var(--actx);margin-bottom:14px;">
           Add an entity</div>
@@ -619,19 +729,32 @@ function watchlistCard(wl) {
           </div>
           <div id="wlPreview">
             <div class="card" style="background:var(--panel);padding:16px 18px;">
+              <!-- THE 222 IS AN EXAMPLE FROM ONE ARCHIVE, NOT A READING
+                   OF THIS ONE. It used to be printed as flat present
+                   tense ("matched 222 articles before anyone looked"),
+                   which on a screen where every other number is measured
+                   live reads as a fact about the database in front of
+                   you. It is not: it is a measurement taken against the
+                   development corpus while this guard was being designed
+                   (the same one app/db/watchlist.py's docstring records),
+                   and a fresh production database will not reproduce it.
+                   Saying which archive it came from costs one clause and
+                   stops the panel claiming a number it never ran. The
+                   POINT of the example survives the correction intact,
+                   because the point is the ratio, not the total. -->
               <div style="font-size:11.5px;color:var(--tx3);line-height:1.6;">
                 A Bangla term is checked against the archive before it can be saved, because Bangla word boundaries do
-                not work the way Latin ones do. &#2480;&#2476;&#2495; matched 222 articles before anyone looked; two
-                were the operator and the rest were Sunday and a common given name.
+                not work the way Latin ones do. In the corpus this guard was built against,
+                &#2480;&#2476;&#2495; matched 222 headlines: two were the operator, and the rest were Sunday and a
+                common given name. Your own totals will differ. That is what the check is for.
               </div>
             </div>
           </div>
         </div>
-      </div>
-    </div>`;
+      </div>`;
 }
 
-function renderTelecom(data) {
+function renderTelecom(data, isAdmin) {
   return `
     ${data.peers ? boardCard(data.peers) : ""}
     ${data.wallets && (data.wallets.rows || []).length ? boardCard(data.wallets) : ""}
@@ -643,7 +766,7 @@ function renderTelecom(data) {
       data.initiatives || []
     )}
     ${data.regulatory ? boardCard(data.regulatory) : ""}
-    ${data.watchlist ? watchlistCard(data.watchlist) : ""}`;
+    ${data.watchlist ? watchlistCard(data.watchlist, isAdmin) : ""}`;
 }
 
 // ── public render + bind ─────────────────────────────────────────────
@@ -660,7 +783,12 @@ export function longTabsHtml(active) {
 export function renderLongTab(tab, data) {
   if (tab === "market") return renderMarket(data || {});
   if (tab === "economy") return renderEconomy(data || {});
-  if (tab === "telecom") return renderTelecom(data || {});
+  // Read here rather than threaded in as a render argument: `dashboard.js`
+  // calls this with (tab, data) and is owned elsewhere, and the same
+  // `state.user.is_admin` read is already how that file decides whether
+  // to draw its own Run-collection button. One source, no new parameter
+  // on a shared entry point.
+  if (tab === "telecom") return renderTelecom(data || {}, !!(state.user && state.user.is_admin));
   return renderRisk(data || {});
 }
 
@@ -693,7 +821,103 @@ export function bindLongTab(root, tab, { navigate, reload }) {
   if (tab === "telecom") bindWatchlist(root, reload);
 }
 
+/**
+ * The red "x" on a custom watchlist chip.
+ *
+ * THIS BUTTON HAD NO HANDLER AT ALL. `watchlistCard` has rendered a
+ * `.js-wl-del` button carrying a `data-id` for every custom entity
+ * since self-service landed, `DELETE /watchlist/{entity_id}` has
+ * existed and worked the whole time (app/api/routers/dashboard_long.py),
+ * and nothing anywhere bound the class or read the attribute. It was
+ * the only orphaned hook in the frontend. Clicking the x did nothing
+ * whatsoever: no removal, no error, no spinner, not even a failed
+ * request in the network tab. An entity added by mistake, or one whose
+ * terms turned out to catch the wrong thing, could not be taken off the
+ * board from the UI at all, and the screen gave no hint that the way
+ * out was a database row.
+ *
+ * Wired to match `review.js`'s `toggleStar`/`decide`, which are this
+ * codebase's worked examples of a destructive-ish action done properly:
+ *
+ *   * CONFIRM FIRST. Deleting an entity drops its rules and stops every
+ *     board counting it, and `window.confirm` is what this app already
+ *     uses to guard a delete (sources, users, provider keys, keywords).
+ *     The copy names the entity, because the chips sit close together
+ *     and the x is small.
+ *   * OPTIMISTIC, THEN REVERT. The chip disappears on click, along with
+ *     its board's count and the card's total, so the card never shows a
+ *     state the click has already left. Every one of those three edits
+ *     is captured first and put back verbatim if the request fails,
+ *     rather than recomputed, so a revert cannot invent a number.
+ *   * A REAL ERROR PATH. A failure re-renders the chip and says what
+ *     went wrong in the card's own alert region. Silence here would be
+ *     indistinguishable from the bug this replaces.
+ *   * RELOAD ON SUCCESS, not a local splice: removing an entity changes
+ *     the operator, wallet and regulatory boards above as well as this
+ *     card, and only a refetch can move those.
+ */
+function bindWatchlistRemove(root, reload) {
+  const errEl = root.querySelector("#wlError");
+  const showError = (msg) => {
+    if (!errEl) return;
+    errEl.textContent = msg;
+    errEl.style.display = "";
+  };
+  const clearError = () => {
+    if (errEl) errEl.style.display = "none";
+  };
+
+  root.querySelectorAll(".js-wl-del").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.dataset.id;
+      const label = btn.dataset.label || "this entity";
+      if (!id) return;
+      if (!window.confirm(`Remove ${label} from the watchlist? Its boards stop counting it.`)) return;
+
+      const chip = root.querySelector(`[data-wl-chip="${CSS.escape(id)}"]`);
+      const countEl = btn.closest(".wl-group")?.querySelector("[data-wl-count]");
+      const totalEl = root.querySelector("[data-wl-total]");
+      // Captured BEFORE the optimistic edit, so the revert restores what
+      // was actually on screen rather than a value derived from a
+      // half-applied state.
+      const prevChipDisplay = chip ? chip.style.display : null;
+      const prevCount = countEl ? countEl.textContent : null;
+      const prevTotal = totalEl ? totalEl.textContent : null;
+
+      clearError();
+      btn.disabled = true;
+      if (chip) chip.style.display = "none";
+      if (countEl) countEl.textContent = String(Math.max(0, Number(countEl.textContent) - 1));
+      if (totalEl) totalEl.textContent = String(Math.max(0, Number(totalEl.textContent) - 1));
+
+      try {
+        await api.delete(`/watchlist/${encodeURIComponent(id)}`);
+        reload();
+      } catch (err) {
+        // A 404 here is not the "endpoint isn't built yet" case
+        // `fmtErr` maps `not_found` onto for a GET; the route exists and
+        // returns 404 for "No such custom watchlist entity", which in
+        // practice means somebody else removed it first. Reloading is
+        // the right answer to that, not an error the reader has to
+        // interpret. Printing fmtErr's "not_implemented" sentinel at a
+        // person would be worse than saying nothing.
+        if (err && err.kind === "not_found") {
+          reload();
+          return;
+        }
+        if (chip) chip.style.display = prevChipDisplay;
+        if (countEl) countEl.textContent = prevCount;
+        if (totalEl) totalEl.textContent = prevTotal;
+        btn.disabled = false;
+        showError(`Could not remove ${label}: ${fmtErr(err)}`);
+      }
+    });
+  });
+}
+
 function bindWatchlist(root, reload) {
+  bindWatchlistRemove(root, reload);
+
   const addBtn = root.querySelector("#wlAddBtn");
   const panel = root.querySelector("#wlAddPanel");
   const cancel = root.querySelector("#wlCancelBtn");

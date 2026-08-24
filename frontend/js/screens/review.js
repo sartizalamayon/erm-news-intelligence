@@ -84,6 +84,16 @@ export function mountReview(root, { navigate }) {
     focusId: null,
     dupOpen: false,
     topicOpen: false,
+    // Feedback state for the duplicate and topic-peer controls, which
+    // used to have none at all (see `keepDup`/`dropDup`/`decidePeer`).
+    // `dupBusyId` is the one duplicate whose request is in flight;
+    // `peerBusy` the set of peers with one in flight; `peerDecisions`
+    // remembers what a peer row was told to do so the row can SAY so
+    // after the render that follows. A peer is a different article from
+    // the one on screen, so nothing else on this pane records it.
+    dupBusyId: null,
+    peerBusy: new Set(),
+    peerDecisions: new Map(),
     items: [],
     sources: [],
     total: 0,
@@ -200,6 +210,12 @@ export function mountReview(root, { navigate }) {
     s.selId = id;
     s.dupOpen = false;
     s.topicOpen = false;
+    // The dup/peer feedback below is about the article being read, so it
+    // is dropped when a different one is opened. Carrying it over would
+    // put a green "Approved" on a peer row of an unrelated story.
+    s.dupBusyId = null;
+    s.peerBusy.clear();
+    s.peerDecisions.clear();
     render();
     ensureDetail(id);
   }
@@ -282,6 +298,166 @@ export function mountReview(root, { navigate }) {
       s.error = err;
       fetchList();
     });
+  }
+
+  // ── duplicates and topic peers ────────────────────────────────────
+  //
+  // ALL FOUR OF THESE USED TO BE `.catch(() => {})` WITH NO UI UPDATE.
+  // Not a missing nicety: each of the three server calls below changes
+  // state that the pane is displaying, and none of them said so.
+  //
+  //   * "keep" POSTs /dups/{id}/keep, which flips `is_primary` onto the
+  //     OTHER article and demotes the one you are reading. The queue
+  //     query filters `COALESCE(a.is_primary, TRUE) = TRUE`, so the row
+  //     in front of you has just left the queue and a different article
+  //     has entered it. Nothing re-rendered and nothing re-fetched, so
+  //     the pane kept showing the demoted article as the primary, as if
+  //     the click had never landed. Clicking it twice reassigned it
+  //     twice.
+  //   * "drop" removed the row from the local list and fired the
+  //     request into the void, so a 500 left the duplicate gone from
+  //     the screen and present on the server until somebody reloaded.
+  //     That is the worst of the four: the UI asserted a change the
+  //     server had refused.
+  //   * peer approve/reject PATCH another article's status with no
+  //     badge move, no row update and no error, on the same screen
+  //     where `decide()` does all three correctly for the article in
+  //     the reading pane.
+  //
+  // `decide()` above is the model and these follow it: optimistic edit,
+  // sidebar badge kept honest, revert plus a visible error on failure.
+
+  /**
+   * Promote a duplicate to primary. The article being read is demoted
+   * by the same request, so there is nothing sensible to patch in place:
+   * the list has to be re-fetched, and the selection follows the article
+   * that is now the primary.
+   */
+  async function keepDup(dupId) {
+    if (s.dupBusyId !== null || !s.selId) return;
+    s.dupBusyId = dupId;
+    render();
+    try {
+      await api.post(`/articles/${s.selId}/dups/${dupId}/keep`);
+      if (!alive) return;
+      s.dupBusyId = null;
+      // Follow the promotion. The reader picked this version on purpose,
+      // and leaving the selection on the article that just left the
+      // queue would show them an empty pane for no stated reason.
+      s.selId = dupId;
+      s.dupOpen = false;
+      fetchList();
+    } catch (err) {
+      if (!alive) return;
+      s.dupBusyId = null;
+      s.error = err;
+      render();
+    }
+  }
+
+  /**
+   * Split a duplicate out of the group so it stands on its own.
+   *
+   * Optimistic, and reverted at the exact index it came from: putting a
+   * failed drop back at the end of the list would silently reorder the
+   * outlets, and this list is read as "who else carried this".
+   */
+  async function dropDup(dupId) {
+    const cur = s.items.find((a) => a.id === s.selId);
+    if (!cur || !cur.dups || s.dupBusyId !== null) return;
+    const at = cur.dups.findIndex((d) => String(d.id) === String(dupId));
+    if (at < 0) return;
+    const removed = cur.dups[at];
+    const prevCount = cur.dupCount;
+
+    s.dupBusyId = dupId;
+    cur.dups = cur.dups.filter((d) => String(d.id) !== String(dupId));
+    // `dupCount` is what the "+N" pill in the queue row reads, so it has
+    // to move with the list or the row and the pane disagree.
+    if (typeof prevCount === "number") cur.dupCount = Math.max(0, prevCount - 1);
+    render();
+
+    try {
+      const refreshed = await api.post(`/articles/${s.selId}/dups/${dupId}/drop`);
+      if (!alive) return;
+      s.dupBusyId = null;
+      // The endpoint returns the article's fresh detail, including the
+      // rebuilt dup list. Trusting that over the local splice is what
+      // keeps `also_in` and `dupCount` right when dropping collapses a
+      // two-member group entirely.
+      const still = s.items.find((a) => a.id === s.selId);
+      if (still && refreshed) Object.assign(still, refreshed, { _detailLoaded: true });
+      render();
+    } catch (err) {
+      if (!alive) return;
+      s.dupBusyId = null;
+      const back = s.items.find((a) => a.id === s.selId);
+      if (back && back.dups) back.dups.splice(at, 0, removed);
+      if (back && typeof prevCount === "number") back.dupCount = prevCount;
+      s.error = err;
+      render();
+    }
+  }
+
+  /**
+   * Approve or reject one of the "more on this topic" peers.
+   *
+   * A peer is a DIFFERENT article from the one being read, so this is
+   * `decide()` aimed sideways. Two differences, both forced by what the
+   * payload carries:
+   *
+   *   * `TopicPeerOut` (app/api/schemas/core.py) is id/source/title/score
+   *     and no status, so the peer's PREVIOUS status is unknown unless
+   *     that peer also happens to be a loaded queue row. The pending
+   *     badge is therefore only moved when the peer IS in `s.items` and
+   *     its real prior status can be read. Guessing a delta would put a
+   *     wrong number on the sidebar, which is the failure
+   *     `adjustPendingBadge` already refuses to risk when the count has
+   *     not loaded.
+   *   * The peer row itself has nowhere to show a status, so the
+   *     decision is recorded in `s.peerDecisions` and the row renders
+   *     from it. Without that the row would look untouched after a
+   *     successful decision, which is most of the original bug.
+   */
+  async function decidePeer(peerId, status) {
+    if (s.peerBusy.has(peerId)) return;
+    const item = s.items.find((a) => a.id === peerId) || null;
+    const wasStatus = item ? item.status : null;
+    const prevDecision = s.peerDecisions.get(peerId);
+
+    s.peerBusy.add(peerId);
+    s.peerDecisions.set(peerId, status);
+    if (item) {
+      item.status = status;
+      adjustPendingBadge(pendingDelta(wasStatus, status));
+    }
+    render();
+
+    try {
+      await api.patch(`/articles/${peerId}`, { status });
+      if (!alive) return;
+      s.peerBusy.delete(peerId);
+      // A peer that no longer belongs in the current view has to leave
+      // it, exactly as `decide()` drops a decided article. Skipped when
+      // the peer is the article being read, which cannot happen through
+      // this control but would strand the pane if it ever did.
+      if (item && s.viewMode !== "all" && s.viewMode !== status && item.id !== s.selId) {
+        s.items = s.items.filter((a) => a.id !== peerId);
+        s.checked.delete(peerId);
+      }
+      render();
+    } catch (err) {
+      if (!alive) return;
+      s.peerBusy.delete(peerId);
+      if (prevDecision === undefined) s.peerDecisions.delete(peerId);
+      else s.peerDecisions.set(peerId, prevDecision);
+      if (item) {
+        item.status = wasStatus;
+        adjustPendingBadge(-pendingDelta(wasStatus, status));
+      }
+      s.error = err;
+      render();
+    }
   }
 
   // Bulk approve/reject/star: ONE batched request for however many ids
@@ -415,6 +591,22 @@ export function mountReview(root, { navigate }) {
     }
   }
 
+  // The select-all control used to be a <label> wrapping a styled
+  // <div>. A <label> only does anything once it is associated with a
+  // real form control, by wrapping one or through for=; this one
+  // wrapped a div and named nothing. Clicking the text beside the box
+  // did nothing, and a screen reader had no name to read for it.
+  //
+  // The box itself is the control now (role="checkbox", tabindex="0",
+  // aria-checked kept in step with the rendered state), so the wrapper
+  // goes back to being what it always was: a row. The count beside it
+  // stays a count rather than becoming the box's label, which is why
+  // the accessible name lives on the box.
+  //
+  // Written here rather than beside the markup because that markup sits
+  // inside a template literal, where a comment mentioning for= in
+  // backticks silently ends the string and turns the rest of the
+  // function into a syntax error. It did exactly that once.
   function render() {
     const focusSnap = captureFocus();
     const listEl = root.querySelector('[data-role="queue-list"]');
@@ -542,12 +734,15 @@ export function mountReview(root, { navigate }) {
         <div class="review-body${s.detailOpen ? "" : " detail-collapsed"}" style="position:relative;">
           <div class="review-list-pane" data-role="queue-list">
             <div class="review-list-head">
-              <label style="display:flex;align-items:center;gap:9px;cursor:pointer;">
-                <div class="article-check ${allShownChecked ? "checked" : ""}" data-select-all><span>&#10003;</span></div>
+              <div style="display:flex;align-items:center;gap:9px;">
+                <div class="article-check ${allShownChecked ? "checked" : ""}" data-select-all
+                     data-role="select-all" role="checkbox" tabindex="0"
+                     aria-checked="${allShownChecked ? "true" : "false"}"
+                     aria-label="Select every article shown"><span>&#10003;</span></div>
                 <span class="mono" style="font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:var(--tx3);">${
                   s.loading ? "Loading…" : `${formatNumber(s.items.length)} of ${formatNumber(s.total)}`
                 }</span>
-              </label>
+              </div>
             </div>
             ${renderList()}
             ${
@@ -707,6 +902,35 @@ export function mountReview(root, { navigate }) {
       .join("");
   }
 
+  /**
+   * One row in the queue.
+   *
+   * KEYBOARD REACHABILITY IS THE POINT OF THIS SHAPE. Both controls in
+   * here used to be bare `<div>`s with a click listener and nothing
+   * else: no tabindex, no role, no aria state. On the app's PRIMARY
+   * triage screen, the one people sit in all day, you could not Tab to
+   * an article, open one, or tick a single checkbox without a mouse.
+   * `search.js` had already got this right for its own result rows
+   * (`role="button" tabindex="0"` plus an Enter/Space handler), which is
+   * what makes this an omission rather than a decision, so the pattern
+   * here is deliberately that one.
+   *
+   * WHY THE ROLES SIT ON THE TWO CHILDREN AND NOT ON THE ROW. The
+   * obvious move is `role="button"` on `.article-row` itself, but a row
+   * contains a checkbox, and a `button` may not contain a focusable
+   * descendant: the two would be announced as one confused control. So
+   * the row stays a plain flex container that keeps the whole-row click
+   * target mouse users already have (`data-row`), and the two real
+   * controls inside it are named separately: the checkbox is a
+   * `checkbox` with `aria-checked`, the headline block is a `button`
+   * with `aria-pressed` for "open in the reading pane". Tab reaches
+   * both, in reading order.
+   *
+   * `data-role` on each is not decoration. `captureFocus`/`restoreFocus`
+   * key off `data-role` or `id`, and every toggle here re-renders the
+   * whole list, so without a stable key a keyboard user would be thrown
+   * back to the top of the document on every single tick.
+   */
   function articleRowHtml(a) {
     const t = tier(a.score);
     const selected = a.id === s.selId;
@@ -714,12 +938,15 @@ export function mountReview(root, { navigate }) {
     const statusLabel = a.status === "approved" ? "Approved" : a.status === "rejected" ? "Rejected" : "";
     const statusBg = a.status === "approved" ? "var(--acsoft)" : "var(--redsoft)";
     const statusFg = a.status === "approved" ? "var(--actx)" : "var(--red)";
-    return `<div class="article-row ${selected ? "selected" : ""} ${a.status === "rejected" ? "rejected" : ""}" data-open="${a.id}">
-      <div class="article-check ${checked ? "checked" : ""}" data-check="${a.id}"><span>&#10003;</span></div>
-      <div style="flex:1;min-width:0;">
+    return `<div class="article-row ${selected ? "selected" : ""} ${a.status === "rejected" ? "rejected" : ""}" data-row="${a.id}">
+      <div class="article-check ${checked ? "checked" : ""}" data-check="${a.id}" data-role="check-${a.id}"
+           role="checkbox" tabindex="0" aria-checked="${checked ? "true" : "false"}"
+           aria-label="Select for bulk action: ${escapeHtml(a.title)}"><span>&#10003;</span></div>
+      <div style="flex:1;min-width:0;" data-open="${a.id}" data-role="row-${a.id}"
+           role="button" tabindex="0" aria-pressed="${selected ? "true" : "false"}">
         <div class="article-meta-row">
           <span class="tag">${escapeHtml(a.source)}</span>
-          <span class="pill" style="background:${t.bg};color:${t.color}"><span class="pill-dot" style="background:${t.color}"></span>${t.label} · ${a.score ?? " to "}</span>
+          <span class="pill" style="background:${t.bg};color:${t.color}"><span class="pill-dot" style="background:${t.color}"></span>${t.label} · ${a.score ?? "n/a"}</span>
           ${a.dupCount ? `<span class="pill" style="background:var(--acsoft);color:var(--actx);">+${a.dupCount}</span>` : ""}
           ${a.isStarred ? `<span style="font-size:11px;color:var(--amber);">&#9733;</span>` : ""}
           ${statusLabel ? `<span class="pill" style="background:${statusBg};color:${statusFg};text-transform:uppercase;letter-spacing:.6px;font-size:9px;">${statusLabel}</span>` : ""}
@@ -781,16 +1008,27 @@ export function mountReview(root, { navigate }) {
         ${
           s.dupOpen
             ? `<div class="stack" style="gap:7px;margin-top:9px;">${dups
-                .map(
-                  (d) => `<div class="peer-row">
+                .map((d) => {
+                  // Any dup request in flight disables every button in
+                  // the group, not just the row that was clicked: keep
+                  // and drop both rewrite the same `dup_group`, so two
+                  // overlapping requests would race for which article
+                  // ends up primary.
+                  const busy = s.dupBusyId !== null;
+                  const mine = String(s.dupBusyId) === String(d.id);
+                  return `<div class="peer-row">
               <span style="flex:0 0 114px;font-size:12px;font-weight:600;color:var(--actx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(d.source)}</span>
               <a href="${escapeHtml(d.url || "#")}" target="_blank" rel="noopener noreferrer" style="flex:1;min-width:0;font-size:12.5px;color:var(--tx2);">${escapeHtml(d.title)}</a>
               <div class="row" style="gap:6px;flex:0 0 auto;">
-                <button class="btn-sm" data-dup-keep="${d.id}">keep</button>
-                <button class="btn-sm" data-dup-drop="${d.id}">drop</button>
+                ${
+                  mine
+                    ? `<span class="mono" style="font-size:10.5px;color:var(--tx3);">working…</span>`
+                    : `<button class="btn-sm" data-dup-keep="${d.id}" ${busy ? "disabled" : ""}>keep</button>
+                       <button class="btn-sm" data-dup-drop="${d.id}" ${busy ? "disabled" : ""}>drop</button>`
+                }
               </div>
-            </div>`
-                )
+            </div>`;
+                })
                 .join("")}</div>`
             : ""
         }
@@ -811,13 +1049,29 @@ export function mountReview(root, { navigate }) {
             ? `<div class="stack" style="gap:7px;margin-top:9px;">${peers
                 .map((p) => {
                   const pt = tier(p.score);
+                  const busy = s.peerBusy.has(p.id);
+                  // The decision this row was given, if any. A peer row
+                  // carries no status of its own from the API, so this
+                  // is the only place the outcome can show.
+                  const decided = s.peerDecisions.get(p.id);
+                  const decidedFg = decided === "approved" ? "var(--actx)" : "var(--red)";
+                  const actions = busy
+                    ? `<span class="mono" style="font-size:10.5px;color:var(--tx3);">working…</span>`
+                    : decided
+                    ? `<span class="mono" style="font-size:9px;letter-spacing:.6px;text-transform:uppercase;color:${decidedFg};">${
+                        decided === "approved" ? "Approved" : "Rejected"
+                      }</span>
+                       <button class="btn-sm" data-peer-${decided === "approved" ? "reject" : "approve"}="${p.id}">${
+                        decided === "approved" ? "reject" : "approve"
+                      }</button>`
+                    : `<button class="btn-sm" data-peer-approve="${p.id}">approve</button>
+                       <button class="btn-sm" data-peer-reject="${p.id}">reject</button>`;
                   return `<div class="peer-row">
                 <span style="flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:${pt.color}"></span>
                 <span style="flex:0 0 102px;font-size:12px;font-weight:600;color:var(--actx);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(p.source)}</span>
                 <a href="${escapeHtml(p.url || "#")}" target="_blank" rel="noopener noreferrer" style="flex:1;min-width:0;font-size:12.5px;color:var(--tx2);">${escapeHtml(p.title)}</a>
                 <div class="row" style="gap:6px;flex:0 0 auto;">
-                  <button class="btn-sm" data-peer-approve="${p.id}">approve</button>
-                  <button class="btn-sm" data-peer-reject="${p.id}">reject</button>
+                  ${actions}
                 </div>
               </div>`;
                 })
@@ -920,21 +1174,46 @@ export function mountReview(root, { navigate }) {
     const clearFiltersBtn = root.querySelector("#clearFiltersBtn");
     if (clearFiltersBtn) clearFiltersBtn.addEventListener("click", resetFilters);
 
-    const selectAll = root.querySelector("[data-select-all]");
-    if (selectAll) selectAll.addEventListener("click", (e) => { e.stopPropagation(); toggleSelectAllShown(); });
+    // Space and Enter activate a `role="checkbox"` or a `role="button"`
+    // exactly as they would the real element, and Space must have its
+    // default suppressed or the queue scrolls a page every time somebody
+    // ticks a box. Same helper for all three controls below, so none of
+    // them can quietly grow a different key map.
+    const onActivate = (node, fn) => {
+      node.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        e.stopPropagation();
+        fn();
+      });
+    };
 
-    root.querySelectorAll("[data-open]").forEach((row) =>
+    const selectAll = root.querySelector("[data-select-all]");
+    if (selectAll) {
+      selectAll.addEventListener("click", (e) => { e.stopPropagation(); toggleSelectAllShown(); });
+      onActivate(selectAll, toggleSelectAllShown);
+    }
+
+    root.querySelectorAll("[data-row]").forEach((row) =>
       row.addEventListener("click", (e) => {
+        // Clicking anywhere in the row still opens the article, which is
+        // the mouse behaviour this screen has always had. The checkbox
+        // is the one part of the row that means something else.
         if (e.target.closest("[data-check]")) return;
-        selectArticle(Number(row.getAttribute("data-open")));
+        selectArticle(Number(row.getAttribute("data-row")));
       })
     );
-    root.querySelectorAll("[data-check]").forEach((chk) =>
+    root.querySelectorAll("[data-open]").forEach((body) =>
+      onActivate(body, () => selectArticle(Number(body.getAttribute("data-open"))))
+    );
+    root.querySelectorAll("[data-check]").forEach((chk) => {
+      const toggle = () => toggleCheck(Number(chk.getAttribute("data-check")));
       chk.addEventListener("click", (e) => {
         e.stopPropagation();
-        toggleCheck(Number(chk.getAttribute("data-check")));
-      })
-    );
+        toggle();
+      });
+      onActivate(chk, toggle);
+    });
 
     const loadMoreBtn = root.querySelector("#loadMoreBtn");
     if (loadMoreBtn) loadMoreBtn.addEventListener("click", () => fetchList({ append: true }));

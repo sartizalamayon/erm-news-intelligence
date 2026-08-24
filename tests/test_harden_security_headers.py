@@ -6,10 +6,8 @@ full reasoning).
 
 from __future__ import annotations
 
-import pytest
 from fastapi.testclient import TestClient
 
-from app.config import get_settings
 from app.main import create_app
 
 
@@ -37,25 +35,15 @@ def test_hsts_absent_outside_production_like_env(client):
     assert "strict-transport-security" not in response.headers
 
 
-@pytest.fixture
-def _production_env(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@localhost/db")
-    monkeypatch.setenv("SECRET_KEY", "test-secret")
-    monkeypatch.setenv("GROQ_API_KEY", "test-key")
-    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://frontend.example.com")
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
 
 
-def test_hsts_present_in_production(_production_env):
+def test_hsts_present_in_production(production_env):
     with TestClient(create_app()) as prod_client:
         response = prod_client.get("/healthz")
     assert response.headers["strict-transport-security"] == "max-age=63072000; includeSubDomains"
 
 
-def test_docs_disabled_in_production(_production_env):
+def test_docs_disabled_in_production(production_env):
     with TestClient(create_app()) as prod_client:
         assert prod_client.get("/docs").status_code == 404
         assert prod_client.get("/redoc").status_code == 404

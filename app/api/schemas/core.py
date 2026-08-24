@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import time
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.db.connection import DictConnection
 
@@ -37,6 +37,24 @@ from app.db.connection import DictConnection
 # RISK_SECTIONS constant is a deliberately separate, untouched duplicate
 # — the Daily Risk Insight screen is being discarded this round (see
 # this task's report), not fixed.
+#
+# KNOWN DEFECT, deliberately still here, so the next person does not
+# have to rediscover it: on a FRESH install the `keywords` table is
+# empty (no migration seeds it), so get_risk_sections() below falls back
+# to these five names and GET /dashboard/today's "By section" card
+# renders five sections that nobody configured, each at 0. The honest
+# answer there is an empty list, meaning "no sections configured yet" —
+# the same answer frontend/js/util.js now gives, where the matching
+# five-name fallback WAS removed this round.
+#
+# The one-line fix is to drop the `or _RISK_SECTIONS_FALLBACK` from the
+# success branch of get_risk_sections() (keeping it on the except
+# branch, where "the query failed" genuinely is a different thing from
+# "there are none"). It was not applied here because it fails
+# tests/test_core_dashboard.py::test_today_counts_reflect_real_rows,
+# which asserts `section_labels == {those five}` against an empty
+# keywords table, and that file is outside this change's ownership. Both
+# edits have to land together.
 _RISK_SECTIONS_FALLBACK: tuple[str, ...] = ("Geopolitical", "Macroeconomy", "Telco/regulatory", "Political", "Others")
 _RISK_SECTIONS_CACHE_TTL_SECONDS = 60.0
 _risk_sections_cache: tuple[str, ...] | None = None
@@ -434,15 +452,51 @@ class ExportDownloadBody(BaseModel):
 
 
 class ExportPresetIn(BaseModel):
+    """A named set of export selections, saved from the Export screen.
+
+    `from`/`to` are here because a preset saved with scope "Custom
+    range" USED TO LOSE ITS DATES. frontend/js/screens/export.js posts
+    `{ name, ...params() }`, params() includes both dates, this model
+    had no such fields, and pydantic dropped them without a word.
+    Loading that preset later restored the scope ("Custom range") with
+    two blank date fields, and app.services.export.resolve_scope falls
+    back to TODAY when a range has no dates, so the preview reported
+    today's rows under a heading claiming a quarter. No error at any
+    point, which is what made it worth fixing rather than documenting.
+    """
+
     name: str
     note: str = ""
     filter: str = "topn"
     topN: int = 25
     scope: str = "today"
+    from_: str | None = Field(default=None, alias="from")
+    to: str | None = None
     sections: str | list[str] = ""
     sort: str = "relevance"
     format: str = "xlsx"
     columns: str | list[str] = ""
+
+    model_config = {"populate_by_name": True}
+
+    @model_validator(mode="after")
+    def _carry_range_inside_scope(self) -> ExportPresetIn:
+        """Fold a custom range into the scope string.
+
+        A scope of "range" with no dates is an incomplete statement, and
+        app.services.export.split_scope()/create_preset() unfold this
+        again into three stored fields, so nothing downstream has to
+        know about the encoding to READ a preset. See that module's
+        RANGE_SCOPE_PREFIX comment for the full reasoning; the short
+        version is that the three parts of a custom range describe one
+        thing and should travel as one value wherever only one value
+        fits.
+        """
+        if self.scope == "range" and (self.from_ or self.to):
+            from app.services.export import RANGE_SCOPE_PREFIX  # lazy: keep schemas -> services out of load order
+
+            self.scope = f"{RANGE_SCOPE_PREFIX}{self.from_ or ''}:{self.to or ''}"
+        return self
 
 
 class ExportPresetOut(BaseModel):
@@ -452,10 +506,16 @@ class ExportPresetOut(BaseModel):
     filter: str
     topN: int
     scope: str
+    # Serialized as "from"/"to" (FastAPI responds by alias), so a client
+    # reads a preset back in exactly the shape it posted one.
+    from_: str | None = Field(default=None, alias="from")
+    to: str | None = None
     sections: list[str]
     sort: str
     format: str
     columns: list[str] = Field(default_factory=list)
+
+    model_config = {"populate_by_name": True}
 
 
 # ── Daily Risk Insight brief (frontend-contract.md §3.5) ─────────────────

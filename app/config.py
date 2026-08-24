@@ -34,7 +34,7 @@ Field groups map 1:1 to ADR decisions — nothing here is speculative:
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -42,6 +42,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.errors import ConfigurationError
 
 Environment = Literal["development", "test", "staging", "production"]
+
+# The set of email transports app.services.email knows how to call. Named
+# as its own alias rather than written inline on the field below so that
+# `validate_production_settings` can enumerate it with `get_args()` — see
+# `_EMAIL_PROVIDER_REQUIRED_ENV` for why that indirection is load-bearing
+# and not decoration.
+EmailProvider = Literal["resend", "brevo"]
 
 
 class Settings(BaseSettings):
@@ -195,7 +202,7 @@ class Settings(BaseSettings):
     # single switch app.services.email reads; Resend stays fully working
     # as the non-default alternative, nothing above this section is
     # touched.) ─────────────────────────────────────────────────────────
-    email_provider: Literal["resend", "brevo"] = Field(
+    email_provider: EmailProvider = Field(
         default="brevo",
         description="Which transport app.services.email.send_otp_email "
         "calls. 'brevo' is the default -- see this field group's header "
@@ -297,6 +304,95 @@ class Settings(BaseSettings):
         return hops if hops > 0 else 0
 
 
+# ── Email transport: what each `email_provider` choice cannot start
+# without ────────────────────────────────────────────────────────────
+#
+# Maps every member of `EmailProvider` to the (env var name, Settings
+# field name) pairs that must be non-empty for that transport to be able
+# to send a single message. `validate_production_settings` reads only the
+# entry for the SELECTED provider, so switching EMAIL_PROVIDER switches
+# which secrets are mandatory — the two Resend vars are genuinely inert
+# while Brevo is active, and vice versa, and neither should be able to
+# fail a deploy it has nothing to do with.
+#
+# WHAT THIS EXISTS TO PREVENT — the deploy this file shipped without it
+# would have been a silent, permanent lockout, not a visible outage:
+# `email_provider` defaults to "brevo", render.yaml declares
+# BREVO_API_KEY / BREVO_FROM_EMAIL as `sync: false` (i.e. the owner is
+# prompted for them, and can leave them blank), and nothing anywhere
+# checked. app/services/email.py treats "no key OR no from-address" as
+# unconfigured, and `_console_fallback_allowed` hard-disables the console
+# fallback in production/staging, so `send_otp_email` raises
+# ProviderPermanentError on every call. Meanwhile the ONLY admin account
+# (migrations/0009_seed_admin.sql) is seeded with no password_hash, so
+# OTP-to-email is the sole way to obtain one. Net effect: the blueprint
+# launches, `/health/ready` returns 200, Render reports the deploy live
+# and healthy — and nobody, including the owner, can ever log in. There
+# is no in-band recovery from that state: fixing it requires going back
+# to the Render dashboard and redeploying, having first worked out from
+# a generic "Email delivery is not configured" 502 what was wrong.
+#
+# WHY THIS IS DERIVED FROM THE `Literal` AND NOT HAND-LISTED: the
+# exhaustiveness guard immediately below turns "someone added a third
+# provider to `EmailProvider` and forgot it here" into an import-time
+# crash on a developer's machine, rather than into a provider whose
+# required secrets are silently never validated — which is precisely how
+# Brevo got here in the first place (it was added as an additive
+# owner-ruled switch alongside Resend; the production check simply never
+# learned about either).
+_EMAIL_PROVIDER_REQUIRED_ENV: dict[str, tuple[tuple[str, str], ...]] = {
+    "brevo": (
+        ("BREVO_API_KEY", "brevo_api_key"),
+        ("BREVO_FROM_EMAIL", "brevo_from_email"),
+    ),
+    "resend": (
+        ("RESEND_API_KEY", "resend_api_key"),
+        ("RESEND_FROM_EMAIL", "resend_from_email"),
+    ),
+}
+
+_UNMAPPED_EMAIL_PROVIDERS = tuple(
+    provider for provider in get_args(EmailProvider) if provider not in _EMAIL_PROVIDER_REQUIRED_ENV
+)
+if _UNMAPPED_EMAIL_PROVIDERS:  # pragma: no cover - a source-level mistake, not a runtime state
+    # Deliberately a module-level raise, at import, in every environment.
+    # A softer form (log a warning, skip the unknown provider, assert only
+    # in tests) would reproduce the exact failure this whole block exists
+    # to close: a transport that production believes is configured and
+    # that has never once been checked. Adding a provider is a two-line
+    # change — the Literal and this dict — and this makes forgetting the
+    # second line impossible to ship rather than merely discouraged.
+    raise ConfigurationError(
+        "EmailProvider gained "
+        + ", ".join(sorted(_UNMAPPED_EMAIL_PROVIDERS))
+        + " without a matching entry in _EMAIL_PROVIDER_REQUIRED_ENV. Add the env "
+        "vars that provider cannot send without, so production startup validates "
+        "them — see this constant's comment for the lockout this prevents."
+    )
+
+
+def _is_valid_fernet_key(key: str) -> bool:
+    """Whether `key` is something `cryptography.fernet.Fernet` will
+    actually accept — 32 url-safe-base64-encoded bytes.
+
+    Imported inside the function on purpose. `app.config` is imported by
+    essentially everything (including the batch entrypoint and every
+    test module), and `cryptography` is a comparatively heavy import for
+    a check that only ever runs once, in production, at startup. Nothing
+    else in this module needs it.
+    """
+    from cryptography.fernet import Fernet
+
+    try:
+        Fernet(key.encode("utf-8"))
+    except (TypeError, ValueError):
+        # binascii.Error (raised for non-base64 input) is itself a
+        # ValueError subclass, so both "wrong alphabet" and "right
+        # alphabet, wrong length" land here.
+        return False
+    return True
+
+
 def validate_production_settings(settings: Settings) -> None:
     """Fail fast at process startup when required configuration is
     missing in production. Deliberately NOT a pydantic validator — those
@@ -337,8 +433,47 @@ def validate_production_settings(settings: Settings) -> None:
     ):
         missing.append("one of MISTRAL_API_KEY / GEMINI_API_KEY / GROQ_API_KEY / NVIDIA_API_KEY")
 
+    # The transport `email_provider` actually selects must be able to
+    # send. See _EMAIL_PROVIDER_REQUIRED_ENV's comment for the full
+    # story: a blank key here is not a degraded email feature, it is a
+    # permanent, silent lockout of every account including the seeded
+    # admin, on a deploy Render reports as healthy. The env var name is
+    # named exactly, and the reason it is required is named with it,
+    # because the operator reading this message is looking at a Render
+    # dashboard with ~12 blank secret fields and needs to know which one.
+    for env_name, field_name in _EMAIL_PROVIDER_REQUIRED_ENV[settings.email_provider]:
+        if not getattr(settings, field_name, ""):
+            missing.append(f"{env_name} (required because EMAIL_PROVIDER={settings.email_provider})")
+
     if missing:
         raise ConfigurationError("Missing required production configuration: " + ", ".join(missing))
+
+    # SECRET_KEY being non-empty is not the same as SECRET_KEY being
+    # usable, and the gap between those two is a production-only,
+    # delayed-action failure. `app.db.crypto._fernet` calls
+    # `Fernet(key.encode())`, which requires exactly 32 url-safe
+    # base64-encoded bytes and raises ValueError on anything else — but
+    # nothing calls it at boot. Any other string (a password, a UUID, a
+    # truncated paste) therefore starts the process cleanly, passes
+    # `/health/ready`, serves traffic for as long as nobody touches
+    # provider credentials, and then throws the first time an admin
+    # saves an LLM provider API key — surfacing as a 500 in the admin UI,
+    # a long way in time and space from the env var that caused it.
+    # Checked here, at the same moment as everything else the deploy
+    # cannot run without, and answered with the generator command rather
+    # than just "invalid": the command is already in `secret_key`'s own
+    # field description, so repeating it here costs nothing and saves the
+    # operator a trip into the source.
+    if not _is_valid_fernet_key(settings.secret_key):
+        raise ConfigurationError(
+            "SECRET_KEY is not a valid Fernet key (it must be 32 url-safe "
+            "base64-encoded bytes). Admin-entered LLM provider API keys are "
+            "encrypted at rest with it (ADR §9.1), so an invalid value fails "
+            "the first time an admin saves a key, not at startup — which is "
+            "why this is checked here. Generate a valid one with: "
+            'python -c "from cryptography.fernet import Fernet; '
+            'print(Fernet.generate_key().decode())"'
+        )
 
 
 @lru_cache

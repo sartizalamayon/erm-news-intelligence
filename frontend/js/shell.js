@@ -19,7 +19,7 @@
 import { state, setState, subscribe, NAV_STRUCTURE, SCREEN_TITLES } from "./state.js";
 import { getTheme, applyTheme, themeGlyph } from "./theme.js";
 import { logout } from "./auth.js";
-import { escapeHtml } from "./util.js";
+import { escapeHtml, fetchDashboardToday } from "./util.js";
 import { mountScreen } from "./router.js";
 import { api } from "./api.js";
 import { mountAccountPanel } from "./components/accountPanel.js";
@@ -61,14 +61,41 @@ export function mountShell(root, { onSignOut }) {
   renderChrome();
   syncScreen();
   syncAccountPanel();
-  subscribe(() => {
+  // The unsubscribe handle is KEPT, and destroy() below is what makes
+  // keeping it matter. This used to be `subscribe(() => {...})` with the
+  // return value dropped and no destroy() on the returned object at all,
+  // so main.js's defensive `currentMount.destroy()` found nothing to
+  // call and silently did nothing. Every sign-out-then-sign-in cycle
+  // therefore left another permanent listener behind, each one still
+  // holding the PREVIOUS shell's railEl/topbarEl and re-running
+  // renderChrome() against detached nodes on every state change — and
+  // this shell publishes state every 2 seconds from the run-status
+  // poller, so the cost compounds for as long as the tab stays open.
+  const unsubscribe = subscribe(() => {
     renderChrome();
     syncScreen();
     syncAccountPanel();
   });
   refreshShellCounts();
   startRunStatusPolling();
-  return { navigate };
+  return {
+    navigate,
+    destroy() {
+      unsubscribe();
+      stopRunStatusPolling();
+      if (currentMount && currentMount.destroy) currentMount.destroy();
+      currentMount = null;
+      // Cleared so the NEXT mountShell() actually mounts a screen:
+      // syncScreen() short-circuits when the requested screen matches
+      // what it last mounted, and those are module-level, not per-mount.
+      currentScreenKey = null;
+      currentDashMode = null;
+      if (accountMount && accountMount.destroy) accountMount.destroy();
+      accountMount = null;
+      accountOpenState = false;
+      shellRoot = null;
+    },
+  };
 }
 
 // BUGFIX-NAV: the header's live-status pill used to only ever reflect
@@ -91,6 +118,16 @@ function startRunStatusPolling() {
   if (runPollTimer) return;
   runPollTimer = setInterval(pollRunStatus, 2000);
   pollRunStatus();
+}
+
+// Stopped when the shell is torn down (sign-out). pollRunStatus() is
+// already gated on `state.user.is_admin` and so goes quiet on its own
+// once the user is null, but a timer that outlives the thing that
+// started it is exactly what left a subscriber behind above.
+function stopRunStatusPolling() {
+  if (!runPollTimer) return;
+  clearInterval(runPollTimer);
+  runPollTimer = null;
 }
 
 // THE ONLY poller for run status in the whole app.
@@ -394,9 +431,15 @@ function todayLabel() {
 // dashboard summary endpoint, if it exists. Silent no-op on failure —
 // this is shell chrome, not worth an error banner if the (currently
 // stub) dashboard API isn't wired yet.
+//
+// Goes through util.js's shared, once-per-page-load fetch rather than
+// calling api.get() directly: util.js's ensureRiskSections() wants the
+// same payload at the same moment, and issuing GET /dashboard/today
+// twice on every boot spends two of the 120 requests/minute this file
+// spends the rest of its comments protecting.
 async function refreshShellCounts() {
   try {
-    const data = await api.get("/dashboard/today");
+    const data = await fetchDashboardToday();
     if (data && typeof data === "object") {
       const patch = {};
       if ("pendingCount" in data) patch.pendingCount = data.pendingCount;

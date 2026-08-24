@@ -22,7 +22,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.deps import AuthenticatedUser, get_current_user
-from app.config import get_settings
 from app.main import create_app
 
 ADMIN = AuthenticatedUser(id=1, email="admin@grameenphone.com", role="admin", display_name="Admin", session_id=1)
@@ -135,20 +134,10 @@ def test_unmodeled_exception_returns_generic_500(client, monkeypatch: pytest.Mon
     assert "Traceback" not in response.text
 
 
-@pytest.fixture
-def _production_env(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@localhost/db")
-    monkeypatch.setenv("SECRET_KEY", "test-secret")
-    monkeypatch.setenv("GROQ_API_KEY", "test-key")
-    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://frontend.example.com")
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
 
 
 def test_unmodeled_exception_returns_generic_500_in_production_too(
-    _production_env, monkeypatch: pytest.MonkeyPatch
+    production_env, monkeypatch: pytest.MonkeyPatch
 ):
     import app.api.routers.health as health_router_module
     import app.services.admin as admin_service_module

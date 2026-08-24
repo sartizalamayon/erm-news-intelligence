@@ -724,15 +724,43 @@ def run_llm_enrichment(
                     logger.warning("judge_batch_failed_leaving_unscored", extra={"batch_size": len(chunk)})
                     judge_calls.record(ok=False, error=str(error) if error else "no judgments returned")
                     continue
-                judge_calls.record(ok=True)
+                # An item the model skipped comes back as
+                # `parsing.NO_SCORE` rather than as the old
+                # `(5, "no score returned")` — see the block comment at
+                # the top of app/services/llm/parsing.py. Writing that 5
+                # put a GREEN "Low" chip on an article no model ever
+                # looked at, and moved the CRO's mean-severity boards
+                # with it. Skip the row instead: `llm_score IS NULL`
+                # keeps it pending and inside the next run's selection,
+                # so the only cost is a retry.
+                missing = parsing.count_unscored(judgments)
+                if missing:
+                    logger.warning(
+                        "judge_batch_partial_leaving_items_unscored",
+                        extra={"batch_size": len(chunk), "missing": missing},
+                    )
+                    # ok=False on purpose. A call that answered for 7 of
+                    # 10 headlines is not a call that succeeded, and
+                    # `StageCalls` is the ONLY thing standing between the
+                    # operator and a run panel that says "done" over
+                    # silently-unscored articles.
+                    judge_calls.record(
+                        ok=False, error=f"{missing} of {len(chunk)} item(s) came back without a score"
+                    )
+                else:
+                    judge_calls.record(ok=True)
+                written = 0
                 for a, j in zip(chunk, judgments, strict=False):
+                    if parsing.is_unscored(j):
+                        continue
                     a["llm_score"] = j.score
                     a["llm_reason"] = j.reason
                     conn.execute(
                         "UPDATE articles SET llm_score=%s, llm_reason=%s WHERE id=%s", (j.score, j.reason, a["id"])
                     )
+                    written += 1
                 conn.commit()
-                scored += len(chunk)
+                scored += written
             if progress:
                 progress(scored, len(articles), "Scoring relevance")
 

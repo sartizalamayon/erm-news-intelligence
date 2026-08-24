@@ -78,43 +78,64 @@ def test_parse_judge_batch_clamps_out_of_range_scores() -> None:
     assert result[1].score == 1
 
 
-def test_parse_judge_batch_missing_index_defaults_to_neutral() -> None:
+# ── judge_batch's ONE deliberate divergence from the oracle ─────────────
+#
+# The four tests below used to assert legacy's frozen fallback: a
+# malformed body scored the whole batch 5, and a skipped index scored
+# that item 5. They were rewritten when that fallback was recognised as
+# a defect rather than a quirk — see the block comment at the top of
+# app/services/llm/parsing.py for what it cost. `ref.parse_judge_batch`
+# (tests/helpers/legacy_reference.py) is untouched and still documents
+# the legacy behaviour; these tests now assert where and why the real
+# module walks away from it, so the divergence is deliberate and
+# recorded rather than accidental.
+
+
+def test_parse_judge_batch_missing_index_comes_back_unscored_not_neutral() -> None:
     raw = judge_batch_response([(1, 8, "only one entry")])
     result = parsing.parse_judge_batch(raw, item_count=3)
     assert result[0].score == 8
-    assert result[1] == Judgment(relevant=True, score=5, reason="no score returned")
-    assert result[2] == Judgment(relevant=True, score=5, reason="no score returned")
+    assert parsing.is_unscored(result[1]) and parsing.is_unscored(result[2])
+    assert parsing.count_unscored(result) == 2
+    # The legacy oracle still says 5 here. That difference is the fix.
+    assert [j.score for j in ref.parse_judge_batch(raw, item_count=3)] == [8, 5, 5]
 
 
 @pytest.mark.parametrize("mode", FAILURE_MODES)
-def test_parse_judge_batch_failure_modes_match_oracle_fallback_shape(mode: str) -> None:
+def test_parse_judge_batch_failure_modes_never_produce_a_score(mode: str) -> None:
     raw = _generate_raw(mode, responses=lambda p, s: judge_batch_response([(1, 8, "x"), (2, 4, "y")]))
     item_count = 2
     if raw is None:
-        # transport-level failure — the CALLER (LLMClient) wraps this,
-        # not parse_judge_batch itself; assert the exact whole-batch
-        # fallback shape both sides agree on.
-        result = [Judgment(relevant=True, score=5, reason="llm error: simulated") for _ in range(item_count)]
-        assert all(j.score == 5 and j.relevant is True for j in result)
+        # Transport-level failure: the CALLER (LLMClient.judge_batch)
+        # re-raises, so parse_judge_batch is never reached at all.
         return
-    result = parsing.parse_judge_batch(raw, item_count)
-    oracle = ref.parse_judge_batch(raw, item_count)
-    assert [(j.score, j.relevant) for j in result] == [(j.score, j.relevant) for j in oracle]
+    with pytest.raises(parsing.UnusableJudgeResponse):
+        parsing.parse_judge_batch(raw, item_count)
 
 
-def test_parse_judge_batch_malformed_json_falls_back_to_neutral_for_every_item() -> None:
+def test_parse_judge_batch_prose_wrapped_json_is_a_failure_not_a_batch_of_fives() -> None:
+    """The realistic trigger: HTTP 200, model ignored "JSON only"."""
     fake = FakeLLMProvider(mode="malformed_json", responses=lambda p, s: judge_batch_response([(1, 8, "x")]))
     raw = fake._generate("prompt", system="system", fmt="json")
-    result = parsing.parse_judge_batch(raw, item_count=3)
-    assert len(result) == 3
-    assert all(j.score == 5 and j.relevant is True and j.reason.startswith("llm error:") for j in result)
+    with pytest.raises(parsing.UnusableJudgeResponse):
+        parsing.parse_judge_batch(raw, item_count=3)
 
 
-def test_parse_judge_batch_truncated_falls_back_to_neutral() -> None:
+def test_parse_judge_batch_truncated_is_a_failure_not_a_batch_of_fives() -> None:
     fake = FakeLLMProvider(mode="truncated", responses=lambda p, s: judge_batch_response([(1, 8, "x"), (2, 7, "y")]))
     raw = fake._generate("prompt", system="system", fmt="json")
-    result = parsing.parse_judge_batch(raw, item_count=2)
-    assert all(j.score == 5 for j in result)
+    with pytest.raises(parsing.UnusableJudgeResponse):
+        parsing.parse_judge_batch(raw, item_count=2)
+
+
+def test_parse_judge_batch_json_that_is_not_this_calls_answer_is_a_failure() -> None:
+    """A proxy error page that happens to be valid JSON.
+
+    It parses, it has no `scores`, and under the old contract every
+    article in the chunk came back scored 5.
+    """
+    with pytest.raises(parsing.UnusableJudgeResponse):
+        parsing.parse_judge_batch('{"error": {"message": "upstream unavailable"}}', item_count=10)
 
 
 # ── cluster_topics_chunk ─────────────────────────────────────────────────

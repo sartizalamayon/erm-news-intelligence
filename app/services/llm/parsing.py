@@ -44,6 +44,80 @@ TRANSLATE_STRIP_CHARS = "\"“”'"  # .strip('"“”\'')  (llm.py:657)
 DRAFT_BULLET_STRIP_CHARS = "•-* "  # .lstrip("•-* ")  (llm.py:691)
 
 
+# ── The one place this module deliberately BREAKS parity with legacy ───
+#
+# Everything else in this file is a faithful port whose quirks are
+# frozen on purpose. `judge_batch` is not, any more, and the reason is
+# that its frozen fallback manufactured a MEASUREMENT.
+#
+# Legacy's contract said: on any parse failure, hand every item back as
+# `Judgment(relevant=True, score=5, reason="llm error: ...")`, and hand
+# any item the model skipped back as `(5, "no score returned")`. Both
+# paths RETURN NORMALLY. `app.services.enrichment`'s judge step cannot
+# tell them from a real verdict, so it does
+# `UPDATE articles SET llm_score=5` for the whole chunk, `StageCalls`
+# records `ok=True`, and the run panel prints "done".
+#
+# 5 is not an inert placeholder in this product. It is the bottom of the
+# GREEN "Low" band: the article shows up in the review queue as a scored
+# chip, it counts green in `/dashboard/today`'s relevance mix, it lands
+# in band `low` in `rollup_monthly_score_band`, and it moves
+# `score_sum`/`scored_count` — i.e. the mean severity on the CRO's
+# Economy and Telecom boards. A whole day's articles can be scored 5 by
+# a proxy returning an HTML error page with HTTP 200, or by a model that
+# wraps its JSON in a sentence of prose, and every surface in the
+# product will report that day as normal.
+#
+# A TRANSPORT failure was always handled correctly — `LLMClient.judge_batch`
+# re-raises it, `enrichment` leaves the batch unscored and records the
+# failure. These two paths are the same failure arriving through a
+# different door, so they now behave the same way:
+#
+#   * an unusable response body    -> raise `UnusableJudgeResponse`;
+#     the batch is left unscored, exactly as a 500 would leave it.
+#   * an item the model skipped    -> that ONE item comes back as
+#     `NO_SCORE`, which `enrichment` writes nothing for.
+#
+# An unscored row is not lost: `llm_score IS NULL` keeps it pending and
+# in the next run's selection (`_select_where`), so the cost of failing
+# honestly is one retry, and the cost of the old behaviour was a
+# fabricated number nobody could ever spot.
+#
+# The legacy helpers below (`judge_batch_whole_call_fallback`,
+# `JUDGE_BATCH_MISSING_INDEX`) are kept, unused by the live path, purely
+# so `tests/helpers/legacy_reference.py`'s oracle and the parity suite
+# still have this module's copy of the behaviour they document.
+
+
+class UnusableJudgeResponse(Exception):
+    """The provider answered, and the answer cannot be read as scores.
+
+    Raised instead of returning a value because there is no value that
+    honestly represents "no scores" in a `list[Judgment]` — see the
+    block comment above. `LLMClient.judge_batch` does not catch it (its
+    own `try` covers only the transport call), so it propagates to
+    `enrichment`'s judge step, which already knows how to leave a batch
+    unscored and record the failure.
+    """
+
+
+# The score a `Judgment` carries when the model did not answer for that
+# item at all. Out of band by construction: `clamp_score` can only ever
+# produce 1-10, so 0 cannot collide with a real verdict, and the
+# `articles.llm_score` column never sees it — `enrichment` skips the row.
+NO_SCORE = 0
+NO_SCORE_REASON = "no score returned for this item"
+
+
+def no_score_judgment() -> Judgment:
+    return Judgment(relevant=False, score=NO_SCORE, reason=NO_SCORE_REASON)
+
+
+def is_unscored(judgment: Judgment) -> bool:
+    """True for a `Judgment` the model never actually produced."""
+    return judgment.score <= NO_SCORE
+
+
 def clamp_score(raw_score: Any) -> int:
     """`max(1, min(10, int(round(float(data.get("score", 5))))))`
     (p3-contract.md §3, judge()/judge_batch() row).
@@ -143,12 +217,19 @@ def parse_judge(raw: str) -> Judgment:
 
 
 def parse_judge_batch(raw: str, item_count: int) -> list[Judgment]:
-    """Port of `judge_batch()`'s post-`_generate()` logic (p3-contract.md
-    §1.2). Any exception during parsing (bad JSON, wrong shape) -> the
-    WHOLE batch falls back to neutral score 5 with the exception string
-    as every item's reason. On success, missing/mis-numbered indices
-    default PER-ITEM to (5, "no score returned") — a much finer failure
-    grain than the whole-call fallback.
+    """Parse `judge_batch()`'s JSON into one `Judgment` per input item,
+    IN INPUT ORDER (p3-contract.md §1.2 for the wire shape).
+
+    DELIBERATELY NOT the frozen legacy fallback behaviour — see the
+    "the one place this module deliberately BREAKS parity" block near
+    the top of this file for the full reasoning and what the old
+    behaviour cost.
+
+    Raises `UnusableJudgeResponse` if the body cannot be read as scores
+    at all (not JSON, not an object, an entry whose `n`/`score` is not a
+    number). Items the model simply omitted come back as `NO_SCORE`
+    judgments — the batch still yields the verdicts it did return, and
+    the caller writes nothing for the rest.
     """
     try:
         data = json.loads(raw)
@@ -157,13 +238,35 @@ def parse_judge_batch(raw: str, item_count: int) -> list[Judgment]:
             n = int(entry.get("n", 0))
             sc = clamp_score(entry.get("score", JUDGE_SCORE_DEFAULT))
             by_n[n] = (sc, str(entry.get("reason", ""))[:JUDGE_REASON_MAXLEN])
-        out = []
-        for i in range(item_count):
-            sc, reason = by_n.get(i + 1, JUDGE_BATCH_MISSING_INDEX)
-            out.append(Judgment(relevant=(sc >= 5), score=sc, reason=reason))
-        return out
-    except Exception as e:  # noqa: BLE001
-        return judge_batch_whole_call_fallback(list(range(item_count)), e)
+    except Exception as exc:  # noqa: BLE001 - every parse failure is one outcome: unusable
+        raise UnusableJudgeResponse(
+            f"could not read scores from a {len(raw)}-char response: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    out = []
+    for i in range(item_count):
+        scored = by_n.get(i + 1)
+        if scored is None:
+            out.append(no_score_judgment())
+            continue
+        sc, reason = scored
+        out.append(Judgment(relevant=(sc >= 5), score=sc, reason=reason))
+    # A response that answered for NOTHING is an unusable response, not
+    # a batch of misses: the realistic cause is a body that parsed as
+    # JSON but is not this call's answer at all (a proxy's `{"error":
+    # ...}` page, or a model that replied with an empty envelope), and
+    # calling that "the model skipped all ten" would understate it in
+    # the run panel.
+    if item_count and not by_n:
+        raise UnusableJudgeResponse(
+            f"response parsed as JSON but carried no usable score entries for {item_count} item(s)"
+        )
+    return out
+
+
+def count_unscored(judgments: list[Judgment]) -> int:
+    """How many items in a parsed batch the model never answered for."""
+    return sum(1 for j in judgments if is_unscored(j))
 
 
 def parse_translate_titles_batch(raw: str, titles: list[str]) -> list[str]:

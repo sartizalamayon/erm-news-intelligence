@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.services.llm.parsing import UnusableJudgeResponse
 from app.services.llm.provider import LLMClient
 from app.services.llm.types import Judgment, Summary
 from tests.helpers.fake_llm import (
@@ -74,11 +75,36 @@ def test_judge_batch_transport_failure_raises_for_stage_calls_accounting() -> No
     assert len(fake.call_log) == 1  # the call WAS attempted before failing
 
 
-def test_judge_batch_malformed_json_falls_back_to_neutral() -> None:
+def test_judge_batch_malformed_json_raises_instead_of_inventing_a_score() -> None:
+    """This test used to assert the opposite, and asserting it is what
+    kept the defect alive.
+
+    The old contract -- ported verbatim from legacy -- was that an
+    unreadable response body came back as
+    `Judgment(relevant=True, score=5, reason="llm error: ...")`, and
+    RETURNED NORMALLY. `app.services.enrichment` therefore could not
+    distinguish it from a real verdict: it wrote `llm_score=5` for the
+    whole chunk, recorded the stage call as `ok=True`, and the run panel
+    printed "done".
+
+    5 is not inert. It is the bottom of the GREEN "Low" band, so those
+    articles showed as scored chips in the review queue, counted green
+    in `/dashboard/today`'s relevance mix, landed in band `low` in
+    `rollup_monthly_score_band`, and moved `score_sum`/`scored_count` --
+    the mean severity on the CRO's Economy and Telecom boards. A proxy
+    returning an HTML error page with HTTP 200 was enough to score a
+    whole day that way, invisibly.
+
+    A transport failure was always handled correctly (it raises, and the
+    batch is left unscored). An unusable BODY is the same failure
+    arriving through a different door, so it now behaves the same way.
+    Nothing is lost by failing honestly: `llm_score IS NULL` keeps the
+    row pending and inside the next run's selection, so the cost is one
+    retry.
+    """
     client, _ = _client(mode="malformed_json", responses=lambda p, s: judge_batch_response([(1, 8, "x")]))
-    result = client.judge_batch([{"title_en": "A"}])
-    assert result == [Judgment(relevant=True, score=5, reason=result[0].reason)]
-    assert result[0].reason.startswith("llm error:")
+    with pytest.raises(UnusableJudgeResponse):
+        client.judge_batch([{"title_en": "A"}])
 
 
 def test_judge_batch_system_includes_fixed_guide() -> None:

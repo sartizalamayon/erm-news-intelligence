@@ -67,6 +67,39 @@ SCOPE_LABELS = {
     "month": "this month",
 }
 
+# "The caller explicitly selected NO sections", as a single wire value.
+#
+# `sections=""`, and an absent `sections` param, have always meant "no
+# section filter, take everything", and they must keep meaning that:
+# every API caller that simply omits the parameter depends on it, as do
+# the existing tests in tests/test_core_export.py.
+#
+# But the Export screen also lets a user untick every section chip, and
+# that is the OPPOSITE instruction. It used to serialise to that same
+# empty string (frontend/js/api.js drops empty-string query params, the
+# router's default is `sections: str = ""`, `_split_list` turns it into
+# `[]`, and `_scope_where` below then skipped the filter entirely), so
+# unticking everything made the row count RISE to the unfiltered total
+# and produced a spreadsheet containing every section while the screen's
+# own recap line read "Sections: none selected". A file that goes to a
+# board asserting one scope and carrying another is the worst kind of
+# wrong, because nothing about it looks wrong.
+#
+# So an explicit empty selection needs a value of its own, and this is
+# it. Kept identical to frontend/js/screens/export.js's `NO_SECTIONS`,
+# which tests/frontend/export_sections.test.mjs pins by reading both
+# files.
+#
+# The one ambiguity, stated rather than hidden: section names are
+# whatever an admin types (app.services.admin stores `keywords.section`
+# verbatim), so an admin CAN create a section literally called
+# "__none__". When they do, this token wins and that section cannot be
+# exported on its own. That is the deliberate trade: the wire meaning of
+# a fixed protocol value must not depend on the contents of a table an
+# admin edits, or the same request would mean different things on
+# different deployments.
+NO_SECTIONS_TOKEN = "__none__"
+
 SELECT_COLUMNS = (
     "a.id, a.url, a.source, a.title, a.title_en, a.published, a.day, a.sections, a.keywords, "
     "a.llm_score, a.llm_reason, a.also_in, a.review_status, COALESCE(ab.content_text, '') AS content_text"
@@ -113,8 +146,52 @@ def _tier_label(score: float | None) -> str:
     return "Least"
 
 
+# A custom date range, carried INSIDE the scope string as
+# "range:2026-07-01:2026-09-30".
+#
+# Why a composite value exists at all: `scope="range"` on its own is an
+# incomplete statement. It names a window shape and omits the window,
+# and resolve_scope() below has to fall back to today when the dates are
+# missing, which is silent and wrong-looking rather than loud and wrong.
+# Anywhere the three parts can travel together they should, and the
+# saved-preset path is exactly where they could not: an export preset
+# saved with scope "Custom range" and 1 Jul to 30 Sep came back with the
+# scope intact and both dates gone, so loading it previewed TODAY's rows
+# under a heading that claimed a quarter, with no error at any point.
+#
+# app.api.schemas.core.ExportPresetIn folds a preset's `from`/`to` into
+# this form on the way in; create_preset() below unfolds it again and
+# stores the three fields separately, so a stored preset and the
+# ExportPresetOut a client reads back are both plain and explicit.
+# resolve_scope() understands the composite form too, so the value is
+# never a private arrangement between two modules: it means the same
+# thing everywhere a scope is accepted.
+RANGE_SCOPE_PREFIX = "range:"
+
+
+def split_scope(scope: str) -> tuple[str, str | None, str | None]:
+    """Split "range:FROM:TO" into ("range", FROM, TO).
+
+    Any other scope is returned unchanged with no dates. Either half may
+    be blank ("range::2026-09-30"), which yields None for that end and
+    lets the caller's own from/to fill it in.
+    """
+    if scope and scope.startswith(RANGE_SCOPE_PREFIX):
+        parts = scope.split(":")
+        frm = parts[1] if len(parts) > 1 and parts[1] else None
+        to = parts[2] if len(parts) > 2 and parts[2] else None
+        return "range", frm, to
+    return scope, None, None
+
+
 def resolve_scope(scope: str, date_from: str | None, date_to: str | None) -> tuple[date, date, str]:
     today = _today()
+    # Explicit query params win over dates carried in the scope string;
+    # the composite form is a fallback for callers that only have one
+    # field to put a scope in, not a second way to override.
+    scope, scope_from, scope_to = split_scope(scope)
+    date_from = date_from or scope_from
+    date_to = date_to or scope_to
     if scope == "yesterday":
         d = today - timedelta(days=1)
         return d, d, SCOPE_LABELS["yesterday"]
@@ -158,7 +235,15 @@ def _starred_ids(conn: DictConnection) -> list[int]:
 def _scope_where(day_from: date, day_to: date, sections: list[str]) -> tuple[str, dict[str, Any]]:
     clauses = ["a.day >= %(day_from)s", "a.day <= %(day_to)s", "COALESCE(a.is_primary, TRUE) = TRUE"]
     params: dict[str, Any] = {"day_from": day_from, "day_to": day_to}
-    if sections:
+    if sections == [NO_SECTIONS_TOKEN]:
+        # An explicit empty selection: match nothing, in the counts and
+        # in the rows alike, so the preview's number and the file that
+        # follows it agree. Checked BEFORE the name-matching branch
+        # below and only when the token is the entire selection, so a
+        # deployment that happens to have a section named "__none__"
+        # cannot turn this protocol value back into a name lookup.
+        clauses.append("FALSE")
+    elif sections:
         clauses.append(
             "EXISTS (SELECT 1 FROM unnest(string_to_array(a.sections, ', ')) sec WHERE sec = ANY(%(sections)s))"
         )
@@ -344,8 +429,20 @@ def list_presets(conn: DictConnection) -> list[dict[str, Any]]:
 def create_preset(
     conn: DictConnection, *, name: str, note: str, filter: str, topN: int, scope: str,
     sections: list[str], sort: str, format: str, columns: list[str] | None = None,
+    date_from: str | None = None, date_to: str | None = None,
 ) -> dict[str, Any]:
     preset_id = uuid.uuid4().hex[:12]
+    # Unfold "range:FROM:TO" (see RANGE_SCOPE_PREFIX) so what is STORED
+    # is always the plain three fields. A preset is read back far more
+    # often than it is written, and a client that has to know about a
+    # composite encoding to load one is a client that will eventually
+    # get it wrong.
+    scope, scope_from, scope_to = split_scope(scope)
+    # An explicitly-empty section selection is stored as the empty list
+    # it means, not as the token that carried it. The token is a wire
+    # value for a request; a preset is a saved selection, and an empty
+    # selection restores as an empty selection with no decoding needed.
+    stored_sections = [] if list(sections) == [NO_SECTIONS_TOKEN] else list(sections)
     data = {
         "id": preset_id,
         "name": name,
@@ -353,7 +450,9 @@ def create_preset(
         "filter": filter,
         "topN": topN,
         "scope": scope,
-        "sections": sections,
+        "from": date_from or scope_from,
+        "to": date_to or scope_to,
+        "sections": stored_sections,
         "sort": sort,
         "format": format,
         "columns": resolve_columns(columns),

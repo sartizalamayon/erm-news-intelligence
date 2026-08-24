@@ -37,7 +37,16 @@
 // it.
 
 import { api } from "../api.js";
-import { escapeHtml, fmtErr, notWiredBanner, skeletonRows, pctOfMax, RISK_SECTIONS } from "../util.js";
+import {
+  escapeHtml,
+  fmtErr,
+  notWiredBanner,
+  skeletonRows,
+  pctOfMax,
+  RISK_SECTIONS,
+  ensureRiskSections,
+  riskSectionsStatus,
+} from "../util.js";
 
 // The pipeline, in the order it runs, with each stage explained for the
 // person who edits these: a risk analyst, not an engineer. Every "when"
@@ -137,7 +146,9 @@ export function mountPrompts(root) {
     configError: null,
     drafts: {}, // field -> textarea contents
     notes: {}, // field -> { text, ok }
-    versions: {}, // field -> [{version, ...}]
+    versions: {}, // field -> [{version, ...}] once loaded; the KEY IS ABSENT until then
+    versionsLoading: {}, // field -> bool, in-flight guard for loadVersions
+    versionsError: {}, // field -> ApiError, so a failure stops re-firing
     versionsOpen: {}, // field -> bool
     editorOpen: {}, // field -> bool
     candidates: [],
@@ -153,6 +164,17 @@ export function mountPrompts(root) {
   render();
   loadConfig();
   loadCandidates();
+  // The candidate rows carry a section picker, and its options are the
+  // configured sections. This screen is directly routable, so it cannot
+  // assume the Dashboard has already been visited: without this it
+  // rendered util.js's hardcoded five-name fallback, and adding a
+  // candidate keyword filed it under a section that may not exist. A
+  // keyword in a non-existent section never matches anything and is
+  // invisible until someone wonders why a term stopped working, which
+  // is the exact failure the select was introduced to prevent.
+  ensureRiskSections().then(() => {
+    if (alive) render();
+  });
 
   function noteForbidden(err) {
     if (err && err.kind === "forbidden") s.forbidden = true;
@@ -201,15 +223,41 @@ export function mountPrompts(root) {
     }
   }
 
+  /**
+   * Fetch one field's version history.
+   *
+   * Two guards, both load-bearing, both added after the same panel
+   * managed to fail in opposite directions:
+   *
+   *   `versionsLoading` — renderVersionList() calls this from INSIDE
+   *   render(), which is the only way a panel that opens on click can
+   *   fetch lazily. Without an in-flight flag, the render that this
+   *   function's own `render()` triggers would start a second request
+   *   before the first returned.
+   *
+   *   `versionsError` — this used to swallow the rejection with the
+   *   state untouched, so `s.versions[field]` stayed absent, the next
+   *   render saw "not loaded yet" and fired again, and that render
+   *   failed and fired again: an unbounded stream of failing requests
+   *   for as long as the panel stayed open, against an API that allows
+   *   120 a minute. Recording the failure ends the loop and gives the
+   *   user something to press.
+   */
   async function loadVersions(field) {
+    if (s.versionsLoading[field]) return;
+    s.versionsLoading[field] = true;
     try {
       const data = await api.get(`/prompts/stages/${field}/versions`);
       if (!alive) return;
       s.versions[field] = data || [];
-      render();
+      delete s.versionsError[field];
     } catch (err) {
-      /* history stays empty */
+      if (!alive) return;
+      s.versionsError[field] = err;
+    } finally {
+      s.versionsLoading[field] = false;
     }
+    if (alive) render();
   }
 
   async function loadCandidates() {
@@ -228,7 +276,15 @@ export function mountPrompts(root) {
   async function savePrompt(field) {
     try {
       await api.put(`/prompts/stages/${field}`, { content: s.drafts[field] });
-      s.versions[field] = [];
+      // DELETE the key, do not set it to []. renderVersionList() treats
+      // "no key" as "not loaded yet" and refetches; `[]` is a loaded,
+      // truthy value meaning "this prompt has no history", so assigning
+      // it here invalidated nothing and the panel sat on "Loading
+      // history..." for the rest of the session, after every single
+      // save. The version the user had just created was the one thing
+      // they were opening the panel to see.
+      delete s.versions[field];
+      delete s.versionsError[field];
       // Reload rather than patching the version number locally: the
       // server is the only thing that knows whether what was just saved
       // is actually usable, and an empty or oversized prompt comes back
@@ -314,14 +370,31 @@ export function mountPrompts(root) {
     bind();
   }
 
+  // "This screen calls GET /prompts/config, which isn't implemented on
+  // the API yet" is a specific claim, and it was being made for EVERY
+  // failure: a 500, a dropped connection, a rate-limit. The endpoint is
+  // live, so the message was simply false, and because it is phrased as
+  // a permanent state it offers nothing to press. The screen stayed
+  // stuck until you navigated away. Every other screen already gates
+  // that banner on `kind === "not_found"`; these two branches did not.
   function renderStages() {
     if (s.configError) {
-      return s.configError.kind === "forbidden"
-        ? ""
-        : `<div class="card" style="margin-bottom:16px;">${notWiredBanner("GET /prompts/config")}</div>`;
+      if (s.configError.kind === "forbidden") return "";
+      return `<div class="card" style="margin-bottom:16px;">${
+        s.configError.kind === "not_found"
+          ? notWiredBanner("GET /prompts/config")
+          : errorWithRetry(s.configError, "retryConfigBtn")
+      }</div>`;
     }
     if (!s.config) return `<div class="card" style="margin-bottom:16px;">${skeletonRows(6, 18)}</div>`;
     return STAGES.map(renderStage).join("");
+  }
+
+  function errorWithRetry(err, buttonId) {
+    return `<div class="banner banner-error" style="margin:0;flex-direction:column;align-items:stretch;gap:10px;">
+      <div class="row" style="gap:8px;"><span>&#10005;</span><div style="flex:1;">${escapeHtml(fmtErr(err))}</div></div>
+      <div><button id="${buttonId}" class="btn-sm">Retry</button></div>
+    </div>`;
   }
 
   function renderStage(stage) {
@@ -446,10 +519,18 @@ export function mountPrompts(root) {
 
   function renderVersionList(field) {
     const versions = s.versions[field];
-    if (!versions) loadVersions(field);
+    const err = s.versionsError[field];
+    if (!versions && !err) loadVersions(field);
     return `<div style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px;">
       ${
-        versions && versions.length
+        err
+          ? `<div class="row" style="gap:10px;align-items:center;">
+              <span style="flex:1;font-size:12px;color:var(--bad,var(--red));">Couldn't load the history: ${escapeHtml(
+                fmtErr(err)
+              )}</span>
+              <button class="btn-sm" data-retry-versions="${escapeHtml(field)}">Retry</button>
+            </div>`
+          : versions && versions.length
           ? versions
               .map(
                 (v) => `<div class="row-between" style="padding:6px 0;">
@@ -464,6 +545,11 @@ export function mountPrompts(root) {
         </div>`
               )
               .join("")
+          : versions
+          ? // A loaded-but-empty history is a real answer, not a
+            // pending one. It renders for a prompt that has never been
+            // edited away from the built-in.
+            `<div style="font-size:12px;color:var(--tx3);">No earlier versions yet.</div>`
           : `<div style="font-size:12px;color:var(--tx3);">Loading history…</div>`
       }
     </div>`;
@@ -477,7 +563,9 @@ export function mountPrompts(root) {
         s.candidatesError
           ? s.candidatesError.kind === "forbidden"
             ? ""
-            : notWiredBanner("GET /prompts/candidates")
+            : s.candidatesError.kind === "not_found"
+            ? notWiredBanner("GET /prompts/candidates")
+            : errorWithRetry(s.candidatesError, "retryCandidatesBtn")
           : s.candidates.length
           ? `<div class="stack" style="gap:7px;">${s.candidates
               .map(
@@ -492,19 +580,28 @@ export function mountPrompts(root) {
               )};background:var(--ac2);"></div></div>
               <span class="mono" style="font-size:10.5px;color:var(--tx3);">${c.approved} / ${c.rejected}</span>
             </div>
-            <select class="text-input" style="padding:5px 8px;font-size:11.5px;width:135px;" data-candidate-section="${escapeHtml(
+            <select class="text-input" style="padding:5px 8px;font-size:11.5px;width:135px;" aria-label="Section for ${escapeHtml(
               c.word
-            )}">
+            )}" data-candidate-section="${escapeHtml(c.word)}" ${RISK_SECTIONS.length ? "" : "disabled"}>
               ${RISK_SECTIONS.map((sec) => `<option value="${escapeHtml(sec)}">${escapeHtml(sec)}</option>`).join("")}
             </select>
             <button class="btn-sm" data-add-candidate="${escapeHtml(c.word)}" data-lang="${escapeHtml(c.lang)}"
-                    ${s.addingCandidate === c.word ? "disabled" : ""}>${
+                    ${s.addingCandidate === c.word || !RISK_SECTIONS.length ? "disabled" : ""}>${
                   s.addingCandidate === c.word ? "…" : "+ add"
                 }</button>
           </div>`
               )
               .join("")}</div>`
           : `<div style="font-size:12px;color:var(--tx3);">No candidates yet.</div>`
+      }
+      ${
+        s.candidates.length && !RISK_SECTIONS.length
+          ? `<div style="font-size:12px;color:var(--tx3);margin-top:12px;">${
+              riskSectionsStatus.failed
+                ? "The section list could not be loaded, so a candidate cannot be filed yet."
+                : "No sections are configured yet. Create one on the Keywords screen before adding a candidate."
+            }</div>`
+          : ""
       }
       ${
         s.candidateNote
@@ -528,7 +625,15 @@ export function mountPrompts(root) {
    */
   async function addCandidate(word, lang) {
     const sel = root.querySelector(`[data-candidate-section="${CSS.escape(word)}"]`);
-    const section = sel ? sel.value : RISK_SECTIONS[0];
+    const section = (sel && sel.value) || RISK_SECTIONS[0];
+    // Belt and braces alongside the disabled button: posting a keyword
+    // with no section at all creates a row that matches nothing and is
+    // invisible on the Keywords screen's section list.
+    if (!section) {
+      s.candidateNote = "Pick a section first. None are configured yet.";
+      s.candidateNoteOk = false;
+      return render();
+    }
     s.addingCandidate = word;
     render();
     try {
@@ -604,6 +709,30 @@ export function mountPrompts(root) {
         activateVersion(raw.slice(0, idx), Number(raw.slice(idx + 1)));
       })
     );
+
+    root.querySelectorAll("[data-retry-versions]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const field = b.getAttribute("data-retry-versions");
+        delete s.versionsError[field];
+        render();
+        loadVersions(field);
+      })
+    );
+
+    const retryConfigBtn = root.querySelector("#retryConfigBtn");
+    if (retryConfigBtn)
+      retryConfigBtn.addEventListener("click", () => {
+        s.configError = null;
+        render();
+        loadConfig();
+      });
+    const retryCandidatesBtn = root.querySelector("#retryCandidatesBtn");
+    if (retryCandidatesBtn)
+      retryCandidatesBtn.addEventListener("click", () => {
+        s.candidatesError = null;
+        render();
+        loadCandidates();
+      });
 
     const suggestBtn = root.querySelector("#suggestBtn");
     if (suggestBtn) suggestBtn.addEventListener("click", suggest);

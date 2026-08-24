@@ -26,7 +26,26 @@
 
 import { API_BASE } from "../config.js";
 import { api, ApiError } from "../api.js";
-import { escapeHtml, debounce, RISK_SECTIONS, fmtErr, notWiredBanner } from "../util.js";
+import { escapeHtml, debounce, RISK_SECTIONS, ensureRiskSections, riskSectionsStatus, fmtErr, notWiredBanner } from "../util.js";
+
+// "The user explicitly chose no sections", on the wire.
+//
+// MUST stay identical to app/services/export.py's NO_SECTIONS_TOKEN;
+// tests/frontend/export_sections.test.mjs reads both files and asserts
+// they still agree, because a silent drift here does not throw, it just
+// exports the wrong rows.
+//
+// Why a token at all: `sections=""` has always meant "no section
+// filter, take everything", and it has to keep meaning that for every
+// API caller that simply omits the parameter. Unticking all five chips
+// is the opposite statement, and it used to serialise to that same
+// empty string — api.js drops empty-string query params, the backend
+// default is `sections: str = ""`, and app/services/export.py's
+// `if sections:` then skipped the filter. So the recap line read
+// "Sections: none selected", the row count ROSE to the unfiltered
+// total, and the .xlsx that went to the board contained every section
+// while claiming a narrower scope than it had.
+const NO_SECTIONS = "__none__";
 
 const FILTERS = [
   { k: "topn", l: "Top N by relevance", n: "Highest-scoring matched articles, reviewed or not. Best for a weekly digest." },
@@ -73,7 +92,17 @@ export function mountExport(root) {
     scope: "today",
     rangeFrom: "",
     rangeTo: "",
-    sections: [...RISK_SECTIONS],
+    // `allSections` is what is actually configured right now, resolved
+    // from the API before anything is fetched or posted (see the mount
+    // sequence below); `sections` is the user's selection within it.
+    // Both start empty: this screen used to seed the selection from
+    // util.js's hardcoded five-name fallback, which meant a user who
+    // deep-linked to /export without opening the Dashboard first
+    // filtered every export by five section names that may not exist,
+    // silently dropping every article in an admin-created section.
+    allSections: [],
+    sections: [],
+    sectionsReady: false,
     cols: { headline: 1, source: 1, section: 1, keywords: 1, published: 1, score: 1, reason: 0, alsoIn: 1, link: 1, body: 0 },
     sort: "relevance",
     format: "xlsx", // EXPORT-XLSX-DEFAULT: xlsx is the primary format now (owner's call); csv stays a choice
@@ -89,8 +118,23 @@ export function mountExport(root) {
   const debouncedPreview = debounce(loadPreview, 250);
 
   render();
-  loadPreview();
-  loadPresets();
+  // Nothing is fetched or posted until the real section list is in
+  // hand. The preview's row count and the download it leads to are both
+  // filtered by `sections`, so starting either against a guessed list
+  // would report a number for one scope and hand over a file for
+  // another.
+  start();
+
+  async function start() {
+    await ensureRiskSections();
+    if (!alive) return;
+    s.allSections = [...RISK_SECTIONS];
+    s.sections = [...RISK_SECTIONS];
+    s.sectionsReady = true;
+    render();
+    loadPreview();
+    loadPresets();
+  }
 
   function params() {
     return {
@@ -99,11 +143,31 @@ export function mountExport(root) {
       scope: s.scope,
       from: s.scope === "range" ? s.rangeFrom : undefined,
       to: s.scope === "range" ? s.rangeTo : undefined,
-      sections: s.sections.join(","),
+      sections: sectionsParam(),
       columns: COLUMNS.filter((c) => s.cols[c.k]).map((c) => c.k).join(","),
       sort: s.sort,
       format: s.format,
     };
+  }
+
+  /**
+   * The three distinct states of "which sections", spelled out because
+   * two of them used to collapse into the same empty string.
+   *
+   *   nothing configured  -> send no filter at all. There is no section
+   *                          list to filter by, so filtering by one
+   *                          would be inventing a constraint. Same when
+   *                          the list could not be loaded, and the
+   *                          Sections card says so on screen rather
+   *                          than leaving the user to guess.
+   *   a subset selected   -> send exactly that subset.
+   *   none selected       -> send the explicit token. The user asked
+   *                          for no sections, so the honest answer is
+   *                          zero rows, not every row.
+   */
+  function sectionsParam() {
+    if (!s.allSections.length) return undefined;
+    return s.sections.length ? s.sections.join(",") : NO_SECTIONS;
   }
 
   async function loadPreview() {
@@ -129,10 +193,16 @@ export function mountExport(root) {
       const data = await api.get("/export/presets");
       if (!alive) return;
       s.presets = data || [];
+      s.presetsError = null;
       render();
     } catch (err) {
       if (!alive) return;
       s.presetsError = err;
+      // The missing render() is the whole bug: the error was recorded
+      // in state and nothing ever repainted from it, so the card kept
+      // showing its empty-state copy, "No saved presets yet." A user
+      // whose presets failed to load was told they had none.
+      render();
     }
   }
 
@@ -206,7 +276,21 @@ export function mountExport(root) {
     s.filter = p.filter || s.filter;
     s.topN = p.topN || s.topN;
     s.scope = p.scope || s.scope;
-    s.sections = p.sections ? (Array.isArray(p.sections) ? p.sections : String(p.sections).split(",")) : s.sections;
+    // A preset saved with scope "Custom range" carries its two dates,
+    // and restoring the scope without them is worse than not restoring
+    // it: the screen said "Custom range" with both date fields blank,
+    // and the backend's resolve_scope() quietly falls back to TODAY
+    // when a range has no dates. So the preview reported today's rows
+    // under a heading that claimed a quarter, with no error anywhere.
+    s.rangeFrom = p.from || "";
+    s.rangeTo = p.to || "";
+    // The explicit "no sections" token is a wire value, not a section
+    // name, so it never becomes a selected chip. Filtering it out here
+    // (rather than special-casing the whole array) also copes with a
+    // preset written before the backend started normalising it away.
+    s.sections = p.sections
+      ? (Array.isArray(p.sections) ? p.sections : String(p.sections).split(",")).filter((x) => x !== NO_SECTIONS)
+      : s.sections;
     if (p.columns) {
       const cols = Array.isArray(p.columns) ? p.columns : String(p.columns).split(",");
       const next = {};
@@ -284,14 +368,7 @@ export function mountExport(root) {
 
             <div class="card">
               <h3 style="margin-bottom:16px;">3 · Sections</h3>
-              <div class="row wrap" style="gap:8px;">
-                ${RISK_SECTIONS.map((sec) => {
-                  const on = s.sections.includes(sec);
-                  return `<button class="chip-toggle ${on ? "active" : ""}" data-section="${sec}">
-                    <span class="chip-mark ${on ? "active" : ""}">${on ? "&#10003;" : ""}</span>${sec}
-                  </button>`;
-                }).join("")}
-              </div>
+              ${sectionChips()}
             </div>
 
             <div class="card">
@@ -333,7 +410,14 @@ export function mountExport(root) {
                 s.previewError
                   ? s.previewError.kind === "not_found"
                     ? notWiredBanner("GET /export/preview")
-                    : `<div class="banner banner-error" style="margin:0;"><span>&#10005;</span><div>${escapeHtml(fmtErr(s.previewError))}</div></div>`
+                    : // A dropped connection or a 500 is transient, so the one
+                      // thing this card must offer is another go. Without it the
+                      // only way to re-run the preview was to change a control,
+                      // which changes the export you were about to take.
+                      `<div class="banner banner-error" style="margin:0;flex-direction:column;align-items:stretch;gap:10px;">
+                      <div class="row" style="gap:8px;"><span>&#10005;</span><div style="flex:1;">${escapeHtml(fmtErr(s.previewError))}</div></div>
+                      <div><button id="retryPreviewBtn" class="btn-sm">Retry</button></div>
+                    </div>`
                   : `<div class="row" style="align-items:baseline;gap:8px;">
                     <div style="font-size:38px;font-weight:700;letter-spacing:-1.6px;line-height:1;">${
                       s.previewLoading ? "…" : rows !== null ? rows.toLocaleString() : "n/a"
@@ -370,7 +454,8 @@ export function mountExport(root) {
                   s.presetsError
                     ? s.presetsError.kind === "not_found"
                       ? `<div style="font-size:12px;color:var(--tx3);">Presets aren't implemented on the API yet.</div>`
-                      : `<div style="font-size:12px;color:var(--red);">${escapeHtml(fmtErr(s.presetsError))}</div>`
+                      : `<div style="font-size:12px;color:var(--red);">${escapeHtml(fmtErr(s.presetsError))}</div>
+                         <div style="margin-top:8px;"><button id="retryPresetsBtn" class="btn-sm">Retry</button></div>`
                     : s.presets.length
                     ? s.presets
                         .map(
@@ -401,17 +486,68 @@ export function mountExport(root) {
     bind();
   }
 
+  /**
+   * The section chips, and the two states that are not chips.
+   *
+   * SECURITY: `sec` is escaped in BOTH the data-section attribute and
+   * the visible label. It reads as a harmless loop variable, but its
+   * value is `keywords.section`, which app/services/admin.py stores
+   * verbatim ("any non-empty string an admin types becomes a valid
+   * section") and which the .xlsx keyword import can also set. It
+   * reached this template raw, in an attribute AND as text, which is
+   * stored XSS that renders for every user who opens Export, not just
+   * the admin who typed it. Every other consumer of a section name in
+   * this codebase escapes it; this template was the one that did not.
+   */
+  function sectionChips() {
+    if (!s.sectionsReady) {
+      return `<div style="font-size:12px;color:var(--tx3);">Loading the section list…</div>`;
+    }
+    if (!s.allSections.length) {
+      return riskSectionsStatus.failed
+        ? `<div class="banner banner-info" style="margin:0;"><span>&#9432;</span><div>The section list could not be loaded, so this export is not filtered by section. It will contain every section.</div></div>`
+        : `<div style="font-size:12px;color:var(--tx3);">No sections are configured yet. Add keywords on the Keywords screen to create one. This export is not filtered by section.</div>`;
+    }
+    return `<div class="row wrap" style="gap:8px;">
+                ${s.allSections
+                  .map((sec) => {
+                    const on = s.sections.includes(sec);
+                    return `<button class="chip-toggle ${on ? "active" : ""}" data-section="${escapeHtml(sec)}">
+                    <span class="chip-mark ${on ? "active" : ""}">${on ? "&#10003;" : ""}</span>${escapeHtml(sec)}
+                  </button>`;
+                  })
+                  .join("")}
+              </div>
+              ${
+                s.sections.length
+                  ? ""
+                  : `<div style="font-size:12px;color:var(--tx3);margin-top:12px;">No sections are ticked, so this export would contain no rows. Tick at least one.</div>`
+              }`;
+  }
+
   function recapRows() {
     const rows = [
       ["Set", FILTERS.find((f) => f.k === s.filter)?.l || s.filter],
       ["Dates", SCOPES.find((sc) => sc.k === s.scope)?.l || s.scope],
-      ["Sections", s.sections.length === 5 ? "All five" : s.sections.join(", ") || "none selected"],
-      ["Columns", Object.values(s.cols).filter(Boolean).length + " of 10"],
+      ["Sections", sectionsRecap()],
+      ["Columns", Object.values(s.cols).filter(Boolean).length + " of " + COLUMNS.length],
       ["Sorted", "by " + s.sort],
     ];
     return rows
       .map(([k, v]) => `<div class="recap-row"><span class="recap-k mono">${escapeHtml(k)}</span><span style="flex:1;font-size:12.5px;color:var(--tx2);">${escapeHtml(v)}</span></div>`)
       .join("");
+  }
+
+  // Said "All five" whenever exactly five chips were ticked, from the
+  // days when there were exactly five sections and they were compiled
+  // in. With sections admin-creatable that sentence is wrong twice
+  // over: it appears when five of nine are selected, and never appears
+  // when all four of four are.
+  function sectionsRecap() {
+    if (!s.sectionsReady) return "loading";
+    if (!s.allSections.length) return "not filtered by section";
+    if (s.sections.length === s.allSections.length) return "all " + s.allSections.length;
+    return s.sections.join(", ") || "none selected";
   }
 
   function bind() {
@@ -440,6 +576,16 @@ export function mountExport(root) {
     );
     root.querySelectorAll("[data-sort]").forEach((b) => b.addEventListener("click", () => { s.sort = b.getAttribute("data-sort"); debouncedPreview(); render(); }));
     root.querySelectorAll("[data-format]").forEach((b) => b.addEventListener("click", () => { s.format = b.getAttribute("data-format"); render(); }));
+
+    const retryPreviewBtn = root.querySelector("#retryPreviewBtn");
+    if (retryPreviewBtn) retryPreviewBtn.addEventListener("click", loadPreview);
+    const retryPresetsBtn = root.querySelector("#retryPresetsBtn");
+    if (retryPresetsBtn)
+      retryPresetsBtn.addEventListener("click", () => {
+        s.presetsError = null;
+        render();
+        loadPresets();
+      });
 
     const doExportBtn = root.querySelector("#doExportBtn");
     if (doExportBtn) doExportBtn.addEventListener("click", doExport);

@@ -36,15 +36,89 @@ export function tier(score) {
 // RISK_SECTIONS as a plain, mutable `let` binding (still the exact same
 // array-of-strings shape every importer already expects) and populating
 // it for real via ensureRiskSections() below, instead of turning it
-// into a function — export.js/prompts.js import and use it as a plain
-// array and are NOT touched by this task, so the shape has to stay
-// exactly what it always was. ES module imports are live bindings, so a
+// into a function. ES module imports are live bindings, so a
 // reassignment here (`RISK_SECTIONS = [...]`) is visible to every
 // importer's next read of it, without them needing to re-import
 // anything.
-export let RISK_SECTIONS = ["Geopolitical", "Macroeconomy", "Telco/regulatory", "Political", "Others"];
+//
+// SECOND PASS, and this is the part that actually cost something: the
+// first pass left the five names here as a FALLBACK and wired
+// ensureRiskSections() into dashboard.js only. export.js and prompts.js
+// were explicitly left "NOT touched by this task" while both kept
+// importing RISK_SECTIONS — and both /export and /prompts are directly
+// routable, so a user who deep-linked to Export without opening the
+// Dashboard first got five section chips that may not exist, all
+// pre-selected, and that unvalidated list was what the export actually
+// filtered on. An admin-created section's approved articles were
+// silently missing from every spreadsheet that went out, with nothing
+// on screen saying so.
+//
+// So the fallback is gone. The honest pre-load value of "which sections
+// are configured" is "we do not know yet", and an empty array is the
+// only value that says that. Every consumer now calls
+// ensureRiskSections() and waits before acting; `riskSectionsStatus`
+// below is how they tell "none are configured" apart from "the list
+// could not be loaded", which need different copy on screen.
+export let RISK_SECTIONS = [];
+
+/**
+ * Load state for RISK_SECTIONS, as a mutated object rather than a
+ * second `let` export: importers read `riskSectionsStatus.failed` at
+ * render time and an object property read always sees the current
+ * value, with no re-import and no subscription.
+ *
+ * `loaded` true with an empty RISK_SECTIONS is a real, meaningful
+ * state: a fresh install with no keywords configured yet.
+ */
+export const riskSectionsStatus = { loaded: false, failed: false };
 
 let _riskSectionsPromise = null;
+let _dashboardTodayPromise = null;
+
+/**
+ * GET /dashboard/today, fetched at most once per page load and shared.
+ *
+ * Three separate callers wanted this payload on every boot —
+ * shell.js's refreshShellCounts (for the review-queue badge),
+ * ensureRiskSections() below (for the section list), and dashboard.js's
+ * own load — so the heaviest query the API runs was executing three
+ * times before the first screen finished painting. shell.js documents
+ * at length why that matters here: the whole API allows 120 requests /
+ * 60 seconds per IP (`Settings.rate_limit_requests_per_window`), and
+ * the run-status poller is already spending 30 of them a minute. Two of
+ * those three now share one request.
+ *
+ * A rejection is NOT cached: the promise slot is cleared so the next
+ * caller retries, otherwise one blip at boot (or a call made before the
+ * session cookie exists) would poison the section list for the rest of
+ * the page's life.
+ */
+export function fetchDashboardToday() {
+  if (!_dashboardTodayPromise) {
+    _dashboardTodayPromise = api.get("/dashboard/today").catch((err) => {
+      _dashboardTodayPromise = null;
+      throw err;
+    });
+  }
+  return _dashboardTodayPromise;
+}
+
+/**
+ * Drop everything cached for the current session.
+ *
+ * Called by main.js when the app returns to the login screen. Both
+ * caches above are keyed on nothing but the page load, so without this
+ * a sign-out followed by a sign-in as a DIFFERENT user would show the
+ * previous user's review-queue count and the previous session's
+ * section list, indefinitely.
+ */
+export function resetSessionCaches() {
+  _dashboardTodayPromise = null;
+  _riskSectionsPromise = null;
+  RISK_SECTIONS = [];
+  riskSectionsStatus.loaded = false;
+  riskSectionsStatus.failed = false;
+}
 
 // Populates RISK_SECTIONS from the real, currently-configured section
 // list, once per page load, and caches the in-flight/settled promise so
@@ -56,19 +130,26 @@ let _riskSectionsPromise = null;
 // not an admin-only screen — and stays derived from the exact same
 // app.api.schemas.core.get_risk_sections() the backend now uses, so
 // frontend and backend never disagree about what "a section" is.
-// Failure (not yet authenticated, network down) is a silent no-op that
-// leaves the fixed 5-value fallback above in place — same pattern as
-// shell.js's refreshShellCounts.
+//
+// Always resolves, never rejects: callers use it to gate a render, and
+// a screen that throws away its own mount because a chrome-level fetch
+// failed is worse than a screen that says so. Failure is recorded on
+// riskSectionsStatus and the cached promise is dropped so the next
+// screen can try again.
 export function ensureRiskSections() {
   if (!_riskSectionsPromise) {
-    _riskSectionsPromise = api
-      .get("/dashboard/today")
+    _riskSectionsPromise = fetchDashboardToday()
       .then((data) => {
-        const labels = ((data && data.bySection) || []).map((s) => s.label).filter(Boolean);
-        if (labels.length) RISK_SECTIONS = labels;
+        RISK_SECTIONS = ((data && data.bySection) || []).map((s) => s.label).filter(Boolean);
+        riskSectionsStatus.loaded = true;
+        riskSectionsStatus.failed = false;
         return RISK_SECTIONS;
       })
-      .catch(() => RISK_SECTIONS);
+      .catch(() => {
+        riskSectionsStatus.failed = true;
+        _riskSectionsPromise = null;
+        return RISK_SECTIONS;
+      });
   }
   return _riskSectionsPromise;
 }

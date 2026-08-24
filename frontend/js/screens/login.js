@@ -58,12 +58,21 @@ export function mountLogin(root, { onAuthenticated }) {
     return local.purpose === "signup" ? "Create account" : "Reset password";
   }
 
+  // Every `<label>` here carries `for=`, matching its input's id.
+  //
+  // Without it these are labels only visually: the browser never
+  // associates them, so a screen reader announces "edit text, blank" on
+  // the app's front door and clicking the word "Password" does not focus
+  // the field. Note the ids repeat across steps (#loginEmail appears in
+  // both the login and the otp-email step) — that is fine, because
+  // exactly one step is ever rendered at a time, so no duplicate id
+  // exists in the live document.
   function renderLoginStep() {
     return `
-      <label class="field-label">Work email</label>
+      <label class="field-label" for="loginEmail">Work email</label>
       <input id="loginEmail" type="email" class="text-input" placeholder="firstname.lastname@grameenphone.com"
         autocomplete="username" spellcheck="false" value="${escapeHtml(local.email)}" />
-      <label class="field-label" style="margin-top:18px;">Password</label>
+      <label class="field-label" for="loginPassword" style="margin-top:18px;">Password</label>
       <input id="loginPassword" type="password" class="text-input" placeholder="••••••••" autocomplete="current-password" value="${escapeHtml(
         local.password
       )}" />
@@ -75,7 +84,7 @@ export function mountLogin(root, { onAuthenticated }) {
       <div style="font-size:13px;color:var(--tx2);line-height:1.5;margin-bottom:14px;">
         ${local.purpose === "signup" ? "First time here? Verify your work email to set up your account." : "Enter your work email and we'll send a code to reset your password."}
       </div>
-      <label class="field-label">Work email</label>
+      <label class="field-label" for="loginEmail">Work email</label>
       <input id="loginEmail" type="email" class="text-input" placeholder="firstname.lastname@grameenphone.com"
         autocomplete="username" spellcheck="false" value="${escapeHtml(local.email)}" />
     `;
@@ -90,14 +99,14 @@ export function mountLogin(root, { onAuthenticated }) {
         <span>&#9888;</span>
         <div><b>Check your Junk folder.</b> Codes currently land there, not your inbox. Open it and mark the message <b>Not Junk</b> so future codes arrive normally.</div>
       </div>
-      <label class="field-label">Verification code</label>
+      <label class="field-label" for="loginCode">Verification code</label>
       <input id="loginCode" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" class="otp-input"
         placeholder="000000" value="${escapeHtml(local.code)}" />
-      <label class="field-label" style="margin-top:18px;">${local.purpose === "signup" ? "Choose a password" : "New password"}</label>
+      <label class="field-label" for="loginNewPassword" style="margin-top:18px;">${local.purpose === "signup" ? "Choose a password" : "New password"}</label>
       <input id="loginNewPassword" type="password" class="text-input" placeholder="••••••••" autocomplete="new-password" value="${escapeHtml(
         local.newPassword
       )}" />
-      <label class="field-label" style="margin-top:18px;">Confirm password</label>
+      <label class="field-label" for="loginConfirmPassword" style="margin-top:18px;">Confirm password</label>
       <input id="loginConfirmPassword" type="password" class="text-input" placeholder="••••••••" autocomplete="new-password" value="${escapeHtml(
         local.confirmPassword
       )}" />
@@ -208,13 +217,42 @@ export function mountLogin(root, { onAuthenticated }) {
     local.busy = true;
     local.error = "";
     render();
+    let res;
     try {
-      const res = await login(raw, local.password);
-      onAuthenticated(res);
+      res = await login(raw, local.password);
     } catch (err) {
       local.busy = false;
       // 422 from /auth/login is deliberately generic (no user-enumeration) — never elaborate it.
       local.error = describeAuthError(err, "Incorrect email or password.");
+      render();
+      return;
+    }
+    await finishAuth(res);
+  }
+
+  /**
+   * Hand off to the app, and stay responsible for the failure.
+   *
+   * `onAuthenticated` is main.js's, and its FIRST statement is
+   * `await fetchMe()`. It used to be called here without `await` and
+   * without a `.catch`, so a failing GET /me right after a perfectly
+   * successful sign-in (a network blip, a cookie edge case, a 500)
+   * became an unhandled promise rejection: nothing rendered, nothing
+   * was reported, and `local.busy` stayed true forever. The password
+   * had been accepted, the button read "Please wait..." and never
+   * changed, and the only way out was a page reload.
+   *
+   * The message deliberately does NOT reuse the sign-in fallback
+   * ("Incorrect email or password"), which would be a lie at this
+   * point: the credentials were right and the next attempt is likely
+   * to work.
+   */
+  async function finishAuth(res) {
+    try {
+      await onAuthenticated(res);
+    } catch (err) {
+      local.busy = false;
+      local.error = describeAuthError(err, "Signed in, but your account details could not be loaded. Try again.");
       render();
     }
   }
@@ -262,15 +300,17 @@ export function mountLogin(root, { onAuthenticated }) {
     local.busy = true;
     local.error = "";
     render();
+    let res;
     try {
-      const res = await setPassword(local.email, local.code, local.newPassword);
+      res = await setPassword(local.email, local.code, local.newPassword);
       clearInterval(cooldownTimer);
-      onAuthenticated(res);
     } catch (err) {
       local.busy = false;
       local.error = describeAuthError(err, "That code didn't work.");
       render();
+      return;
     }
+    await finishAuth(res);
   }
 
   function startCooldown() {

@@ -145,3 +145,51 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         if item.get_closest_marker("parity") or item.get_closest_marker("budget_lab"):
             item.add_marker(skip)
+
+
+@pytest.fixture
+def production_env(monkeypatch: pytest.MonkeyPatch):
+    """`APP_ENV=production` with a configuration that would ACTUALLY boot.
+
+    Two test modules had grown their own private `_production_env`
+    fixture, character-for-character identical, each setting
+    `SECRET_KEY="test-secret"` and no email credentials. Both stopped
+    working the moment `validate_production_settings` learned to check
+    those two things -- correctly, because neither was a production
+    configuration that could ever have started:
+
+      * `"test-secret"` is not a Fernet key. `app.db.crypto` would raise
+        the first time an admin saved a provider API key.
+      * no `BREVO_API_KEY`/`BREVO_FROM_EMAIL`, while `email_provider`
+        defaults to `brevo`, means OTP delivery cannot send -- and the
+        seeded admin has no password, so that is a locked-out deploy.
+
+    A fixture asserting things about "production" while describing a
+    production that refuses to start is worse than no fixture: it gives
+    real coverage of security headers and error shaping, resting on a
+    config the real fail-fast rejects. So this one is genuinely valid,
+    and it lives HERE, once, because two copies of the same production
+    definition in two files is the drift that produced this in the first
+    place.
+
+    The Fernet key is generated per test rather than hardcoded so that
+    nothing can come to depend on its value, and so this file never
+    contains something shaped like a real secret.
+    """
+    from cryptography.fernet import Fernet
+
+    from app.config import get_settings
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@localhost/db")
+    monkeypatch.setenv("SECRET_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://frontend.example.com")
+    # The email transport `email_provider` selects must be able to send.
+    # Brevo is the default; see app.config._EMAIL_PROVIDER_REQUIRED_ENV.
+    monkeypatch.setenv("EMAIL_PROVIDER", "brevo")
+    monkeypatch.setenv("BREVO_API_KEY", "test-brevo-key")
+    monkeypatch.setenv("BREVO_FROM_EMAIL", "otp@example.com")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
