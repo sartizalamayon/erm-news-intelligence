@@ -58,6 +58,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.deps import AuthenticatedUser, get_current_user, require_admin
+from app.api.schemas.core import _reset_risk_sections_cache_for_tests
 from app.db.testing import migrated_schema, pg_available
 from app.main import create_app
 from app.services import macro as macro_service
@@ -112,12 +113,32 @@ def _coverage(conn, month: date, days: int) -> None:
 
 
 def _section(conn, month: date, matched: int, section: str = "Political") -> None:
+    """A month's rollup for one section, AND the keyword row that makes
+    that section configured.
+
+    The two belong together. `app.services.risklines` resolves its
+    political line against the CONFIGURED set and says so plainly when
+    the section is absent, so a rollup written without a keyword row
+    describes a month of a section nobody is tracking -- a state the
+    product is right to refuse to read, and not the one any test here is
+    about. It used to work by accident: `get_risk_sections` answered an
+    empty `keywords` table with a hardcoded five-name tuple that happened
+    to include "Political", so every test inherited a configuration it
+    never made. That fallback is gone, because on a fresh install it put
+    five sections nobody had configured on the dashboard.
+    """
     conn.execute(
         "INSERT INTO rollup_monthly_section (month, section, fetched_count, matched_count) "
         "VALUES (%s, %s, %s, %s) ON CONFLICT (month, section) DO UPDATE SET "
         "matched_count = EXCLUDED.matched_count",
         (month, section, matched, matched),
     )
+    conn.execute(
+        "INSERT INTO keywords (term_en, term_bn, section, enabled) VALUES (%s, %s, %s, TRUE) "
+        "ON CONFLICT DO NOTHING",
+        (f"{section.lower()}-fixture-term", "", section),
+    )
+    _reset_risk_sections_cache_for_tests()
 
 
 # Every NOT NULL column of market_quote, so a test can override the one

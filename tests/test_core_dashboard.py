@@ -127,12 +127,50 @@ def test_today_counts_reflect_real_rows(dash_client) -> None:
     assert len(data["funnel"]) == 4
     assert len(data["days14"]) == 14
     assert data["days14"][-1]["date"] == today.isoformat()
+    # This asserted the five names {"Geopolitical", "Macroeconomy",
+    # "Telco/regulatory", "Political", "Others"} against a keywords
+    # table that is EMPTY in this fixture -- i.e. it asserted the
+    # hardcoded fallback, which is how the suite came to pin fabricated
+    # data on the product's primary screen rather than catch it. No
+    # section is configured here, so the only labels that may appear are
+    # the ones today's articles actually carry.
     section_labels = {s["label"] for s in data["bySection"]}
-    assert section_labels == {"Geopolitical", "Macroeconomy", "Telco/regulatory", "Political", "Others"}
+    assert section_labels == {"Macroeconomy", "Telco/regulatory"}
     by_section = {s["label"]: s["count"] for s in data["bySection"]}
     assert by_section["Macroeconomy"] == 1
     assert by_section["Telco/regulatory"] == 1
     assert {s["label"] for s in data["topSources"]} == {"Prothom Alo", "Daily Star"}
+
+
+def test_a_fresh_install_reports_no_sections_rather_than_five_invented_ones(dash_client) -> None:
+    """Nothing configured and nothing collected must render as nothing.
+
+    `keywords` is empty on a fresh install -- no migration seeds it --
+    and `get_risk_sections` used to answer that with a fixed five-name
+    tuple. The card then opened on five sections nobody had configured,
+    each reading 0, indistinguishable from real ones.
+    """
+    client, _conn = dash_client
+    data = client.get("/dashboard/today").json()
+    assert data["bySection"] == []
+
+
+def test_a_configured_section_still_shows_at_zero_when_it_matched_nothing(dash_client) -> None:
+    """The other half of the union: "configured and quiet" has to stay
+    distinguishable from "not configured at all", so a section with no
+    articles today is present at 0 rather than absent.
+    """
+    client, conn = dash_client
+    conn.execute(
+        "INSERT INTO keywords (term_en, term_bn, section, enabled) VALUES (%s, %s, %s, TRUE)",
+        ("spectrum", "", "Telco/regulatory"),
+    )
+    conn.commit()
+    _reset_risk_sections_cache_for_tests()
+
+    data = client.get("/dashboard/today").json()
+    by_section = {s["label"]: s["count"] for s in data["bySection"]}
+    assert by_section == {"Telco/regulatory": 0}
 
 
 def test_pending_count_excludes_hidden_duplicate_rows(dash_client) -> None:

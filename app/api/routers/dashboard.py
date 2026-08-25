@@ -365,7 +365,30 @@ def dashboard_today(user: AuthenticatedUser = Depends(get_current_user)) -> Dash
             (today,),
         ).fetchall()
         section_counts = {r["label"]: int(r["n"]) for r in section_rows}
-        by_section = [SectionCountOut(label=s, count=section_counts.get(s, 0)) for s in get_risk_sections(conn)]
+        # The union of what is CONFIGURED and what actually TURNED UP
+        # today, in that order, because the two answer different
+        # questions and the card needs both.
+        #
+        # Configured-only was the old behaviour and it hid real data:
+        # `articles.sections` is written by the matcher from whatever the
+        # keyword rows said at collection time, so a section can carry
+        # today's articles after the keyword row that produced it was
+        # renamed or deleted. Those articles were counted by the query
+        # above and then silently dropped here, because the label was no
+        # longer in the configured set.
+        #
+        # Observed-only would be just as wrong the other way: a section
+        # an operator configured this morning that has matched nothing
+        # yet must still appear, at 0, or the screen cannot distinguish
+        # "configured and quiet" from "not configured".
+        #
+        # Both empty is the honest fresh-install state: no sections
+        # configured, nothing collected, so the card shows nothing rather
+        # than five invented names reading 0. See the module comment in
+        # app/api/schemas/core.py for what used to happen instead.
+        configured = get_risk_sections(conn)
+        section_labels = list(configured) + [s for s in sorted(section_counts) if s not in configured]
+        by_section = [SectionCountOut(label=s, count=section_counts.get(s, 0)) for s in section_labels]
 
         top_source_rows = conn.execute(
             "SELECT source AS label, count(*) AS n FROM articles WHERE day = %s "

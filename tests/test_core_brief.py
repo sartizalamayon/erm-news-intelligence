@@ -22,6 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.deps import AuthenticatedUser, get_current_user
+from app.api.schemas.core import _reset_risk_sections_cache_for_tests
 from app.db.testing import migrated_schema, pg_available
 from app.main import create_app
 from app.services.llm.provider import LLMClient
@@ -125,7 +126,19 @@ def test_post_draft_generates_bullets_from_approved_articles_only(
         conn, title="Pending story, not approved", day=today,
         sections="Macroeconomy", review_status="pending", llm_score=9,
     )
+    # Configure "Geopolitical" explicitly. The brief used to iterate a
+    # frozen five-name tuple, so this section appeared whether or not it
+    # existed; it now iterates the sections that are CONFIGURED or that
+    # the day's approved articles actually carry. The assertion below --
+    # a section with no approved stories reports empty rather than being
+    # absent -- is only meaningful for a section that is really there,
+    # which is what this row makes true.
+    conn.execute(
+        "INSERT INTO keywords (term_en, term_bn, section, enabled) VALUES (%s, %s, %s, TRUE)",
+        ("sanctions", "", "Geopolitical"),
+    )
     conn.commit()
+    _reset_risk_sections_cache_for_tests()
 
     resp = client.post(
         "/brief/draft", json={"fuel": "Fuel Prices: Crude – $70.2"}, params={"date": today.isoformat()}
@@ -203,3 +216,91 @@ def test_download_docx_returns_a_real_document_matching_the_draft(
     assert "Daily Risk Insights" in text
     assert "Hook" in text
     assert "rest of it." in text
+
+
+def test_an_admin_created_section_reaches_the_brief(brief_client) -> None:
+    """The brief iterated a frozen five-name tuple, so an approved
+    article in a section an admin had created never reached the Word
+    document, and nothing surfaced it: the section simply was not there.
+    Sections are admin-creatable (any non-empty string in
+    `keywords.section`, and the .xlsx import can create them too), so
+    this dropped exactly the coverage somebody went out of their way to
+    start tracking.
+    """
+    client, conn = brief_client
+    today = date.today()
+    conn.execute(
+        "INSERT INTO keywords (term_en, term_bn, section, enabled) VALUES (%s, %s, %s, TRUE)",
+        ("submarine cable", "", "Infrastructure"),
+    )
+    _insert_article(
+        conn, title="Cable cut disrupts bandwidth", day=today,
+        sections="Infrastructure", review_status="approved", llm_score=8,
+    )
+    conn.commit()
+    _reset_risk_sections_cache_for_tests()
+
+    data = client.post("/brief/draft", json={}, params={"date": today.isoformat()}).json()
+    titles = [s["title"] for s in data["sections"]]
+    assert "Infrastructure" in titles, f"admin-created section missing from the brief: {titles}"
+    infra = next(s for s in data["sections"] if s["title"] == "Infrastructure")
+    assert infra["empty"] is False
+    assert len(infra["bullets"]) == 1
+
+
+def test_an_approved_article_survives_its_section_being_deleted(brief_client) -> None:
+    """`articles.sections` is written at COLLECTION time, so an approved
+    article can carry a section whose keyword row was renamed or deleted
+    afterwards. Iterating only the configured set would drop it silently.
+    A story somebody approved for the brief belongs in the brief.
+    """
+    client, conn = brief_client
+    today = date.today()
+    _insert_article(
+        conn, title="Orphaned but approved", day=today,
+        sections="Retired Section", review_status="approved", llm_score=7,
+    )
+    conn.commit()
+    _reset_risk_sections_cache_for_tests()
+
+    data = client.post("/brief/draft", json={}, params={"date": today.isoformat()}).json()
+    titles = [s["title"] for s in data["sections"]]
+    assert "Retired Section" in titles, f"approved article dropped with its section: {titles}"
+
+
+def test_an_undrafted_bullet_is_marked_as_the_raw_headline(brief_client) -> None:
+    """With no SUMMARIZATION provider resolving, `draft_bullet` is never
+    called and the bullet is the article's own headline. Degrading that
+    way is right; what was wrong is that the result was
+    indistinguishable from drafted prose once it reached the .docx, so a
+    document that went to a board could be entirely undrafted headlines
+    and read as finished work.
+    """
+    client, conn = brief_client
+    today = date.today()
+    conn.execute(
+        "INSERT INTO keywords (term_en, term_bn, section, enabled) VALUES (%s, %s, %s, TRUE)",
+        ("inflation", "", "Macroeconomy"),
+    )
+    _insert_article(
+        conn, title="Undrafted headline stands alone", day=today,
+        sections="Macroeconomy", review_status="approved", llm_score=9,
+    )
+    conn.commit()
+    _reset_risk_sections_cache_for_tests()
+
+    data = client.post("/brief/draft", json={}, params={"date": today.isoformat()}).json()
+    macro = next(s for s in data["sections"] if "Macroeconomic" in s["title"])
+    assert macro["bullets"], "expected the approved article to produce a bullet"
+    assert macro["bullets"][0]["drafted"] is False
+
+    resp = client.get("/brief/download.docx", params={"date": today.isoformat()})
+    assert resp.status_code == 200
+
+    import io
+
+    from docx import Document
+
+    doc = Document(io.BytesIO(resp.content))
+    text = "\n".join(p.text for p in doc.paragraphs)
+    assert "not drafted" in text, "an undrafted bullet must be marked in the document itself"

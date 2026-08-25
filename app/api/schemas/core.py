@@ -33,29 +33,39 @@ from app.db.connection import DictConnection
 # list meant that new section would never show up anywhere still reading
 # it. `get_risk_sections()` below replaces the static tuple with a real,
 # cached query over distinct `keywords.section` values so the dashboard
-# picks up new sections automatically. `app/services/brief.py`'s own
-# RISK_SECTIONS constant is a deliberately separate, untouched duplicate
-# — the Daily Risk Insight screen is being discarded this round (see
-# this task's report), not fixed.
+# picks up new sections automatically. `app/services/brief.py` used to
+# carry its own frozen copy of the same five names and iterate THAT,
+# which meant an approved article in an admin-created section never
+# reached the Word document. It now calls `get_risk_sections()` too, and
+# keeps its tuple only as the order the house style opens with.
 #
-# KNOWN DEFECT, deliberately still here, so the next person does not
-# have to rediscover it: on a FRESH install the `keywords` table is
-# empty (no migration seeds it), so get_risk_sections() below falls back
-# to these five names and GET /dashboard/today's "By section" card
-# renders five sections that nobody configured, each at 0. The honest
-# answer there is an empty list, meaning "no sections configured yet" —
-# the same answer frontend/js/util.js now gives, where the matching
-# five-name fallback WAS removed this round.
+# THERE IS NO FIVE-NAME FALLBACK ANY MORE, and there must not be one
+# again. It used to sit here as `_RISK_SECTIONS_FALLBACK` and was
+# returned whenever the `keywords` table came back empty -- which on a
+# FRESH install is always, because no migration seeds that table. So
+# GET /dashboard/today's "By section" card opened on five sections
+# nobody had configured, each reading 0, and they were indistinguishable
+# from real ones. That is fabricated data on the product's primary
+# screen.
 #
-# The one-line fix is to drop the `or _RISK_SECTIONS_FALLBACK` from the
-# success branch of get_risk_sections() (keeping it on the except
-# branch, where "the query failed" genuinely is a different thing from
-# "there are none"). It was not applied here because it fails
-# tests/test_core_dashboard.py::test_today_counts_reflect_real_rows,
-# which asserts `section_labels == {those five}` against an empty
-# keywords table, and that file is outside this change's ownership. Both
-# edits have to land together.
-_RISK_SECTIONS_FALLBACK: tuple[str, ...] = ("Geopolitical", "Macroeconomy", "Telco/regulatory", "Political", "Others")
+# It was not only cosmetic. `app.services.risklines` resolves its
+# political-stability line against this same set and says so plainly
+# when the section is absent; the fallback meant it found a "Political"
+# section that did not exist and reported zero coverage forever instead
+# of "no Political section is configured".
+#
+# The honest answer when nothing is configured is nothing. Callers must
+# handle an empty tuple:
+#   * risklines already did, and is more truthful for the change.
+#   * the /dashboard/today card unions this with the sections actually
+#     observed on today's articles (see app/api/routers/dashboard.py),
+#     so a real count is never hidden just because no keyword row
+#     declares that section yet.
+#
+# A read that FAILS is a different thing from a read that finds none,
+# and the two are still kept apart below: on an exception the last known
+# good value is served if there is one, and only an empty tuple if there
+# is not. What is gone is inventing names in either case.
 _RISK_SECTIONS_CACHE_TTL_SECONDS = 60.0
 _risk_sections_cache: tuple[str, ...] | None = None
 _risk_sections_cache_at = 0.0
@@ -66,10 +76,10 @@ def get_risk_sections(conn: DictConnection) -> tuple[str, ...]:
     normalized to "Uncategorized"), derived via
     app.services.admin.list_keyword_sections — one source of truth for
     what "a section" means, shared with the Keywords admin screen —
-    rather than a second, possibly-diverging query here. Falls back to
-    the original fixed 5-value list when no keywords exist yet (a fresh
-    install) or the query fails for any reason, so callers never see an
-    empty section list. Cached for `_RISK_SECTIONS_CACHE_TTL_SECONDS`
+    rather than a second, possibly-diverging query here. Returns an
+    EMPTY tuple when no keywords exist yet (a fresh install); see the
+    module comment above for why inventing five names here was worse
+    than answering none. Cached for `_RISK_SECTIONS_CACHE_TTL_SECONDS`
     (this runs on every `/dashboard/today` request; section rows change
     rarely) rather than queried fresh every time.
     """
@@ -82,9 +92,16 @@ def get_risk_sections(conn: DictConnection) -> tuple[str, ...]:
 
     try:
         rows = list_keyword_sections(conn)
-        sections = tuple(r["section"] for r in rows if r.get("section")) or _RISK_SECTIONS_FALLBACK
+        # No `or <some default>`. An empty result means no section is
+        # configured, which is a real and reportable state, not a gap to
+        # paper over.
+        sections = tuple(r["section"] for r in rows if r.get("section"))
     except Exception:
-        sections = _risk_sections_cache or _RISK_SECTIONS_FALLBACK
+        # The read failed, which is NOT the same as "there are none" --
+        # serve the last known good value rather than asserting an empty
+        # configuration the operator never made. Empty only if this
+        # process has never had a successful read.
+        sections = _risk_sections_cache or ()
 
     _risk_sections_cache = sections
     _risk_sections_cache_at = now
@@ -380,6 +397,18 @@ class ExportPresetOut(BaseModel):
 class BriefBulletOut(BaseModel):
     lead: str
     rest: str = ""
+    # False when no model wrote this bullet and it is the article's own
+    # headline verbatim -- either no SUMMARIZATION provider resolved, or
+    # `draft_bullet` could not read one out of the response. Degrading to
+    # the headline is the right posture; what was wrong is that the
+    # result was indistinguishable from drafted prose, so a document that
+    # went to a board could be entirely undrafted headlines and read as
+    # finished work. app/services/brief.py marks it in the .docx too.
+    #
+    # Defaults to True so drafts persisted before this field existed
+    # render exactly as they always did, rather than every historical
+    # bullet suddenly claiming to be undrafted.
+    drafted: bool = True
 
 
 class BriefSectionOut(BaseModel):

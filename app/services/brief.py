@@ -45,11 +45,33 @@ from typing import Any
 from docx import Document
 from docx.shared import Pt
 
+from app.api.schemas.core import get_risk_sections
 from app.db.connection import DictConnection
 from app.db.settings import get_setting, set_setting
 from app.errors import ConfigurationError
 
-RISK_SECTIONS: tuple[str, ...] = ("Geopolitical", "Macroeconomy", "Telco/regulatory", "Political", "Others")
+# The five names this module was born with. NOT the set it iterates any
+# more -- `generate_draft` resolves the CONFIGURED sections at call time
+# via `app.api.schemas.core.get_risk_sections`, the same source the
+# dashboard and risklines read.
+#
+# Iterating this tuple meant an approved article in an admin-created
+# section never reached the Word document. Sections are admin-creatable
+# (`keywords.section`: any non-empty string an admin types becomes one,
+# and the .xlsx import path can create them too), so the brief silently
+# dropped exactly the coverage somebody had gone out of their way to
+# start tracking. Nothing surfaced it: the section simply was not in the
+# document.
+#
+# Kept only as the ORDER the house style opens with, and only for the
+# sections that are actually configured -- anything else follows,
+# alphabetically. A brief that reorders itself because an admin renamed
+# a keyword row would be its own small betrayal of trust.
+HOUSE_SECTION_ORDER: tuple[str, ...] = ("Geopolitical", "Macroeconomy", "Telco/regulatory", "Political", "Others")
+
+# Display headings for the sections above. `.get(section, section)` at
+# the call site means an admin-created section gets its own name as its
+# heading rather than being skipped.
 SECTION_TITLES: dict[str, str] = {
     "Geopolitical": "◆ Geopolitical Outlook",
     "Macroeconomy": "◆ Macroeconomic Outlook",
@@ -101,6 +123,30 @@ def _approved_articles_for_section(conn: DictConnection, day: date, section: str
     return [dict(r) for r in rows]
 
 
+def _sections_present_on_approved(conn: DictConnection, day: date) -> list[str]:
+    """Sections the day's approved articles actually carry.
+
+    `articles.sections` is written by the matcher from whatever the
+    keyword rows said at COLLECTION time, so an approved article can
+    carry a section whose keyword row was renamed or deleted since.
+    Iterating only the configured set would drop that article from the
+    brief without a word -- the same way iterating a frozen five-name
+    tuple used to drop admin-created sections. A story somebody approved
+    for the brief belongs in the brief.
+    """
+    rows = conn.execute(
+        """
+        SELECT DISTINCT s AS section
+        FROM articles a, unnest(string_to_array(a.sections, ', ')) AS s
+        WHERE a.day = %(day)s AND a.review_status = 'approved'
+          AND COALESCE(a.is_primary, TRUE) = TRUE
+          AND a.sections <> ''
+        """,
+        {"day": day},
+    ).fetchall()
+    return [r["section"] for r in rows]
+
+
 def _split_bullet(text: str) -> dict[str, str]:
     if BULLET_SEPARATOR in text:
         lead, rest = text.split(BULLET_SEPARATOR, 1)
@@ -131,21 +177,49 @@ def generate_draft(conn: DictConnection, *, day: date, fuel: str | None = None) 
 
     client = _build_client(conn)
 
+    # The union of what is CONFIGURED and what the day's approved
+    # articles actually carry, in house order first and then
+    # alphabetically, so the document opens the way the house style
+    # expects and still contains everything somebody approved.
+    #
+    # Configured alone is not enough (an approved article whose keyword
+    # row was renamed or deleted would vanish); observed alone is not
+    # enough either (a configured section with no approved stories must
+    # still appear, saying so, rather than being silently absent).
+    available = set(get_risk_sections(conn)) | set(_sections_present_on_approved(conn, day))
+    ordered = [s for s in HOUSE_SECTION_ORDER if s in available] + sorted(
+        s for s in available if s not in HOUSE_SECTION_ORDER
+    )
+
     sections_out = []
-    for section in RISK_SECTIONS:
+    for section in ordered:
         articles = _approved_articles_for_section(conn, day, section)
         bullets = []
         for art in articles:
             title = art["title_en"] or art["title"]
+            # `drafted` records whether a model actually wrote this
+            # bullet, and it is the whole point of the flag.
+            #
+            # Two paths put the RAW HEADLINE in the bullet: no
+            # SUMMARIZATION provider resolving (a routine state, see
+            # app.services.llm.registry), and `draft_bullet` failing to
+            # parse a response (app.services.llm.parsing returns the
+            # title unchanged). Degrading to the headline is right --
+            # every other P3 stage degrades rather than crashing. What
+            # was wrong is that the result was INDISTINGUISHABLE from a
+            # drafted bullet once it reached the .docx, so a document
+            # that went to a board could be entirely undrafted headlines
+            # and read as finished work.
             if client is not None:
                 text = client.draft_bullet(title, art["content_text"], section)
+                # parsing returns the title verbatim when it cannot read
+                # a bullet out of the response, so comparing against it
+                # is how that failure is detected here.
+                drafted = text.strip() != title.strip()
             else:
-                # No LLM provider configured for this feature (routine
-                # state — see app.services.llm.registry) -> fall back to
-                # the bare headline as the bullet, same "degrade, never
-                # crash" posture every other P3 stage uses.
                 text = title
-            bullets.append(_split_bullet(text))
+                drafted = False
+            bullets.append({**_split_bullet(text), "drafted": drafted})
         sections_out.append(
             {
                 "title": SECTION_TITLES.get(section, section),
@@ -191,6 +265,15 @@ def render_docx(draft: dict[str, Any], day: date) -> bytes:
             rest = bullet.get("rest") or ""
             if rest:
                 p.add_run(" – " + rest)
+            # An undrafted bullet is the article's own headline, not
+            # house-style prose, and the reader has to be able to tell.
+            # Older drafts persisted before this flag existed carry no
+            # "drafted" key at all; default to True so they render
+            # exactly as they always did rather than every historical
+            # bullet suddenly claiming to be undrafted.
+            if not bullet.get("drafted", True):
+                marker = p.add_run("  [headline as published, not drafted]")
+                marker.italic = True
 
     buf = io.BytesIO()
     doc.save(buf)
