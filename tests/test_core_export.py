@@ -330,3 +330,52 @@ def test_create_preset_invalid_filter_returns_422(export_client) -> None:
     client, _conn = export_client
     resp = client.post("/export/presets", json={"name": "Bad", "filter": "nope"})
     assert resp.status_code == 422
+
+
+# ── Spreadsheet formula injection, end to end ───────────────────────────
+
+
+def test_a_scraped_headline_cannot_reach_the_xlsx_as_a_live_formula(export_client) -> None:
+    """The whole path, not the helper: a hostile title in the database
+    comes back out of `POST /export` as TEXT.
+
+    `articles.title` is scraped verbatim from third-party news sites, so
+    its first character is somebody else's choice. Before the defence,
+    this exact row produced an openpyxl cell with `data_type == "f"` --
+    a formula Excel offers to execute when the file is opened.
+    """
+    import io
+
+    from openpyxl import load_workbook
+
+    client, conn = export_client
+    _insert_article(conn, title="=cmd|'/c calc'!A0", review_status="approved", sections="Macroeconomy")
+    conn.commit()
+
+    resp = client.post("/export", json={}, params={"scope": "today", "filter": "approved", "format": "xlsx"})
+    assert resp.status_code == 200
+
+    ws = load_workbook(io.BytesIO(resp.content)).active
+    formula_cells = [
+        (r, c.value)
+        for r in range(1, ws.max_row + 1)
+        for c in (ws.cell(row=r, column=1),)
+        if c.data_type == "f"
+    ]
+    assert formula_cells == [], f"a scraped headline reached the spreadsheet as a formula: {formula_cells}"
+
+
+def test_a_scraped_headline_cannot_reach_the_csv_as_a_live_formula(export_client) -> None:
+    """Same row, CSV. Excel applies the same formula rules to an opened
+    .csv, so quoting alone is not the defence -- the leading character is.
+    """
+    client, conn = export_client
+    _insert_article(conn, title="=cmd|'/c calc'!A0", review_status="approved", sections="Macroeconomy")
+    conn.commit()
+
+    resp = client.post("/export", json={}, params={"scope": "today", "filter": "approved", "format": "csv"})
+    assert resp.status_code == 200
+
+    body = resp.content.decode("utf-8-sig")
+    offenders = [ln for ln in body.splitlines()[1:] if ln[:1] in ("=", "+", "-", "@")]
+    assert offenders == [], f"CSV line starts with a formula lead: {offenders}"

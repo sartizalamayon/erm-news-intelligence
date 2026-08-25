@@ -327,7 +327,7 @@ function renderRisk(data) {
           <h3 style="font-size:16px;font-weight:600;letter-spacing:-.4px;margin:0 0 4px;">Risk lines</h3>
           <p style="color:var(--tx3);font-size:12.5px;margin:0;line-height:1.5;max-width:760px;">
             The lines this desk carries on the register. Each states what moved, over the window its own evidence
-            actually covers &mdash; market lines run a full twelve months, news-derived lines only as far as
+            actually covers. Market lines run a full twelve months, news-derived lines only as far as
             collection reached.</p>
         </div>
         ${winChip("Windows differ by line", "market")}
@@ -1017,7 +1017,7 @@ function previewHtml(res) {
       : `<div style="padding-top:14px;border-top:1px solid var(--line);margin-top:14px;">
            <div style="font-size:13px;font-weight:600;margin-bottom:5px;">With ${escapeHtml(
              res.guard.label.toLowerCase()
-           )} required &mdash; ${res.guardedTotal} matches.</div>
+           )} required: ${res.guardedTotal} matches.</div>
            <div style="font-size:11.5px;color:var(--tx3);line-height:1.6;">${escapeHtml(res.guard.blurb)}</div>
            ${
              res.guardedSample?.length

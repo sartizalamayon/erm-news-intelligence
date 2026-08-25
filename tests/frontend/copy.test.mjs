@@ -41,22 +41,50 @@ test("the source tree was actually found", () => {
   assert.ok(FILES.length >= 15, `expected the frontend js tree, found ${FILES.length} files`);
 });
 
-test("no em dash or en dash in user-facing text", () => {
+// Every way an em or en dash can reach the screen, not just the literal
+// character.
+//
+// This check used to look for "—" and "–" only, and two `&mdash;`
+// entities sat in dashboard_long.js the whole time, rendering as em
+// dashes on the long-term boards while the lint reported clean. Found by
+// reading the actual rendered page, which is the only place the
+// difference between "what the source contains" and "what the user
+// reads" is visible. The screen is what the rule is about, so the check
+// has to cover both.
+//
+// Numeric entities are included because they are the obvious next way to
+// write the same character once the named ones are caught.
+const DASH_FORMS = [
+  "—",
+  "–",
+  "&mdash;",
+  "&ndash;",
+  "&#8212;",
+  "&#8211;",
+  "&#x2014;",
+  "&#x2013;",
+  "&#X2014;",
+  "&#X2013;",
+];
+
+test("no em dash or en dash in user-facing text, however it is spelled", () => {
   const offenders = [];
   for (const { rel, lines } of FILES) {
     lines.forEach((line, i) => {
       if (isComment(line)) return;
-      if (line.includes("—") || line.includes("–")) {
-        offenders.push(`${rel}:${i + 1}  ${line.trim().slice(0, 100)}`);
+      const found = DASH_FORMS.filter((d) => line.includes(d));
+      if (found.length) {
+        offenders.push(`${rel}:${i + 1}  [${found.join(" ")}]  ${line.trim().slice(0, 90)}`);
       }
     });
   }
   assert.deepEqual(
     offenders,
     [],
-    "Em/en dashes are prohibited in UI copy. Use a colon for label:value, " +
-      "a full stop to split a sentence, 'to' for a numeric range, or 'n/a' " +
-      "for a missing value:\n  " + offenders.join("\n  ")
+    "Em/en dashes are prohibited in UI copy, including HTML-entity forms " +
+      "(they render identically). Use a colon for label:value, a full stop " +
+      "to split a sentence, 'to' for a numeric range, or 'n/a' for a " +
+      "missing value:\n  " + offenders.join("\n  ")
   );
 });
 

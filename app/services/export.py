@@ -130,6 +130,57 @@ COLUMN_HEADERS: dict[str, str] = {
 }
 
 
+# ── Spreadsheet formula injection (CSV/DDE) ─────────────────────────
+#
+# EVERY value written into a .xlsx or .csv cell must go through
+# `defuse_spreadsheet_formula` first. This is not hardening in the
+# abstract; it was live, and it was verified live.
+#
+# Excel, LibreOffice and Google Sheets all treat a cell whose text
+# begins with `=`, `+`, `-` or `@` as a FORMULA, not as text. A .xlsx
+# built by openpyxl from the string "=cmd|'/c calc'!A0" is saved with
+# `data_type == "f"` -- a real formula cell -- and the equivalent CSV
+# line begins with a bare `=`. Opening that file and clearing the
+# resulting prompt is enough for a DDE payload to run a command, or for
+# `=HYPERLINK`/`=WEBSERVICE` to quietly send the row's contents to
+# somebody else's server.
+#
+# Why this product is squarely in the blast radius, rather than
+# theoretically at risk:
+#
+#   * `articles.title` is SCRAPED, verbatim, from ~51 third-party news
+#     sites. Nothing in the pipeline constrains a headline's first
+#     character, and nothing should -- it is someone else's text.
+#   * The export exists specifically so that text can be opened as a
+#     spreadsheet, by an executive, on a corporate laptop.
+#   * `keywords.term_en` / `term_bn` / `section` are free text an admin
+#     types, AND arrive through `import_keywords_xlsx`, so a hostile
+#     file can be imported once and re-exported to somebody else later.
+#
+# Reproduced end to end against a real export before this existed: a row
+# whose title was `=cmd|'/c calc'!A0` came back out of `POST /export` as
+# a formula cell in the .xlsx and as an unquoted `=...` line in the CSV.
+#
+# The fix is the standard one (OWASP): prefix a leading apostrophe,
+# which every spreadsheet reads as "the rest of this cell is text" and
+# does not display. It is applied to strings only, so real numbers stay
+# numbers and stay sortable; a negative number reaching a cell as a
+# float is untouched, and one reaching it as a STRING was already text
+# as far as the sheet was concerned.
+_FORMULA_LEAD = ("=", "+", "-", "@", "\t", "\r")
+
+
+def defuse_spreadsheet_formula(value: Any) -> Any:
+    """`value`, made safe to write into a spreadsheet cell.
+
+    Leaves non-strings exactly as they are: openpyxl writes a float as a
+    number, and a number cannot carry a formula.
+    """
+    if isinstance(value, str) and value[:1] in _FORMULA_LEAD:
+        return "'" + value
+    return value
+
+
 def _today() -> date:
     return datetime.now(DHAKA).date()
 
@@ -382,7 +433,7 @@ def export_csv(
     writer = csv.writer(buf)
     writer.writerow([COLUMN_HEADERS[c] for c in cols])
     for r in rows:
-        writer.writerow([_column_value(c, r) for c in cols])
+        writer.writerow([defuse_spreadsheet_formula(_column_value(c, r)) for c in cols])
     filename = _filename(filter, top_n, scope, "csv")
     return buf.getvalue().encode("utf-8-sig"), filename
 
@@ -402,7 +453,7 @@ def export_xlsx(
     ws.title = "Export"
     ws.append([COLUMN_HEADERS[c] for c in cols])
     for r in rows:
-        ws.append([_column_value(c, r) for c in cols])
+        ws.append([defuse_spreadsheet_formula(_column_value(c, r)) for c in cols])
     for i, _c in enumerate(cols, start=1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = 22
 

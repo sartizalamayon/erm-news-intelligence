@@ -46,6 +46,7 @@ from app.db.settings import get_setting, set_setting
 from app.errors import SourceError, ValidationError
 from app.logging import get_logger
 from app.services.data_transfer import ExportManifest, ImportReport, export_to_jsonl, import_from_jsonl
+from app.services.export import defuse_spreadsheet_formula
 from app.services.llm import quota as llm_quota
 from app.services.llm import routing as llm_routing
 from app.services.llm.prompts import (
@@ -631,7 +632,14 @@ def export_keywords_xlsx(conn: DictConnection) -> bytes:
     ws.append(list(KEYWORD_EXPORT_COLUMNS))
     for r in rows:
         d = _keyword_row_to_dict(dict(r))
-        ws.append([d["id"], d["section"], d["term_en"], d["term_bn"], d["enabled"]])
+        # Same spreadsheet-formula defence the article export uses, and
+        # needed for the same reason: `section`/`term_en`/`term_bn` are
+        # free text, and `import_keywords_xlsx` means a hostile file can
+        # be imported once and handed to somebody else on the way out.
+        # See `defuse_spreadsheet_formula`'s comment for what a `=`-led
+        # cell does when the file is opened.
+        cells = (d["id"], d["section"], d["term_en"], d["term_bn"], d["enabled"])
+        ws.append([defuse_spreadsheet_formula(v) for v in cells])
     for i in range(1, len(KEYWORD_EXPORT_COLUMNS) + 1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = 22
     buf = io.BytesIO()
