@@ -8,11 +8,17 @@ spending a real HTTP call on it.
 from provider-limits.md §7: "Google no longer publishes its free-tier
 numbers, and Groq's [numbers], while the best-documented today, [are]
 explicitly not guaranteed... rate limits... belong in a config file the
-operator can update in five minutes... not in code"). `DEFAULT_LIMITS`
+operator can update in five minutes... not in code"). `_MODEL_LIMITS`
 below is the ONLY place a number appears in this module, and it exists
 purely as a documented, overridable starting point returned when the
 admin hasn't set anything yet — never read directly by any call/quota
-decision, which always goes through `load_provider_limits()`.
+decision, which always goes through `load_provider_limits()`. It is
+keyed by (provider, MODEL), because a daily ceiling belongs to a model
+and not to the vendor serving it; the per-provider `DEFAULT_LIMITS` is
+derived from it through whichever model
+`app.services.llm.provider_registry` currently defaults that provider
+to. See that block's own comment for the failure this structure exists
+to prevent.
 
 Storage: no dedicated quota table exists yet (this task may not touch
 `migrations/**` — see module docstring in `app/services/llm/__init__.py`
@@ -38,6 +44,7 @@ from typing import Protocol
 
 from app.db.connection import DictConnection
 from app.db.settings import get_setting, set_setting
+from app.services.llm.provider_registry import DEFAULT_PROVIDER_DEFINITIONS
 
 PROVIDER_LIMITS_SETTINGS_KEY = "llm_provider_limits"
 _QUOTA_USAGE_KEY_PREFIX = "llm_quota_usage"
@@ -113,49 +120,125 @@ class QuotaStatus:
         return False
 
 
-# Documented starting point ONLY — never consulted directly by quota
-# logic, only returned by `load_provider_limits()` when the admin hasn't
-# configured anything yet, so a fresh install has a sane default instead
-# of "everything looks unlimited by omission."
-#   * groq: provider-limits.md §1.1, VERIFIED (primary source,
-#     console.groq.com/docs/rate-limits, fetched 2026-08-06) for
-#     `qwen/qwen3.6-27b` — the ADR §9.1-ruled model: 1,000 RPD, 200,000 TPD.
-#   * gemini: provider-limits.md §1.2 — Google does not publish a
-#     static Free-tier RPM/TPM/RPD as of 2026-08-06; deliberately left
-#     UNKNOWN (None) rather than seeded with a contested secondary-source
-#     number, per that document's own "do not build a hard budget on an
-#     UNVERIFIED number" instruction. An admin must set this from a
-#     logged-in `aistudio.google.com/rate-limit` read before Gemini's
-#     quota tracking means anything beyond raw usage counting.
+# ── Documented starting points, keyed by MODEL rather than by provider ──
 #
-# RE-VERIFIED 2026-08-07 with real credentials
-# (`docs/provider-limits-VERIFIED.md`, live response headers): Groq's
-# `qwen/qwen3.6-27b` RPD=1,000 confirmed exactly via
-# `x-ratelimit-limit-requests`; live headers additionally exposed a
-# TPM=8,000 (tokens/MINUTE) ceiling this dataclass does not track
-# (DoD #2 asks for per-DAY tracking specifically — TPM is a wall-clock
-# PACING constraint, modeled in `docs/token-budget.md` instead of here;
-# revisit if per-minute enforcement becomes a real runtime requirement).
-# TPD itself (200,000) was not independently re-confirmed by a live
-# header (Groq's rate-limit headers exposed RPD/TPM, not TPD) but is
-# not contradicted by anything measured live either — still the
-# best-available number, cited to the same primary docs source.
-# Gemini's `tpd=None`/`rpd=None` is DOUBLY confirmed now: the live probe
-# found Gemini returns no rate-limit headers at all on a successful
-# response, so RPD/TPM remain genuinely unverifiable from outside a
-# logged-in AI Studio dashboard — not just "the docs don't publish it."
-DEFAULT_LIMITS: dict[str, ProviderLimits] = {
-    "groq": ProviderLimits(tpd=200_000, rpd=1_000),
-    "gemini": ProviderLimits(tpd=None, rpd=None),
-    # mistral: verified live 2026-08-07 via response headers —
-    # x-ratelimit-limit-tokens-minute=50000, x-ratelimit-limit-req-minute=50.
-    # No daily ceiling exposed; tpd/rpd stay unknown until observed.
-    "mistral": ProviderLimits(tpd=None, rpd=None),
-    # nvidia: verified live 2026-08-07 — zero rate-limit headers on a
-    # successful response (unlike Mistral/Groq). Ceilings must be
-    # learned from live 429s, never assumed/hardcoded.
-    "nvidia": ProviderLimits(tpd=None, rpd=None),
+# A daily ceiling is a property of the (provider, model) PAIR, never of
+# the provider. This map used to be keyed by provider alone, and that
+# single modelling mistake is what made it rot:
+#
+#     "groq": ProviderLimits(tpd=200_000, rpd=1_000)
+#
+# Those two numbers were sourced, correctly and with a live header
+# check, for `qwen/qwen3.6-27b` — the model ADR §9.1 originally ruled
+# for Groq. `provider_registry` has since moved Groq to
+# `llama-3.1-8b-instant` (see `migrations/0027_retire_seeded_model_ids.sql`
+# and DEFAULT_PROVIDER_DEFINITIONS' own header for the full reasoning:
+# qwen is a REASONING model whose thinking tokens are pure waste for the
+# short JSON verdicts this pipeline asks for, and it caps at 1,000 RPD
+# against a ~1,100 req/day workload). The ceilings did not follow the
+# model, because nothing structurally tied them to it.
+#
+# What that cost, on a database with no admin-configured ceilings —
+# i.e. every fresh deploy:
+#
+#   * `app.services.admin.get_quota_status` serves these numbers
+#     straight to the admin console, so Groq reads 100% of budget after
+#     1,000 requests when the real ceiling is 14,400 — 14.4x — and the
+#     console tells the operator to stop using a provider that is
+#     nowhere near its limit.
+#   * `app.services.llm.failover.FailoverTransport` reads
+#     `QuotaStatus.exhausted` to skip a candidate BEFORE spending a
+#     call on it. Past 1,000 requests it would have abandoned a
+#     perfectly healthy Groq for the rest of the day and pushed the
+#     whole workload onto the fallbacks.
+#
+# The fix is the same shape as 0027's: stop storing an answer that can
+# outlive the question it was asked about. Ceilings are recorded here
+# against the exact model they were measured on, and the per-provider
+# default is RESOLVED from whichever model
+# `provider_registry.DEFAULT_PROVIDER_DEFINITIONS` currently defaults
+# that provider to — the single source of truth for anything
+# provider-specific, and the only place a model id is ever live-probed.
+#
+# The important property is what happens on the NEXT model change: a
+# model with no measured entry below resolves to `ProviderLimits()`,
+# i.e. UNKNOWN on both dimensions, not to some other model's numbers.
+# Unknown is the safe direction and is already a first-class state here
+# (see `ProviderLimits`/`exhausted`): we stop pre-emptively skipping the
+# provider and let its own 429 be the signal, which is exactly what
+# `app.services.llm.failover` is built to catch. A stale number is the
+# dangerous direction, because it is silently believed.
+_MODEL_LIMITS: dict[tuple[str, str], ProviderLimits] = {
+    # groq / llama-3.1-8b-instant — Groq's own published free-tier table
+    # (console.groq.com/docs/rate-limits) confirmed live against this
+    # project's real keys on 2026-08-14: RPD=14,400 read exactly off
+    # `x-ratelimit-limit-requests`, TPD=500,000 from the published
+    # table. Live headers also expose TPM=6,000 (tokens/MINUTE), which
+    # this dataclass deliberately does not track — DoD #2 asks for
+    # per-DAY ceilings; TPM is a wall-clock PACING constraint, modeled
+    # in `docs/token-budget.md` and enforced by
+    # `app.services.llm.concurrency`'s limiter instead.
+    ("groq", "llama-3.1-8b-instant"): ProviderLimits(tpd=500_000, rpd=14_400),
+    # groq / qwen/qwen3.6-27b — RETIRED (0027). Kept deliberately, not
+    # deleted: it is the row that makes this map's whole point legible.
+    # Same provider, different model, ceilings 14.4x apart. Anyone who
+    # re-pins Groq to qwen through the admin console still gets the
+    # numbers that were actually measured for it (provider-limits.md
+    # §1.1, VERIFIED 2026-08-06, and RPD=1,000 re-confirmed live
+    # 2026-08-07 via `x-ratelimit-limit-requests`; TPD=200,000 comes
+    # from the published table, never contradicted by a live header).
+    ("groq", "qwen/qwen3.6-27b"): ProviderLimits(tpd=200_000, rpd=1_000),
+    # Everything else is deliberately absent, which resolves to UNKNOWN:
+    #   * gemini — provider-limits.md §1.2: Google publishes no static
+    #     free-tier RPM/TPM/RPD, and the 2026-08-07 live probe found
+    #     Gemini returns no rate-limit headers at all on a successful
+    #     response. Genuinely unverifiable from outside a logged-in AI
+    #     Studio dashboard, so seeding a contested secondary-source
+    #     number would violate that document's own "do not build a hard
+    #     budget on an UNVERIFIED number."
+    #   * mistral — verified live 2026-08-07 via response headers, but
+    #     only per-MINUTE ones (x-ratelimit-limit-tokens-minute=50000,
+    #     x-ratelimit-limit-req-minute=50). No daily ceiling is exposed.
+    #   * nvidia — verified live 2026-08-07: zero rate-limit headers on
+    #     a successful response. Ceilings must be learned from live
+    #     429s, never assumed.
+    #   * cerebras — no free tier exists at all (every call returns
+    #     "Payment required"), so it is `enabled=False` in the registry
+    #     and there is nothing to budget.
 }
+
+
+def default_limits_for_model(provider: str, model: str) -> ProviderLimits:
+    """The measured daily ceilings for one (provider, model) pair, or
+    fully-unknown limits if nobody has measured that pair. See
+    `_MODEL_LIMITS` for why unknown is the safe answer rather than a
+    neighbouring model's numbers.
+    """
+    return _MODEL_LIMITS.get((provider, model), ProviderLimits())
+
+
+def default_provider_limits() -> dict[str, ProviderLimits]:
+    """Starting-point ceilings for every provider the registry defines,
+    resolved through each provider's CURRENT default model.
+
+    Never consulted directly by any quota decision — every one of those
+    goes through `load_provider_limits()`, which prefers whatever the
+    admin has configured. This only answers "what should a database
+    nobody has configured yet assume", so that a fresh install has real
+    numbers instead of "everything looks unlimited by omission."
+    """
+    return {
+        provider: default_limits_for_model(provider, definition.default_model)
+        for provider, definition in DEFAULT_PROVIDER_DEFINITIONS.items()
+    }
+
+
+# Materialized once at import, same as the hand-written dict this
+# replaces: `DEFAULT_PROVIDER_DEFINITIONS` is itself a module constant,
+# so there is nothing here that can change between calls. The name is
+# kept because `load_provider_limits`, `QuotaTracker` and several tests
+# already reference it; what changed is where the numbers come from.
+DEFAULT_LIMITS: dict[str, ProviderLimits] = default_provider_limits()
 
 
 class QuotaStore(Protocol):

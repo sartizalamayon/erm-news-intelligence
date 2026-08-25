@@ -91,6 +91,34 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      # THIS WORKFLOW WOULD HAVE FAILED ON EVERY SINGLE RUN WITHOUT THE
+      # THREE LINES BELOW. `app.batch.run_daily.main()` calls
+      # `validate_production_settings`, and APP_ENV is `production` here
+      # — so the same startup check that protects the API applies to the
+      # cron job. That check now validates the SELECTED email provider's
+      # credentials, `email_provider` defaults to `brevo`, and this env
+      # block declared only RESEND_API_KEY. Reproduced directly: the
+      # batch entrypoint raises `ConfigurationError: Missing required
+      # production configuration: BREVO_API_KEY (required because
+      # EMAIL_PROVIDER=brevo), BREVO_FROM_EMAIL (...)` before it fetches
+      # a single article. The nightly collection — the thing this entire
+      # repository exists to produce — would have been dead from the
+      # first scheduled run, with a red X every morning and no articles
+      # ever appearing in the product.
+      #
+      # The batch sends no email at all; it needs these purely because
+      # the production check is deliberately whole-process rather than
+      # per-entrypoint (one definition of "is this deployment
+      # configured", not two that can disagree). EMAIL_PROVIDER is set
+      # explicitly rather than left to the default so this block states
+      # which of the two credential pairs is the live one, exactly as
+      # render.yaml does. tests/test_batch_workflow_production_env.py
+      # derives the requirement from `_EMAIL_PROVIDER_REQUIRED_ENV`, so
+      # switching provider here without switching the secrets fails a
+      # test instead of a 06:00 cron run.
+      EMAIL_PROVIDER: brevo
+      BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+      BREVO_FROM_EMAIL: ${{ secrets.BREVO_FROM_EMAIL }}
 
     steps:
       - uses: actions/checkout@v4

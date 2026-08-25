@@ -186,8 +186,13 @@ function meanColor(mean) {
  * to a 0% bar would hide it exactly as badly as drawing a phantom one.
  * So the floor now applies above zero only, which is the distinction
  * the backend was already making and the frontend was throwing away.
+ *
+ * Exported only so `tests/frontend/dashboard-long.test.mjs` can assert
+ * the zero/near-zero distinction directly. It is a pure function of one
+ * number, so testing it as one is far more exact than reading heights
+ * back out of a rendered string.
  */
-function sparkHeightPct(value) {
+export function sparkHeightPct(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return 0;
   return Math.max(4, Math.round(n * 100));
@@ -692,6 +697,25 @@ function watchlistCard(wl, isAdmin) {
  * The add-an-entity form. Split out of `watchlistCard` when the card
  * became conditional, so a non-admin's page does not carry a form whose
  * every submit path the server refuses.
+ *
+ * THE 222 IS AN EXAMPLE FROM ONE ARCHIVE, NOT A READING OF THIS ONE.
+ * The blurb at the foot of the panel used to print it as flat present
+ * tense ("রবি matched 222 articles before anyone looked"), which on a
+ * screen where every other number is measured live reads as a fact
+ * about the database in front of you. It is not: it is a measurement
+ * taken against the development corpus while this guard was being
+ * designed (the same one `app/db/watchlist.py`'s module docstring
+ * records), and a fresh production database will not reproduce it.
+ * Saying which archive it came from costs one clause and stops the
+ * panel claiming a number it never ran. The point of the example
+ * survives intact, because the point is the ratio, not the total.
+ *
+ * That explanation lived in an HTML comment INSIDE the template literal
+ * below. Two things wrong with that: it shipped to every reader's DOM,
+ * and a single backtick anywhere in it would have ended the template
+ * literal and taken this screen out entirely, which is exactly how
+ * review.js once failed to parse. Explanations go in JS comments, out
+ * here. See tests/frontend/parse.test.mjs.
  */
 function addPanelHtml(groups) {
   return `
@@ -729,19 +753,6 @@ function addPanelHtml(groups) {
           </div>
           <div id="wlPreview">
             <div class="card" style="background:var(--panel);padding:16px 18px;">
-              <!-- THE 222 IS AN EXAMPLE FROM ONE ARCHIVE, NOT A READING
-                   OF THIS ONE. It used to be printed as flat present
-                   tense ("matched 222 articles before anyone looked"),
-                   which on a screen where every other number is measured
-                   live reads as a fact about the database in front of
-                   you. It is not: it is a measurement taken against the
-                   development corpus while this guard was being designed
-                   (the same one app/db/watchlist.py's docstring records),
-                   and a fresh production database will not reproduce it.
-                   Saying which archive it came from costs one clause and
-                   stops the panel claiming a number it never ran. The
-                   POINT of the example survives the correction intact,
-                   because the point is the ratio, not the total. -->
               <div style="font-size:11.5px;color:var(--tx3);line-height:1.6;">
                 A Bangla term is checked against the archive before it can be saved, because Bangla word boundaries do
                 not work the way Latin ones do. In the corpus this guard was built against,

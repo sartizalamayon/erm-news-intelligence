@@ -160,8 +160,85 @@ jobs:
         if: matrix.python-version == '3.12'
         run: node --test "tests/frontend/"*.test.mjs
 
-      - name: Batch entrypoint smoke check
+      - name: Batch entrypoint smoke check (offline)
         # DoD #1: the batch CLI must be runnable independently of the web
-        # app. Runs the real no-op (app.batch.run_daily.main) end to end,
-        # not just imported.
-        run: python -m app.batch
+        # app. Still runs `python -m app.batch` for real, end to end —
+        # but with every outbound path closed first.
+        #
+        # WHAT THIS STEP USED TO DO, and why it had to change: `run:
+        # python -m app.batch` with this job's blank `DATABASE_URL` takes
+        # app/batch/run_daily.py's `run_collection(None, ...)` branch —
+        # fetch-only, no DB write, but REAL discovery against all ~45
+        # registered sources (app/sources/registry.py). tests/conftest.py's
+        # socket guard is a pytest fixture and pytest is not running here,
+        # so nothing stopped it. Every push and every PR update therefore
+        # sent live traffic from GitHub's IPs to 45 third-party news
+        # sites, and paid ~2.5 minutes of wall clock per matrix leg for
+        # the privilege — while THIS FILE's own header promises CI "must
+        # NEVER call a real LLM provider or reach the live internet for
+        # anything business-relevant". The promise was true of every
+        # other step and false of the last one.
+        #
+        # Two independent blocks, because one is not enough here:
+        #
+        #   1. The proxy env vars below. Every HTTP client in this
+        #      process tree honours them — `requests` (app/sources/http.py)
+        #      AND the system `curl` binary that
+        #      app/sources/_curl_sitemap.py deliberately shells out to for
+        #      the handful of sites that answer `requests` with 403. A
+        #      Python-level monkeypatch cannot reach into a subprocess;
+        #      an env var can. `127.0.0.1:1` is a closed local port, so an
+        #      attempt is refused instantly and locally, with no DNS
+        #      lookup and not one packet off the runner.
+        #   2. tests/helpers/network_guard.py, the project's own guard,
+        #      imported directly (it is deliberately importable without
+        #      pytest — see its module docstring). This makes an escaped
+        #      socket a loud, named `NetworkBlockedError` instead of a
+        #      slow timeout, and it is what keeps the step FAST: the
+        #      error is not a `requests.RequestException`, so it skips
+        #      app/sources/http.py's retry/backoff ladder entirely.
+        #      Measured locally: 3.9s for the full 45-source run, against
+        #      the ~2.5 min the live version cost.
+        #
+        # Every source failing is the intended outcome, not a degraded
+        # one. What this proves is exactly what the step is for: the
+        # module runs as `python -m`, config validation passes, the
+        # registry loads, the collector fans out, per-source isolation
+        # converts 45 hard failures into 45 recorded `failed` results
+        # instead of a crash, and `main()` returns 0. Deliberately run
+        # through `runpy` rather than by importing `main()` directly, so
+        # `app/batch/__main__.py` — the actual CLI surface — is what gets
+        # exercised. It is also robust to app/batch/** changing under it
+        # (LLM enrichment is being wired into this same entrypoint):
+        # whatever the batch grows, its outbound calls are closed at the
+        # transport layer, not at any one function's name.
+        env:
+          http_proxy: http://127.0.0.1:1
+          https_proxy: http://127.0.0.1:1
+          HTTP_PROXY: http://127.0.0.1:1
+          HTTPS_PROXY: http://127.0.0.1:1
+          # Both spellings emptied explicitly: a non-empty no_proxy
+          # inherited from anywhere would punch a hole straight back
+          # through block 1.
+          no_proxy: ""
+          NO_PROXY: ""
+        run: |
+          python3 - <<'PY'
+          import runpy
+          import sys
+
+          from tests.helpers.network_guard import block_network
+
+          block_network()
+          try:
+              runpy.run_module("app.batch", run_name="__main__")
+          except SystemExit as exc:
+              code = exc.code if isinstance(exc.code, int) else 0
+          else:
+              # `app/batch/__main__.py` raises SystemExit(main()); reaching
+              # here would mean that entrypoint stopped doing so, which is
+              # itself worth knowing about rather than passing silently.
+              code = 0
+          print(f"Batch entrypoint exited {code} with all outbound network blocked.")
+          sys.exit(code)
+          PY

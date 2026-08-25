@@ -42,6 +42,27 @@ services:
     # short-circuits on migration failure — uvicorn never starts, so a
     # broken migration fails the deploy loudly instead of serving
     # traffic against a schema migrations/*.sql doesn't agree with.
+    #
+    # NO `--forwarded-allow-ips`, ON PURPOSE — this is a decision, not
+    # an omission, and the obvious "fix" is a security regression.
+    # Render terminates TLS and forwards plain HTTP, so uvicorn's
+    # default (`forwarded_allow_ips=127.0.0.1`, and Render's proxy is
+    # not on loopback) leaves `request.url.scheme` as "http". The
+    # tempting one-flag repair is `--forwarded-allow-ips="*"`. Read
+    # uvicorn's own ProxyHeadersMiddleware before doing that: the same
+    # flag that fixes the scheme ALSO overwrites `scope["client"]`, and
+    # with `*` it takes the LEFTMOST X-Forwarded-For entry — the one
+    # position a caller fully controls, since every proxy appends rather
+    # than replaces. `app.api.routers.auth._client_ip` and
+    # `app.middleware.rate_limit.resolve_client_ip` both fall back to
+    # `request.client.host`, and TRUSTED_PROXY_HOPS=0 (the fail-safe
+    # default, and what any unparsable value resolves to) makes that
+    # fallback the ONLY path. So `*` would turn "trust nothing" into
+    # "trust the header verbatim" precisely when the security-critical
+    # setting is at its safest value — reopening the per-IP OTP
+    # rate-limit bypass RT-5 found (docs/red-team-findings.md).
+    # The scheme problem is instead solved where it actually bites, in
+    # app.main (`redirect_slashes=False`); see that call's comment.
     startCommand: "python -m app.db.migrate && uvicorn app.main:app --host 0.0.0.0 --port $PORT"
     # Readiness, not liveness — verifies DB reachability with a real
     # `SELECT 1` (app/api/routers/health.py's new `GET /health/ready`),
@@ -61,12 +82,15 @@ services:
         value: production
       - key: LOG_LEVEL
         value: INFO
-      - key: PORT
-        # Documented for clarity only — Render injects its own PORT at
-        # deploy time regardless of this value (app.config.Settings.port's
-        # own description; uvicorn's --port $PORT in startCommand above
-        # already reads Render's real one directly, not this Settings field).
-        value: "8000"
+      # NO `PORT` ENTRY — deliberately removed. It used to be declared
+      # here with `value: "8000"` and a comment admitting it was
+      # "documented for clarity only", because Render injects its own
+      # PORT regardless. Declaring a value the platform overwrites, next
+      # to twelve entries that are all load-bearing, teaches the reader
+      # that entries in this list might be decorative — and the matching
+      # `Settings.port` field it appeared to configure has been removed
+      # too (see app/config.py, where nothing ever read it). uvicorn
+      # reads Render's real PORT directly in startCommand above.
       - key: DATABASE_URL
         sync: false
       - key: SECRET_KEY
@@ -129,6 +153,38 @@ services:
       # requires for its cross-subdomain session cookie).
       - key: CORS_ALLOW_ORIGINS
         value: https://erm-frontend.onrender.com
+      # ── LLM pipeline tuning knobs — REAL, and NOT declared below ────
+      #
+      # Deliberately listed as a COMMENT, not as envVars entries, because
+      # every one of them is a working default today and adding nine
+      # entries whose values equal their defaults would just be noise in
+      # the dashboard. What matters is that they EXIST and that this file
+      # is where an operator looks:
+      #
+      #   LLM_TRANSLATE, LLM_DEDUP, LLM_JUDGE, LLM_TOPIC   ("0" = off)
+      #   LLM_BATCH (10), LLM_TOPIC_CHUNK (50),
+      #   LLM_TOPIC_DEDUP_BATCH (8), TOPIC_PREFOLD_THRESH (0.82)
+      #     — app/services/enrichment.py
+      #   GROQ_RETRIES (4) — app/services/llm/transport.py, and NOT
+      #     Groq-specific despite the name: it is the retry count for
+      #     every OpenAI-compatible provider (Groq, Mistral, NVIDIA).
+      #
+      # These are read straight from `os.environ` inside those two
+      # service modules rather than through `app.config.Settings`, which
+      # breaks app/config.py's own stated rule and is why they are
+      # invisible here in the first place: nothing derives this list from
+      # them, and nothing validates them — LLM_BATCH="ten" is a crash
+      # partway through a nightly run, not a rejected config. Migrating
+      # them into Settings (which would put them in .env.example, in
+      # render.yaml proper, and under the completeness test) is
+      # outstanding work; see .env.example's matching section for each
+      # knob's meaning and units. To set one, add it here as an ordinary
+      # `- key: ... value: ...` entry.
+      #
+      # NOTE for whoever does the migration: the four stage switches use
+      # `!= "0"` semantics, NOT pydantic's bool parsing — "false" and ""
+      # currently mean ON. Preserve or deliberately change that; do not
+      # convert them by accident.
 
   # ── Frontend: static files, NO build step (ADR §1: Render Static
   # Site; frontend/README.md: "No npm, no build step, no node_modules").

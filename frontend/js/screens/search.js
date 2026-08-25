@@ -81,7 +81,22 @@ export function mountSearch(root) {
     results: [],
     total: 0,
     corpusSize: null,
-    openBodies: new Set(),
+    // `openBodies: new Set()` used to live here, alongside a
+    // `[data-toggle-body]` click binding at the foot of bind(). Both
+    // were left over from the inline-expand result list, where a row
+    // grew downwards to show its body text. The reading pane replaced
+    // that outright: `selId` below opens the selected result in a panel
+    // of its own, and no template in this file has rendered a
+    // `data-toggle-body` attribute since. So the binding matched zero
+    // nodes on every render, and the Set was written on every search
+    // (cleared) and by a handler that could never fire, and read by
+    // nothing at all.
+    //
+    // Deleted rather than left in place, because dead state around a
+    // live one is actively misleading: the next person reading this
+    // object has to work out for themselves that a screen with a
+    // reading pane ALSO has a per-row expand model, and there is no
+    // amount of reading that tells them it does not.
     selId: null, // the result open in the reading pane
     detailOpen: true, // collapsible, so the result list can use the full width
     loadingMore: false,
@@ -238,7 +253,6 @@ export function mountSearch(root) {
       s.loading = false;
       s.loadingMore = false;
       if (!append) {
-        s.openBodies.clear();
         s.selId = s.results.length ? s.results[0].id : null;
       }
       render();
@@ -555,16 +569,8 @@ export function mountSearch(root) {
       })
     );
 
-    root.querySelectorAll("[data-toggle-body]").forEach((b) =>
-      b.addEventListener("click", () => {
-        const id = b.getAttribute("data-toggle-body");
-        const r = s.results.find((x) => String(x.id) === id);
-        if (!r || !r.body) return;
-        if (s.openBodies.has(r.id)) s.openBodies.delete(r.id);
-        else s.openBodies.add(r.id);
-        render();
-      })
-    );
+    // A `[data-toggle-body]` binding stood here. Nothing in this file
+    // renders that attribute; see the note on the state object above.
 
     const dateFrom = root.querySelector('[data-role="date-from"]');
     const dateTo = root.querySelector('[data-role="date-to"]');

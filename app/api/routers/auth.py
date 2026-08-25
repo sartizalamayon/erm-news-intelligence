@@ -241,11 +241,28 @@ def change_password(
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 def logout(request: Request, response: Response) -> None:
+    """Revokes the session server-side AND clears the browser's copy of
+    the cookie.
+
+    The deletion attributes come from `auth_service.cookie_deletion_kwargs()`
+    -- i.e. from the same function that produced the attributes the
+    cookie was SET with -- rather than being written out again here.
+    This line used to be `delete_cookie(name, path="/")`, which defaults
+    to `SameSite=Lax` and no `Secure`; in production the cookie is set
+    `SameSite=None; Secure`, the frontend and API are genuinely
+    cross-site (`onrender.com` is a Public Suffix), and a browser
+    rejects a cross-site `Set-Cookie` that lacks `SameSite=None;
+    Secure`. The clear was therefore dropped on the floor in exactly the
+    environment it mattered in and nowhere else, so no local test of
+    logout could ever have shown it. See
+    `cookie_deletion_kwargs()`'s docstring for the full write-up,
+    including why this was a UI-state bug and not an auth bypass.
+    """
     token = request.cookies.get(auth_service.SESSION_COOKIE_NAME)
     if token:
         with get_connection() as conn:
             auth_service.revoke_session(conn, token)
-    response.delete_cookie(auth_service.SESSION_COOKIE_NAME, path="/")
+    response.delete_cookie(**auth_service.cookie_deletion_kwargs())  # type: ignore[arg-type]
 
 
 @router.get("/otp-failures", response_model=list[OtpFailureRow])

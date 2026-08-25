@@ -281,6 +281,158 @@ def write_items(conn: DictConnection, source_result: SourceResult, items: list[F
     return source_result
 
 
+def reconcile_source_registry_keys(conn: DictConnection) -> dict[str, str]:
+    """Point every `sources` row at its fetch plugin, and keep doing it.
+
+    THE STATE THIS FIXES
+    ────────────────────
+    `sources.registry_key` (migrations/0014) is the stable correlation
+    between a DB row and the code-side plugin registry: the enable/
+    disable veto in `_filter_enabled` below, the Sources screen's
+    per-source test/diagnose (`app.services.admin._plugin_for_registry_key`)
+    and the dashboard's "sources ready" denominator all resolve through
+    it. 0014 and 0022 backfilled it -- and both are pure
+    `UPDATE sources SET registry_key = ... WHERE name = ...`.
+
+    Nothing in `migrations/*.sql` ever INSERTs into `sources`. The only
+    two writers in the whole repo are the admin "add a source" form
+    (`app.services.admin.create_source`, which does not set a
+    registry_key at all) and the one-off legacy import
+    (`migrations/legacy/import_legacy_sqlite.py`, run by hand, AFTER the
+    migration chain, by its own documented usage). So on a fresh deploy
+    the runner applies 0014 and 0022 against an EMPTY table, both change
+    0 rows, and `app.db.migrate` records them applied and checksums
+    them: they can never run again. The legacy rows then land carrying
+    `registry_key = NULL`, permanently.
+
+    What that costs, all of it silent:
+
+      * `GET /dashboard/today` counted enabled rows with a registry_key
+        as its denominator, so the KPI read "0 of 0 sources responded"
+        and the funnel said "0 sources are configured and enabled" on a
+        day 45 plugins had just run. (That query is gone now -- see
+        `enabled_source_classes` below, which the dashboard asks
+        instead.)
+      * `_filter_enabled` finds no disabled KEYS, so the Sources
+        screen's enable/disable toggle writes `enabled = FALSE` to a row
+        collection can never correlate: the source keeps being fetched
+        and the switch does nothing.
+      * test/diagnose resolves no plugin for any row, so every
+        per-source diagnostic on the Sources screen reports "no plugin".
+
+    WHY THIS IS A FUNCTION AND NOT (ONLY) A MIGRATION
+    ─────────────────────────────────────────────────
+    A migration runs exactly once, at a moment of the deploy's choosing,
+    and the rows it needs to repair may not exist yet. That is precisely
+    how 0014 and 0022 became no-ops. `migrations/0028` repairs whatever
+    is in the table at deploy time -- worth having, because it fixes an
+    already-imported database immediately rather than at the next
+    collection -- but a repair that only works if it runs at the right
+    moment is not a fix. This function is the half that is
+    order-independent: `run_collection` calls it on every run, scheduled
+    or manual, so rows imported at ANY point afterwards are keyed the
+    next time collection happens, with no operator step to remember.
+
+    HOW THE CORRELATION IS DERIVED
+    ──────────────────────────────
+    From `app.sources.registry` -- the single wiring point, and the only
+    place that knows which plugins exist -- never from a list copied
+    into this file or into SQL. `NewsSource.display_name` is what the
+    collector already writes into `articles.source` and what 0014/0022's
+    own pair lists were generated from, so matching a row's `name`
+    against it reproduces exactly the correlation those migrations
+    intended, and picks up any plugin added since without a code change
+    here.
+
+    Name matching is the ONLY correlation available for a row that has
+    never been keyed -- and it is safe precisely because it happens
+    once: after this fills the key in, a rename cannot break anything,
+    which is the whole reason 0014 introduced the column.
+
+    Deliberately conservative. It only ever fills a NULL:
+
+      * A non-NULL `registry_key` is never touched, so a key an admin
+        (or a later, better correlation) has set always wins.
+      * A key already held by another row is skipped.
+        `idx_sources_registry_key` (0014) is UNIQUE and would reject the
+        write anyway; skipping means one odd row cannot cost every other
+        row its backfill.
+      * A name shared by two or more unkeyed rows is skipped entirely.
+        `sources.name` is itself UNIQUE (0002), so this cannot happen on
+        this schema and is untestable through the DB -- it is here
+        because the cost of the guard is three lines and the cost of
+        losing that constraint later, silently, is test/diagnose
+        pointing at the wrong outlet.
+
+    Returns the `{name: registry_key}` pairs it actually wrote, so the
+    caller can log what changed.
+    """
+    load_all()
+    by_display_name: dict[str, str] = {}
+    ambiguous_plugin_names: set[str] = set()
+    for key, source_cls in all_sources().items():
+        name = _display_name(source_cls)
+        if name in by_display_name:
+            # Two plugins claiming one display name cannot be told apart
+            # by a row that only carries that name. Neither gets keyed.
+            ambiguous_plugin_names.add(name)
+            continue
+        by_display_name[name] = key
+    for name in ambiguous_plugin_names:
+        by_display_name.pop(name, None)
+
+    rows = [dict(r) for r in conn.execute("SELECT id, name, registry_key FROM sources").fetchall()]
+    already_taken = {r["registry_key"] for r in rows if r["registry_key"]}
+
+    unkeyed_name_counts: dict[str, int] = {}
+    for row in rows:
+        if not row["registry_key"]:
+            unkeyed_name_counts[row["name"]] = unkeyed_name_counts.get(row["name"], 0) + 1
+
+    filled: dict[str, str] = {}
+    for row in rows:
+        if row["registry_key"]:
+            continue
+        name = row["name"]
+        matched_key = by_display_name.get(name)
+        if matched_key is None or matched_key in already_taken:
+            continue
+        if unkeyed_name_counts.get(name, 0) > 1:
+            logger.warning(
+                "source_registry_key_ambiguous_name",
+                extra={"name": name, "rows": unkeyed_name_counts[name], "registry_key": matched_key},
+            )
+            continue
+        conn.execute("UPDATE sources SET registry_key = %s WHERE id = %s", (matched_key, row["id"]))
+        already_taken.add(matched_key)
+        filled[name] = matched_key
+
+    if filled:
+        conn.commit()
+        logger.info("source_registry_keys_backfilled", extra={"count": len(filled), "filled": filled})
+    return filled
+
+
+def enabled_source_classes(
+    conn: DictConnection, source_classes: dict[str, type[NewsSource]] | None = None
+) -> dict[str, type[NewsSource]]:
+    """The plugins this database would actually fetch from right now:
+    the code registry, minus whatever the `sources` table vetoes.
+
+    The name migrations/0022's header already uses for this concept.
+    Public because the answer is not only the collector's business --
+    `GET /dashboard/today`'s "N sources ready" denominator is the same
+    question, and asking it any other way is how that tile came to
+    disagree with the run panel beside it. Computing both from this one
+    function makes "45 of 45 responded" true by construction instead of
+    by two queries happening to agree.
+    """
+    if source_classes is None:
+        load_all()
+        source_classes = all_sources()
+    return _filter_enabled(conn, source_classes)
+
+
 def _filter_enabled(conn: DictConnection, source_classes: dict[str, type[NewsSource]]) -> dict[str, type[NewsSource]]:
     """Bug fix (P1-INGEST/ADMIN-API reconciliation audit): the Sources
     admin screen's own copy says "Collection runs every enabled method
@@ -415,15 +567,33 @@ def run_collection(
 
     When `conn` is given, the set of sources actually fetched is also
     filtered down to those the DB `sources` table marks enabled (see
-    `_filter_enabled`) — applied whether `source_classes` was passed
-    explicitly (e.g. `app.batch.run_daily.main()`, which pre-loads the
-    full registry) or left `None` (defaulting to the full registry
-    here). `conn=None` skips this — there's no `sources` table to
-    consult without a DB, so fetch-only runs stay unfiltered.
+    `enabled_source_classes`/`_filter_enabled`) — applied whether
+    `source_classes` was passed explicitly (e.g.
+    `app.batch.run_daily.main()`, which pre-loads the full registry) or
+    left `None` (defaulting to the full registry here). `conn=None`
+    skips this — there's no `sources` table to consult without a DB, so
+    fetch-only runs stay unfiltered.
+
+    A `conn` also gets `reconcile_source_registry_keys` run first, so
+    that filter has something to correlate on at all. See that
+    function's docstring for why the backfill has to live on this path
+    and not only in a migration.
     """
     start = time.monotonic()
     run_id: int | None = None
     if conn is not None:
+        # Before the run row exists, so a backfill commit can never
+        # interleave with the run-lifecycle commits below. Never fatal:
+        # every consumer of `registry_key` degrades to "no DB opinion"
+        # without it, and losing a day's collection over a correlation
+        # column would be a far worse trade than running one more day
+        # with the toggle inert. Same posture app.batch.run_daily takes
+        # around the market refresh.
+        try:
+            reconcile_source_registry_keys(conn)
+        except Exception:
+            conn.rollback()
+            logger.warning("source_registry_key_reconcile_failed", exc_info=True)
         run_id = _start_run(conn, trigger=trigger)
 
     run_result = CollectionRunResult(run_id=run_id)
@@ -431,10 +601,7 @@ def run_collection(
     try:
         effective_source_classes = source_classes
         if conn is not None:
-            if effective_source_classes is None:
-                load_all()
-                effective_source_classes = all_sources()
-            effective_source_classes = _filter_enabled(conn, effective_source_classes)
+            effective_source_classes = enabled_source_classes(conn, effective_source_classes)
         day = today_dhaka()
 
         def _record(source_result: SourceResult, items: list[FeedItem]) -> None:

@@ -16,14 +16,37 @@ readme = "README-rebuild.md"
 # up with contending concurrent edits.
 dependencies = [
   "fastapi>=0.115",            # the web framework (GATE 0: lean FastAPI).
+  # Declared even though FastAPI already pulls it in, because app/ imports
+  # it DIRECTLY and by name: app/middleware/rate_limit.py,
+  # request_limits.py and security_headers.py all import BaseHTTPMiddleware,
+  # Request, Response, JSONResponse, Headers and the ASGI type aliases from
+  # `starlette.*`, never through the `fastapi.*` re-exports. A package you
+  # import is a dependency you own, whatever else happens to install it —
+  # relying on a transitive one means the day FastAPI changes or loosens its
+  # own starlette pin, three of this app's middleware modules break at import
+  # time with nothing in this manifest to explain why. The floor is FastAPI's
+  # own current floor, deliberately: identical resolution to today on both
+  # matrix legs, no independent constraint that could start fighting FastAPI's.
+  "starlette>=0.46",
   "uvicorn[standard]>=0.32",   # ASGI server that runs the FastAPI app, locally and on Render.
   "pydantic>=2.9",             # typed request/response/settings models; FastAPI's own foundation.
   "pydantic-settings>=2.6",    # env-var-driven BaseSettings, the typed config module (DoD #2).
   "requests>=2.32",            # sync HTTP client for the source-plugin fetch layer (ADR: ThreadPoolExecutor + requests, no async rewrite).
   "psycopg[binary]>=3.2",      # Postgres driver for the ruled Supabase database (ADR §1/§9.4); provisioned now since only ARCH-REPO can edit this file and ARCH-DB needs it next.
   "cryptography>=43",          # Fernet encryption for admin-entered LLM provider keys at rest, required by ADR §9.1; provisioned for ARCH-DB.
-  "groq>=0.11",                # official SDK for the ruled primary LLM provider (ADR §9.1); provisioned ahead of P3-LLM for the same reason as psycopg above.
-  "google-genai>=0.3",         # official SDK for the ruled secondary LLM provider, Google AI Studio (ADR §9.1); same reasoning.
+  # NO `groq` SDK — removed, not forgotten. It was provisioned ahead of
+  # P3-LLM "for the same reason as psycopg", but P3-LLM then reached Groq
+  # over its OpenAI-compatible REST endpoint via
+  # app/services/llm/transport.py's `OpenAICompatibleTransport` (plain
+  # `requests`), which is also how Mistral and NVIDIA are reached — one
+  # transport for three providers instead of three SDKs. Nothing in app/,
+  # tests/ or scripts/ has ever contained `import groq`. Left declared, it
+  # was pure build weight: an install and a wheel download on every Render
+  # deploy and every CI matrix leg, plus its own transitive tree, for a
+  # module no line of this codebase imports. `google-genai` below is the
+  # opposite case and stays — Gemini is NOT OpenAI-compatible and
+  # `GeminiTransport` genuinely does `from google import genai`.
+  "google-genai>=0.3",         # official SDK for the ruled secondary LLM provider, Google AI Studio (ADR §9.1); imported for real by app/services/llm/transport.py's GeminiTransport.
   "openpyxl>=3.1",             # xlsx writer for GET /export, the product's primary deliverable; legacy shipped it too.
   "python-docx>=1.1",          # .docx writer for GET /brief/download.docx (imports as `docx`); legacy backend/report.py uses the same package.
   "argon2-cffi>=23.1",         # Argon2id password hashing (PHC-encoded) for the owner-changed OTP-at-signup + email/password-at-signin auth model.
@@ -35,6 +58,17 @@ dev = [
   "httpx2>=2.0",   # starlette.testclient's current HTTP client (httpx is deprecated for this use as of starlette 1.x) — needed for in-process FastAPI endpoint tests.
   "ruff>=0.7",     # one fast linter/formatter replacing flake8+isort+black; CI's "lint" step.
   "mypy>=1.13",    # static type-check against pydantic's typed models, in direct support of GATE 2's "zero unhandled exceptions" goal.
+  # Several tests read the deployment configuration as data rather than
+  # as prose — tests/test_health_probe_rate_limit_exemption.py parses
+  # render.yaml's real `healthCheckPath`, tests/test_ci_workflow_offline.py
+  # parses .github/workflows/ci.yml's steps — which is what stops the app
+  # and the blueprint from drifting apart the way they already did once.
+  # PyYAML does arrive transitively today (uvicorn[standard] declares it),
+  # but that is another package's OPTIONAL extra: it can be dropped in a
+  # minor release without anything here changing, and the tests would go
+  # from green to ImportError for a reason nothing in this manifest
+  # explains. Same rule as `starlette` above — what you import, you declare.
+  "pyyaml>=6",
 ]
 
 [tool.hatch.build.targets.wheel]

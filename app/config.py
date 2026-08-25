@@ -11,7 +11,7 @@ variables) supply real values at runtime.
 
 Field groups map 1:1 to ADR decisions — nothing here is speculative:
   * database_url            — ADR §1, changed Neon -> Supabase Postgres in §9.4.
-  * groq_* / gemini_* / mistral_* / llm_provider_* — ADR §9.1 (Groq
+  * groq_* / gemini_* / mistral_* / nvidia_* — ADR §9.1 (Groq
     primary, Google AI Studio secondary, ruled; Mistral added as a
     third, no-thinking-tax provider once live-verified working — see
     provider-limits-VERIFIED.md's "Round 2"). These env vars are the
@@ -66,7 +66,17 @@ class Settings(BaseSettings):
         "production-only fail-fast checks in validate_production_settings().",
     )
     log_level: str = Field(default="INFO", description="DEBUG | INFO | WARNING | ERROR")
-    port: int = Field(default=8000, description="HTTP port for uvicorn. Render injects its own PORT.")
+    # NO `port` FIELD — removed, and it should not come back. Nothing in
+    # app/ or tests/ ever read `settings.port`: uvicorn is started as
+    # `--port $PORT` (render.yaml's startCommand), which reads Render's
+    # injected env var directly, and render.yaml's own PORT entry said in
+    # as many words that it was "documented for clarity only". A settings
+    # field that is authoritative-looking and inert is worse than no field
+    # — it invites someone to "fix" a port problem by changing a value
+    # that cannot affect anything, and it is exactly the class of
+    # undeclared-but-unread config that let the dead Gemini model ship.
+    # If a future host ever needs the port in Python, add it back at that
+    # moment, with the reader.
     trusted_proxy_hops: int = Field(
         default=0,
         description="SECURITY-CRITICAL, NOT A TUNING KNOB. Number of "
@@ -166,8 +176,20 @@ class Settings(BaseSettings):
         "design for this provider; this env var only exists so a bootstrap "
         "key can be supplied the same way as the other three.",
     )
-    llm_provider_primary: str = Field(default="groq", description="ADR §9.1.")
-    llm_provider_secondary: str = Field(default="gemini", description="ADR §9.1.")
+    # NO `llm_provider_primary` / `llm_provider_secondary` FIELDS — removed
+    # for the same reason as `port` above, but with a sharper edge: these
+    # two were not merely unread, they were WRONG. They said "groq" and
+    # "gemini", carrying ADR §9.1's original ruling. Provider routing is
+    # decided per-feature in app/services/llm/routing.py, where the
+    # hardcoded fallback is Mistral primary / Gemini secondary (measured,
+    # and documented there against ADR §9.1's original choice), overridden
+    # per-feature by admin-stored config. So a reader who trusted these
+    # fields — or an operator who set LLM_PROVIDER_PRIMARY in the Render
+    # dashboard expecting it to do something — would have been told the
+    # pipeline runs on Groq, silently, with no error and no effect. The
+    # same shadowing hazard the `<provider>_model` block above documents at
+    # length, in its purest form: config that looks like the source of
+    # truth for a decision made somewhere else entirely.
 
     # ── Resend (OTP email transport — ADR §9.3, ruled: OTP-only auth) ─
     # Resend is called over its REST API via `requests`

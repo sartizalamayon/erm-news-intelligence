@@ -27,8 +27,11 @@ ALL_ROUTERS = [
     me.router,
     dashboard.router,
     # The rebuilt Long-term tabs. Separate module, same app: dashboard.py
-    # keeps the Short-term tab, the storage-admin routes and the original
-    # /dashboard/trends, all of which still have callers.
+    # keeps the Short-term tab and the storage-admin routes. The original
+    # single-payload /dashboard/trends that used to sit alongside them
+    # has been removed — these four endpoints replaced it in the shipped
+    # frontend, and it had no callers left. See the note at the foot of
+    # app/api/routers/dashboard.py.
     dashboard_long.router,
     review.router,
     export.router,

@@ -965,3 +965,49 @@ def cookie_kwargs() -> dict[str, object]:
         "max_age": SESSION_TTL_HOURS * 3600,
         "path": "/",
     }
+
+
+def cookie_deletion_kwargs() -> dict[str, object]:
+    """The attributes `Response.delete_cookie` needs to actually delete
+    the cookie `cookie_kwargs()` set -- derived FROM `cookie_kwargs()`,
+    never restated, so the two can no longer disagree.
+
+    A `Set-Cookie` only overwrites an existing cookie when its name,
+    Path and Domain match; and independently of that matching, the
+    browser applies its ordinary acceptance rules to the deletion header
+    itself. `POST /auth/logout` used to call
+    `delete_cookie(name, path="/")` with neither `secure` nor
+    `samesite`, so in production it emitted `SameSite=Lax` with no
+    `Secure` -- while the cookie it was trying to remove had been set
+    `SameSite=None; Secure` (see `cookie_kwargs()`).
+
+    That is not a cosmetic mismatch on this deployment. `onrender.com`
+    is on the Public Suffix List, so `erm-frontend.onrender.com` and
+    `erm-backend.onrender.com` are different *sites*, not merely
+    different subdomains -- every call the frontend makes to the API is
+    genuinely cross-site. Chrome (and every browser that has shipped the
+    same rule) rejects a `Set-Cookie` outright in a cross-site context
+    unless it carries `SameSite=None; Secure`, so the deletion header
+    was silently dropped and the stale session cookie stayed in the jar.
+
+    This was never an authentication bypass -- `revoke_session` marks
+    `sessions.revoked_at` server-side before the response is written, so
+    the token is dead the moment logout returns, and every subsequent
+    request authenticates as nobody. The cost is the user-visible half:
+    the browser keeps sending a cookie that looks like a session, so the
+    shell can boot straight back into a logged-in-looking layout until
+    the first API call comes back 401 and the frontend unwinds it. On a
+    shared machine that is exactly the "did my logout work?" moment
+    where the UI must not hesitate.
+
+    `max_age` is dropped because `delete_cookie` does not take it: it
+    supplies its own `max_age=0, expires=0`, which is the whole
+    mechanism. Popping it here (rather than rebuilding the dict) is
+    deliberate -- if `cookie_kwargs()` ever gains another attribute
+    (`domain`, say), the deletion inherits it automatically instead of
+    quietly diverging again, and `delete_cookie` accepts every other key
+    `cookie_kwargs()` produces.
+    """
+    kwargs = cookie_kwargs()
+    kwargs.pop("max_age", None)
+    return kwargs

@@ -50,11 +50,14 @@ WHY THESE ENTITIES
 Two groups, both chosen for what a CRO does with them rather than for
 what is easy to count:
 
-`operators` — the four licensed mobile operators plus the satellite
-entrant. A peer's fine, outage, or licence condition is the single best
-available forecast of your own, because the regulator applies the same
-rule to every operator. Grameenphone itself is included so the board can
-be read as share of voice, not just as a competitor list.
+`operators` — the four licensed mobile operators, the satellite
+entrant, and Robi's second brand, which is tracked as its own row
+because a brand relaunch is its own competitive event. Six rows, not
+five: the blurb below used to name only five and the board has always
+drawn six. A peer's fine, outage, or licence condition is the single
+best available forecast of your own, because the regulator applies the
+same rule to every operator. Grameenphone itself is included so the
+board can be read as share of voice, not just as a competitor list.
 
 `regulatory` — the axes along which regulatory and policy pressure
 actually arrives at a Bangladeshi MNO: the regulator itself (BTRC),
@@ -217,11 +220,27 @@ class WatchGroup:
 
 OPERATORS = WatchGroup(
     key="operators",
+    # THE BLURB HAS TO DESCRIBE THE ROWS THAT ACTUALLY DRAW.
+    #
+    # It read "The four licensed mobile operators and the satellite
+    # entrant", which counts to five, directly above a board that has
+    # always rendered SIX rows: the sixth is Airtel / Cirkle, Robi's
+    # second brand, which is not a separately licensed operator and so
+    # was never covered by that sentence. A reader counting the rows
+    # against the caption finds one row the caption does not account
+    # for, on the one screen whose entire purpose is being counted
+    # against.
+    #
+    # `all_entities()` is the source of truth for how many rows there
+    # are; a hardcoded number in prose next to it is a second source of
+    # truth that cannot be kept in step. So the wording says what the
+    # rows ARE rather than how many there are, and adding a seventh
+    # entity does not silently make this sentence wrong.
     title="Operator watch",
     blurb=(
-        "The four licensed mobile operators and the satellite entrant. A peer's fine, outage or "
-        "licence condition is the best available forecast of your own, because the regulator "
-        "applies the same rule to everyone."
+        "The licensed mobile operators, the satellite entrant, and Robi's second brand, tracked "
+        "on its own row. A peer's fine, outage or licence condition is the best available "
+        "forecast of your own, because the regulator applies the same rule to everyone."
     ),
     entities=(
         WatchEntity(
@@ -264,9 +283,19 @@ OPERATORS = WatchGroup(
         WatchEntity(
             key="airtel",
             label="Airtel / Cirkle",
+            # "renamed Cirkle in 2026" was a dated claim about the
+            # outside world, printed to a CRO's screen as settled
+            # present-tense fact by a module that has no way to check
+            # it. This file can verify exactly one thing about that
+            # rebrand: that headlines in the archive use both names,
+            # which is why both are in the pattern. Anything beyond
+            # that is a claim the code cannot stand behind, and a
+            # rebrand that is reversed, delayed or renamed again leaves
+            # a note that is confidently wrong with nothing to catch
+            # it. The note now says what the row DOES.
             note=(
-                "Robi's second brand, renamed Cirkle in 2026. Tracked separately from "
-                "Robi: a brand relaunch is its own competitive event."
+                "Robi's second brand, covered under both the Airtel and Cirkle names. Tracked "
+                "separately from Robi: a brand relaunch is its own competitive event."
             ),
             rules=(
                 WatchRule(r"(\yairtel\y|এয়ারটেল|\ycirkle\y)"),

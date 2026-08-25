@@ -20,6 +20,7 @@ from app.db.crypto import encrypt_api_key
 from app.db.testing import migrated_schema, pg_available
 from app.errors import ConfigurationError
 from app.services.llm.provider_registry import DEFAULT_PROVIDER_DEFINITIONS, save_provider_credential
+from app.services.llm.quota import DEFAULT_LIMITS
 from app.services.llm.registry import build_client_for_feature, load_provider_account
 from app.services.llm.routing import (
     SCORING,
@@ -323,5 +324,10 @@ def test_pooled_keys_share_the_providers_configured_limits(monkeypatch: pytest.M
         limits_default = failover.quota.limits_for("groq:default")
         limits_second = failover.quota.limits_for("groq:second")
         assert limits_default == limits_second
-        assert limits_default.rpd == 1000  # DEFAULT_LIMITS["groq"], unchanged
+        # DEFAULT_LIMITS["groq"] now follows the model the registry
+        # actually resolves (llama-3.1-8b-instant) rather than the
+        # retired qwen/qwen3.6-27b this line used to restate as 1000.
+        # What this test is really about is that POOLED KEYS SHARE one
+        # ceiling, so assert against the shared value, not a number.
+        assert limits_default == DEFAULT_LIMITS["groq"]
     get_settings.cache_clear()

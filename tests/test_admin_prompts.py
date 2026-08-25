@@ -401,7 +401,11 @@ def test_get_quota_status_defaults_and_save_quota_limit_round_trips() -> None:
     with migrated_schema() as conn:
         _reset_llm_settings(conn)
         statuses = {s["provider"]: s for s in admin_service.get_quota_status(conn)}
-        assert statuses["groq"]["rpd"] == 1000
+        # 14,400, not the 1,000 this asserted before: that was
+        # qwen/qwen3.6-27b's ceiling, and 0027 retired that model. The
+        # console serves these numbers straight through, so a stale one
+        # here is a stale one on the operator's screen.
+        assert statuses["groq"]["rpd"] == 14_400
         assert statuses["gemini"]["rpd"] is None
 
         updated = admin_service.save_quota_limit(conn, "gemini", tpd=500_000, rpd=1_500)

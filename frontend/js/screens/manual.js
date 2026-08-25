@@ -6,8 +6,11 @@
 // numbers shown live elsewhere." The illustrative walkthrough numbers
 // below (5,012 fetched, etc.) are the same worked example the design
 // uses and are labelled "(example day)" rather than presented as live
-// counts, since /dashboard/today doesn't exist yet to source them for
-// real — see this task's final report for that gap.
+// counts. Every phase heading and the page's own H2 now carry that
+// label; phase 3's did not, so a page where phases 1 and 2 were
+// explicitly captioned read as though the AI stage figure alone was
+// measured. Live figures are on the Dashboard, which exists now
+// (GET /dashboard/today) — this note used to say it did not.
 
 import { escapeHtml } from "../util.js";
 
@@ -27,7 +30,7 @@ export function mountManual(root) {
     root.innerHTML = `
       <div class="page page-md">
         <div class="card" style="margin-bottom:18px;">
-          <h2 style="font-size:24px;font-weight:700;letter-spacing:-1px;margin:0 0 8px;">Five thousand articles in, twenty-five out.</h2>
+          <h2 style="font-size:24px;font-weight:700;letter-spacing:-1px;margin:0 0 8px;">Five thousand articles in, twenty-five out, on a typical day.</h2>
           <p style="color:var(--tx2);font-size:14px;line-height:1.65;margin:0;max-width:66ch;">Every weekday the desk narrows the whole day's news down to the handful of stories that matter to enterprise risk. It happens in four phases. Nothing is ever deleted, each phase only decides what gets your attention.</p>
         </div>
 
@@ -127,6 +130,31 @@ export function mountManual(root) {
   }
 
   function phase2() {
+    // THE FIVE CARDS BELOW ARE AN EXAMPLE, AND SO ARE THEIR NAMES.
+    //
+    // The caption already said the NUMBERS were illustrative. It did
+    // not say the same of the five section names, and the prose above
+    // them went further and stated the count as fact: "grouped into
+    // five risk sections". Sections are admin-configurable free text
+    // (KEYWORDS-CONFIG: an admin can add a "Competitors" section from
+    // the Keywords screen with no code change), so the moment anybody
+    // does that, this page tells every analyst there are five when the
+    // Dashboard beside it shows six. `frontend/js/util.js` documents
+    // what the same hardcoded five cost when they were used as a
+    // FALLBACK rather than as an illustration: exports silently missing
+    // an admin-created section's articles. This is the same list, and
+    // it is only safe here because it is labelled as an example.
+    //
+    // The names are kept rather than removed because a worked example
+    // with no labels is not an example of anything. What changed is
+    // that the caption now covers the names as well as the counts, and
+    // the prose no longer commits to a number.
+    //
+    // (An HTML comment used to carry this note, INSIDE the template
+    // literal below. It rendered into the DOM on every visit, and the
+    // house rule against it exists because a single backtick in such a
+    // comment ends the template literal and takes the whole screen out.
+    // See tests/frontend/parse.test.mjs.)
     const cards = [
       { n: 41, l: "Telco / regulatory" },
       { n: 38, l: "Macroeconomy" },
@@ -136,7 +164,7 @@ export function mountManual(root) {
     ];
     return `<div class="card">
       ${phaseHead(2, "var(--ac)", "Keyword filter: 5,000 down to about 1,100 (example day)")}
-      <p style="color:var(--tx2);font-size:13.5px;line-height:1.7;margin:0 0 22px;max-width:70ch;">Each article is checked against the keyword list, in English and Bengali, grouped into five risk sections. If any term appears in the headline or the body, the article is kept and tagged with the section that term belongs to. If none appear, it stops here. This is a plain text match: no judgement, no model, no guessing.</p>
+      <p style="color:var(--tx2);font-size:13.5px;line-height:1.7;margin:0 0 22px;max-width:70ch;">Each article is checked against the keyword list, in English and Bengali, grouped into risk sections. If any term appears in the headline or the body, the article is kept and tagged with the section that term belongs to. If none appear, it stops here. This is a plain text match: no judgement, no model, no guessing. An administrator decides what the sections are, so the set can change.</p>
       <div style="border:1px solid var(--line);border-radius:12px;background:var(--panel2);padding:20px 22px;margin-bottom:18px;">
         <div class="mono" style="font-size:9px;letter-spacing:1.3px;text-transform:uppercase;color:var(--tx3);margin-bottom:14px;">A match, step by step</div>
         <div class="serif" style="font-size:17px;line-height:1.5;color:var(--tx);margin-bottom:14px;">BTRC moves to reprice <mark style="background:var(--acsoft);color:var(--actx);padding:1px 5px;border-radius:4px;font-weight:600;">spectrum</mark> ahead of the next <mark style="background:var(--acsoft);color:var(--actx);padding:1px 5px;border-radius:4px;font-weight:600;">auction</mark> round</div>
@@ -155,14 +183,8 @@ export function mountManual(root) {
           <span>stops here, never reaches the queue</span>
         </div>
       </div>
-      <!-- These five numbers are illustrative, and the label says so on
-           the card rather than only in the phase heading above. They sit
-           directly under a worked example, in the same visual language
-           the Dashboard uses for live KPIs, so without a caption they
-           read as today's real counts. Live per-section figures are on
-           the Dashboard and the Review queue. -->
       <div class="mono" style="font-size:9px;letter-spacing:1.3px;text-transform:uppercase;color:var(--tx3);margin-bottom:10px;">
-        Roughly how a day splits (illustrative, not today's counts)
+        Roughly how a day splits (an example set of sections, illustrative counts, not today's)
       </div>
       <div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;">
         ${cards
@@ -194,7 +216,7 @@ export function mountManual(root) {
       { l: "Least", b: "below 5", c: "var(--violet)", bg: "var(--violetsoft)", m: "Matched a keyword but reads as unrelated. Usually a reject.", ex: "Foreign data rule with no local effect" },
     ];
     return `<div class="card">
-      ${phaseHead(3, "var(--ac3)", "AI stage: about 1,100 organised into a reviewable set")}
+      ${phaseHead(3, "var(--ac3)", "AI stage: about 1,100 organised into a reviewable set (example day)")}
       <p style="color:var(--tx2);font-size:13.5px;line-height:1.7;margin:0 0 22px;max-width:70ch;">A language model does four jobs in order. It never removes an article from the database, it translates, groups and scores, so the queue arrives sorted with the most consequential story at the top.</p>
       <div class="stack" style="gap:10px;margin-bottom:24px;">
         ${steps

@@ -112,10 +112,29 @@ def test_limits_for_unconfigured_provider_returns_fully_unknown() -> None:
 # ── default seed values (documented, never hardcoded into logic) ────────
 
 
-def test_default_limits_groq_matches_verified_provider_limits_doc() -> None:
-    # provider-limits.md §1.1, VERIFIED primary source for qwen/qwen3.6-27b
-    # (the ADR §9.1-ruled model): 1,000 RPD, 200,000 TPD.
-    assert DEFAULT_LIMITS["groq"] == ProviderLimits(tpd=200_000, rpd=1_000)
+def test_default_limits_groq_follows_the_model_the_registry_actually_uses() -> None:
+    """This asserted 1,000 RPD / 200,000 TPD, and asserting it is part of
+    what kept the wrong ceiling in place.
+
+    Those are `qwen/qwen3.6-27b`'s numbers, and 0027 retired that model.
+    A rate limit belongs to a MODEL, not to a vendor: Groq now defaults
+    to `llama-3.1-8b-instant` at 14,400 RPD / 500,000 TPD, 14.4x the
+    daily requests. With the old figure in place the admin console
+    reported Groq at 100% of budget after 1,000 requests, and
+    FailoverTransport reads `exhausted` to skip a provider BEFORE
+    spending a call, so failover walked away from a provider with 93% of
+    its day left.
+
+    Asserted against the registry rather than against a literal, so the
+    two cannot drift again: whichever model provider_registry resolves
+    to is the one whose published ceiling must appear here.
+    """
+    from app.services.llm.provider_registry import DEFAULT_PROVIDER_DEFINITIONS
+    from app.services.llm.quota import default_limits_for_model
+
+    model = DEFAULT_PROVIDER_DEFINITIONS["groq"].default_model
+    assert DEFAULT_LIMITS["groq"] == default_limits_for_model("groq", model)
+    assert DEFAULT_LIMITS["groq"] == ProviderLimits(tpd=500_000, rpd=14_400)
 
 
 def test_default_limits_gemini_is_deliberately_unknown() -> None:

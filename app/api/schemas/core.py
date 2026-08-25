@@ -170,166 +170,22 @@ class DashboardTodayOut(BaseModel):
     topSources: list[SourceCountOut]
 
 
-# ── Dashboard — long term (frontend-contract.md §3.2) ───────────────────
-
-
-class TrendCardOut(BaseModel):
-    label: str
-    unit: str
-    vals: list[float]
-    bad: bool
-    decimals: int
-    # MACRO-DASHBOARD (additive; only app.api.routers.dashboard
-    # constructs this model, so these new defaulted fields can't break
-    # any other caller): where the CURRENT (last) value in `vals` came
-    # from this request. "live" = a real external fetch succeeded this
-    # call or from cache (asOf is that fetch's timestamp); "manual" =
-    # an admin-entered value (remittance only); "unconfigured" = a live
-    # source that needs setup (e.g. Brent's oilpriceapi_key) which
-    # isn't done yet; "rollup" = falling back to whatever historical
-    # figure is in `macro_indicator_values`, no live source layered on
-    # top this call.
-    status: str = "rollup"
-    asOf: str | None = None
-    note: str | None = None
-
-
-class MonthVolumeOut(BaseModel):
-    label: str
-    segments: dict[str, int]
-    # Was the collector actually running in this month (rollup_monthly_
-    # coverage.collected_days > 0, migrations/0021)? `articles.day` is a
-    # PUBLICATION date, so an unmonitored month still carries whatever
-    # backdated articles a later crawl happened to surface. Drawn as a
-    # plain bar next to a monitored month, that reads as "risk coverage
-    # was near zero all year and then exploded", which is a statement
-    # about when monitoring began, not about the world. The frontend
-    # uses this to draw those months as absent rather than as empty.
-    monitored: bool = False
-
-
-class MonthCoverageOut(BaseModel):
-    """One month of "were we watching", from `rollup_monthly_coverage`.
-
-    This is the frame every other 12-month series on the tab has to be
-    read inside, which is why it is its own block rather than a footnote.
-    """
-
-    label: str
-    month: str
-    monitored: bool
-    collectedDays: int
-    articles: int
-    collected: int
-    matched: int
-
-
-class WatchRowOut(BaseModel):
-    """One watchlist entity over the 12-month window, from
-    `rollup_monthly_watch` (migrations/0021) and the curated patterns in
-    `app.db.watchlist`.
-
-    Every field here is either a raw rollup number or an arithmetic
-    combination of two of them, and `dirBasis` spells out that
-    arithmetic in words so a reader can check the arrow against the
-    counts without leaving the screen.
-    """
-
-    key: str
-    label: str
-    note: str
-    counts: list[int]
-    total: int
-    # Of `total`, how many fall in months the collector was NOT running
-    # in. The screen draws those months as "not monitored" rather than as
-    # bars, so without this number the strip visibly disagrees with the
-    # total beside it and the reader cannot tell which one is wrong.
-    backdated: int = 0
-    monthsPresent: int
-    latest: int
-    previous: int
-    latestLabel: str
-    prevLabel: str
-    # Coverage per COLLECTION DAY, not per month. The collector ran on 9
-    # days of one month and 4 of the next in this deployment, so raw
-    # month-over-month counts compare two different amounts of looking.
-    # None when there is no monitored month to compute it from.
-    latestRate: float | None = None
-    prevRate: float | None = None
-    dir: str = "unknown"
-    dirBasis: str = ""
-    avgScore: float | None = None
-    scored: int = 0
-    high: int = 0
-    escalating: bool = False
-    severityNote: str = ""
-
-
-class WatchGroupOut(BaseModel):
-    key: str
-    title: str
-    blurb: str
-    rows: list[WatchRowOut]
-
-
-class HeatRowOut(BaseModel):
-    label: str
-    values: list[float]
-
-
-class StandingThemeOut(BaseModel):
-    name: str
-    note: str
-    count: int
-    months: int
-    dir: str
-
-
-class RelMixTrendPointOut(BaseModel):
-    """One month of dashboard-longterm-spec.md item 2's "relevance-mix
-    trend" — the share of matched coverage that scored high (>=8),
-    month by month, from `rollup_monthly_score_band`
-    (migrations/0007_rollups.sql). GLOBAL, not per-section: that rollup
-    table has no `section` column (only `month, band`), so a genuine
-    per-section cut isn't representable without a schema change outside
-    this task's owned files (migrations/**) — flagged in this task's
-    report as a real, structural gap rather than approximated by
-    assuming an even score distribution across sections.
-    """
-
-    label: str
-    highShare: float
-    total: int
-    # Same honesty flag as MonthVolumeOut.monitored, and it matters more
-    # here than anywhere else on the tab: this series is a SHARE, so an
-    # unmonitored month holding a single backdated article that happened
-    # to score 9 draws a full-height 100% bar next to a monitored month's
-    # 28%. The tallest bars on the chart were the months with the least
-    # evidence behind them.
-    monitored: bool = False
-
-
-class DashboardTrendsOut(BaseModel):
-    trendCards: list[TrendCardOut]
-    months12: list[MonthVolumeOut]
-    heatRows: list[HeatRowOut]
-    standing: list[StandingThemeOut]
-    relMixTrend: list[RelMixTrendPointOut] = Field(default_factory=list)
-    # 12-month "top sources" (spec item 5, "top sources by section"):
-    # same structural gap as relMixTrend above -- rollup_monthly_source
-    # has no section column either, so this is the aggregate 12-month
-    # equivalent of the short-term "most productive sources" card, not a
-    # per-section cut. Additive, defaults empty for backward compat.
-    topSources: list[SourceCountOut] = Field(default_factory=list)
-    # ── The CRO-facing blocks (migrations/0021) ──
-    # `coverage` first, deliberately: it is the frame the other series
-    # have to be read inside. `monitoredMonths` and `windowNote` are the
-    # one-line version of it, for the banner at the top of the tab.
-    coverage: list[MonthCoverageOut] = Field(default_factory=list)
-    monitoredMonths: int = 0
-    windowNote: str = ""
-    watch: list[WatchGroupOut] = Field(default_factory=list)
-
+# ── Dashboard — long term ───────────────────────────────────────────────
+#
+# `DashboardTrendsOut` and the eight models only it used (TrendCardOut,
+# MonthVolumeOut, MonthCoverageOut, WatchRowOut, WatchGroupOut,
+# HeatRowOut, StandingThemeOut, RelMixTrendPointOut) lived here and are
+# gone, together with `GET /dashboard/trends` itself — see the note at
+# the foot of `app/api/routers/dashboard.py` for the full reasoning. The
+# short version: the shipped frontend has read four per-tab endpoints
+# (`app/api/schemas/dashboard_long.py`) since the Long-term screen was
+# rebuilt, nothing called the old route any more, and what it still
+# served was a twelve-month macro series gap-filled from a table with no
+# writer — eleven zeroes and one live figure, for each of three
+# indicators.
+#
+# `SourceCountOut` and the rest of the short-term models above are
+# shared/unaffected.
 
 # ── Review queue (frontend-contract.md §3.3) ─────────────────────────────
 

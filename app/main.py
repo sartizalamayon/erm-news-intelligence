@@ -120,6 +120,41 @@ def create_app() -> FastAPI:
         docs_url=docs_url,
         redoc_url=redoc_url,
         openapi_url=openapi_url,
+        # The ONE thing in this process that emits an absolute URL built
+        # from the request's own scheme, turned off — because behind
+        # Render that scheme is a lie.
+        #
+        # Render terminates TLS at its load balancer and forwards plain
+        # HTTP to this process, so `request.url.scheme` is "http" unless
+        # uvicorn is told to trust `X-Forwarded-Proto`. It is not told
+        # that here, deliberately (see render.yaml's startCommand
+        # comment for the full reasoning: uvicorn's
+        # `--forwarded-allow-ips` is a single switch that ALSO rewrites
+        # `request.client` from the LEFTMOST X-Forwarded-For entry, i.e.
+        # the one position an attacker fully controls — which would
+        # convert the RT-5 fail-safe default of "trust nothing" into
+        # "trust whatever the caller typed", the exact bug
+        # docs/red-team-findings.md's RT-5 remediation exists to close).
+        #
+        # With the scheme stuck on "http", Starlette's slash-redirect —
+        # its only user of `request.url` — answers a request for
+        # `/collections/` with `307 Location: http://<api-host>/collections`.
+        # A browser on the https frontend will not follow a credentialed
+        # cross-origin redirect that downgrades to http; it blocks it as
+        # mixed content, and the caller sees an opaque network failure
+        # rather than a redirect.
+        #
+        # Nothing depends on that redirect today: every collection route
+        # is declared `@router.get("")` and the frontend never appends a
+        # trailing slash — which is exactly why it is safe to remove now,
+        # and exactly why it would otherwise sit here as a trap for the
+        # first route or client that ever did. Off, a trailing-slash URL
+        # gets an honest 404 instead of a redirect the browser refuses
+        # to follow; both are failures, but only one of them is silent
+        # about being one. Re-enabling this requires first giving the app
+        # a correct notion of its own scheme, NOT just flipping the flag
+        # back. tests/test_deploy_forwarded_scheme.py pins both halves.
+        redirect_slashes=False,
     )
 
     # ── Middleware (see module docstring for why this exact order) ────

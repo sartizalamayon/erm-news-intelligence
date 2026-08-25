@@ -418,10 +418,46 @@ export function mountModels(root) {
       ${problem ? `<div style="font-size:11px;color:var(--amber);margin-top:5px;">${escapeHtml(problem)}</div>` : ""}`;
   }
 
+  /**
+   * A red banner with a Retry for anything that is not a 404.
+   *
+   * Both cards on this screen used to branch two ways only: `forbidden`
+   * (handled by the lock banner at the top, so render nothing here) or
+   * else `notWiredBanner(...)`. That second banner tells the reader the
+   * route "isn't implemented on the API yet" and that the screen will
+   * populate itself once it ships. For a 500, a 429 or a dropped
+   * connection every word of that is false, and it is a particularly
+   * expensive falsehood on THIS screen: an admin who opens AI models
+   * during an incident, sees "not implemented yet" where the provider
+   * list should be, and concludes the routing console was never
+   * finished, has been told the opposite of what is happening. The
+   * banner also carries no control, so the screen stays empty until
+   * they navigate away and come back.
+   *
+   * `review.js` and `sources.js` set the pattern: gate that banner on
+   * `err.kind === "not_found"`, give everything else the error text and
+   * a Retry. `loadAll()` refetches both halves, which is the right
+   * granularity here because the two settle together.
+   */
+  function loadFailureCard(err, endpointLabel, style = "") {
+    if (err.kind === "not_found") return `<div class="card"${style}>${notWiredBanner(endpointLabel)}</div>`;
+    return `<div class="card"${style}>
+      <div class="banner banner-error" style="margin-bottom:0;"><span>&#10005;</span><div style="flex:1;">${escapeHtml(
+        fmtErr(err)
+      )}</div><button type="button" class="btn-ghost js-models-retry" style="color:var(--red);text-decoration:underline;">Retry</button></div>
+    </div>`;
+  }
+  // A CLASS, not an id: routing and providers are two independent
+  // requests that fail together far more often than separately (both
+  // are admin routes on the same API), so this markup can legitimately
+  // appear twice on one page. Two nodes sharing an id would leave the
+  // second Retry bound to nothing, which is exactly the sort of dead
+  // control this fix exists to remove.
+
   function routingCard() {
     if (s.routingError) {
       if (s.routingError.kind === "forbidden") return "";
-      return `<div class="card" style="margin-bottom:16px;">${notWiredBanner("GET /prompts/routing")}</div>`;
+      return loadFailureCard(s.routingError, "GET /prompts/routing", ` style="margin-bottom:16px;"`);
     }
     if (!s.routingDraft) return `<div class="card" style="margin-bottom:16px;"><h3>Model routing</h3>${skeletonRows(5, 20)}</div>`;
 
@@ -521,6 +557,26 @@ export function mountModels(root) {
     </div>`;
   }
 
+  /**
+   * The pooled-key panel for one provider.
+   *
+   * THE TWO ADD-KEY BOXES NOW HAVE REAL LABELS. They had none at all,
+   * only placeholders, and a placeholder is not a label: it is gone the
+   * moment there is a character in the box, and it is not reliably
+   * announced. On the password field that matters more than usual,
+   * because the value is masked, so once the placeholder disappears
+   * there is nothing on screen or in the accessibility tree saying
+   * which of the two boxes holds the secret and which holds its name.
+   * `tests/frontend/a11y.test.mjs` now fails on an input with no
+   * accessible name, so this cannot quietly come back.
+   *
+   * The placeholder on the key field changed from "API key" to "paste
+   * the key" so it says something the label does not, rather than
+   * repeating it.
+   *
+   * The ids stay unique on the page because only one provider is
+   * expanded at a time (`s.expandedProvider`).
+   */
   function credentialsPanel(provider) {
     const keys = s.credentials[provider];
     return `<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line);">
@@ -545,9 +601,15 @@ export function mountModels(root) {
       }
       <div id="credError" role="alert" aria-live="assertive"
            style="display:none;font-size:12px;color:var(--red);background:color-mix(in oklab, var(--red) 12%, transparent);border:1px solid var(--red);border-radius:6px;padding:7px 10px;margin-bottom:8px;"></div>
-      <div class="row wrap" style="gap:6px;">
-        <input id="credKeyId" class="text-input" style="padding:7px 9px;font-size:12px;width:150px;" placeholder="label, e.g. key-1" />
-        <input id="credApiKey" type="password" class="text-input" style="padding:7px 9px;font-size:12px;flex:1;min-width:180px;" placeholder="API key" autocomplete="off" />
+      <div class="row wrap" style="gap:6px;align-items:flex-end;">
+        <div style="width:150px;">
+          <label class="field-label" for="credKeyId">Key label</label>
+          <input id="credKeyId" class="text-input" style="padding:7px 9px;font-size:12px;width:100%;" placeholder="label, e.g. key-1" />
+        </div>
+        <div style="flex:1;min-width:180px;">
+          <label class="field-label" for="credApiKey">API key</label>
+          <input id="credApiKey" type="password" class="text-input" style="padding:7px 9px;font-size:12px;width:100%;" placeholder="paste the key" autocomplete="off" />
+        </div>
         <button class="btn btn-primary" data-add-cred="${escapeHtml(provider)}" style="padding:7px 14px;font-size:12px;">Add key</button>
       </div>
     </div>`;
@@ -603,7 +665,7 @@ export function mountModels(root) {
   function providersCard() {
     if (s.providersError) {
       if (s.providersError.kind === "forbidden") return "";
-      return `<div class="card">${notWiredBanner("GET /prompts/provider-definitions")}</div>`;
+      return loadFailureCard(s.providersError, "GET /prompts/provider-definitions");
     }
     return `<div class="card">
       <div class="row-between" style="margin-bottom:4px;">
@@ -668,6 +730,8 @@ export function mountModels(root) {
   }
 
   function bind() {
+    root.querySelectorAll(".js-models-retry").forEach((b) => b.addEventListener("click", () => loadAll()));
+
     // Routing. Provider changes re-render so the warning next to the
     // select updates immediately; model text does NOT re-render, because
     // rebuilding the DOM on every keystroke is what tore the focused

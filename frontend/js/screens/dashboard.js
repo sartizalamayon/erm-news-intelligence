@@ -14,12 +14,13 @@
 //
 // LONG TERM is four sub-tabs and lives in ./dashboard_long.js, one
 // endpoint per tab. It used to be a single GET /dashboard/trends payload
-// rendered here; that endpoint still exists and still serves the old
-// shape, but nothing on this screen reads it any more. Three of the four
-// tabs are backed by data it never carried — real exchange history, the
-// economy axes, and the individual headlines behind every count — and a
-// reader looks at one tab at a time, so opening Risk lines should not
-// pay for the market fetch.
+// rendered here. Nothing on this screen reads that route any more, and
+// the route itself is being removed because the series it served was
+// fabricated rather than measured — so do not reach for it as a
+// fallback. Three of the four tabs are backed by data it never carried
+// — real exchange history, the economy axes, and the individual
+// headlines behind every count — and a reader looks at one tab at a
+// time, so opening Risk lines should not pay for the market fetch.
 //
 // Bar-width / heatmap-cell scaling is computed from the REAL maximum in
 // the returned set (util.pctOfMax), never a hardcoded denominator.
@@ -186,16 +187,34 @@ export function mountDashboard(root, { navigate }) {
     );
   }
 
+  // ONE endpoint is named here, not two.
+  //
+  // This read `mode === "short" ? "GET /dashboard/today" : "GET /dashboard/trends"`,
+  // which was wrong twice over. The dead half first: `renderError` is
+  // only ever reached from `load()`, and `load()` only runs on the
+  // short-term tab — the long-term tabs each render their own error
+  // card inside `loadLong()`. So the `trends` branch could not be
+  // reached from here at all. And the endpoint it named is on its way
+  // out: GET /dashboard/trends served a fabricated series and is being
+  // deleted, so the only thing this string could ever have done is send
+  // a reader looking for a route that will not exist.
+  //
+  // No duplicate Retry binding either. `render()` calls `bindHeader()`,
+  // which already binds `#dashRetry` to `load()`. This function then
+  // bound the same node a second time, so one click fired two
+  // /dashboard/today requests: double the load from the screen that is
+  // already the heaviest query the API runs, and on a rate-limited API
+  // (120 requests / 60 seconds per IP) a reader hammering Retry on a
+  // flaky connection could spend that budget twice as fast as intended.
+  // The header binding is the one that stays, because it is the one
+  // that runs on every render.
   function renderError(err) {
     const isAdmin = !!(state.user && state.user.is_admin);
-    const label = mode === "short" ? "GET /dashboard/today" : "GET /dashboard/trends";
     const body =
       err && err.kind === "not_found"
-        ? notWiredBanner(label)
+        ? notWiredBanner("GET /dashboard/today")
         : `<div class="banner banner-error"><span>&#10005;</span><div style="flex:1">${escapeHtml(fmtErr(err))}</div><button id="dashRetry" class="btn-ghost" style="color:var(--red);text-decoration:underline;">Retry</button></div>`;
     render(header(isAdmin) + body);
-    const retry = root.querySelector("#dashRetry");
-    if (retry) retry.addEventListener("click", load);
   }
 
   // ── Short term ──────────────────────────────────────────────────

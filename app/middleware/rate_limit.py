@@ -43,11 +43,40 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-# Paths exempt from the general limiter. /healthz is Render's own
-# liveness probe (app.main's own docstring: "deliberately has no
-# dependencies") — polled frequently and must never be rate-limited into
-# a false "down" reading.
-_EXEMPT_PATHS = frozenset({"/healthz"})
+# Paths exempt from the general limiter — every health probe this
+# deployment exposes, not just the one that happened to exist when this
+# middleware was written.
+#
+#   * `/healthz`      — the zero-dependency liveness probe declared in
+#     app.main (its own docstring: "deliberately has no dependencies").
+#   * `/health/ready` — the readiness probe in app.api.routers.health,
+#     and the value render.yaml actually gives `healthCheckPath`. It was
+#     NOT exempt, and that asymmetry was invisible because the exemption
+#     set named the route nobody configured and omitted the route
+#     everybody uses.
+#
+# What the omission actually risks: Render polls `healthCheckPath` to
+# decide both when a deploy goes live and whether to restart a wedged
+# instance. 120 requests/minute is far above any health-checker's own
+# poll rate, so the probe cannot exhaust the bucket by itself — the
+# failure needs a second ingredient, and this deployment has one. The
+# limiter keys on the RESOLVED client IP, which behind Render's proxy
+# with TRUSTED_PROXY_HOPS=1 is the rightmost X-Forwarded-For entry; if
+# Render's checker ever arrives without that header (or shares a
+# resolved address with live traffic), it lands in the same bucket as
+# real users. A burst of ordinary traffic then answers the health check
+# with a 429, Render reads a non-2xx as unhealthy, restarts the
+# instance — and the restart drops the in-process counters, so the
+# evidence of why is gone by the time anyone looks. A rate limiter must
+# never be able to take the platform's own view of "is this service
+# alive" hostage.
+#
+# tests/test_health_probe_rate_limit_exemption.py parses render.yaml's
+# real `healthCheckPath` and asserts it is a member of this set, so the
+# two cannot drift apart again the way they already did once: this file
+# and the blueprint are edited by different people at different times,
+# and nothing but that test connects them.
+_EXEMPT_PATHS = frozenset({"/healthz", "/health/ready"})
 
 
 def resolve_client_ip(request: Request, trusted_proxy_hops: int) -> str:

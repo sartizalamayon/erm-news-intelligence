@@ -46,6 +46,7 @@ const UNCATEGORIZED_OPTION = "";
 
 export function mountKeywords(root) {
   let alive = true;
+  let noteTimer = null;
   const s = {
     sections: [],
     sectionsError: null,
@@ -55,6 +56,30 @@ export function mountKeywords(root) {
     error: null,
     addingOpen: false,
     addFormSectionMode: "existing", // "existing" | "new"
+    // THE ADD FORM'S CONTENTS LIVE HERE, not only in the DOM.
+    //
+    // The three inputs used to render with no `value=` at all, so every
+    // re-render of this screen handed back three empty boxes. That was
+    // survivable right up until it met `flash()`: every validation and
+    // API failure on this screen routes through it, and it re-rendered.
+    // Fill in an English term, fill in a Bengali term, forget to name
+    // the new section, press Add, and the error you were told to fix
+    // arrived with both terms already deleted. In Bengali that is not a
+    // retype, it is a re-entry through an IME.
+    //
+    // Held as a draft object rather than read back off the DOM before
+    // each render, because a render can also be triggered by something
+    // that is not the form (the note timer, a toggle response landing,
+    // a section chip): the draft has to survive re-renders this
+    // function never hears about.
+    form: { section: "", newSection: "", term_en: "", term_bn: "" },
+    // Which row, if any, is open in the inline edit form, plus its
+    // draft. Same reasoning as `form` above: a row being edited must
+    // not lose what has been typed into it when an unrelated render
+    // runs. `null` means no row is being edited.
+    editingId: null,
+    editDraft: { term_en: "", term_bn: "" },
+    editSaving: false,
     rematching: false,
     rematchNote: "",
     // General inline feedback. This screen already had two note slots
@@ -122,15 +147,76 @@ export function mountKeywords(root) {
     }
   }
 
+  /**
+   * Show an inline note, and take it away again after a few seconds.
+   *
+   * THE TIMER NO LONGER RE-RENDERS. It used to call `render()` twice:
+   * once immediately to show the note, and once 3.2 seconds later to
+   * clear it. The second one was the nastier of the two. A person who
+   * read the error and started retyping inside that window had the
+   * screen rebuilt underneath them mid-keystroke, which threw away the
+   * new text (the inputs had no `value=`; see `s.form`) and tore focus
+   * out of the field they were typing in. The error message said what
+   * was wrong and the app then punished them for acting on it.
+   *
+   * Now the expiry removes exactly one node, the note banner, and
+   * touches nothing else on the page. The immediate render stays: the
+   * banner has to appear, and at that moment focus is on the button
+   * that was just clicked, not in a text field.
+   *
+   * `noteTimer` is cleared before each new note so two notes in quick
+   * succession cannot have the first one's timer delete the second
+   * one's banner early.
+   */
   function flash(message, ok = true) {
     s.note = message;
     s.noteOk = ok;
     render();
-    setTimeout(() => {
+    clearTimeout(noteTimer);
+    noteTimer = setTimeout(() => {
       if (!alive) return;
       s.note = "";
-      render();
+      root.querySelector("#kwNote")?.remove();
     }, 3200);
+  }
+
+  /**
+   * Save the inline row edit through `PATCH /keywords/{id}`.
+   *
+   * Only the two term fields are sent, and only as a partial body,
+   * because `KeywordUpdate` treats an omitted field as "leave it
+   * alone". Sending `enabled` or `section` from here would mean this
+   * form quietly re-asserting values it never showed the operator.
+   *
+   * The updated row comes back from the API and is merged into the
+   * cached row rather than the draft being copied over it, so what the
+   * table shows after a save is what the server actually stored (the
+   * service trims and normalises), not what was typed.
+   *
+   * The draft survives a failure: `s.editingId` stays set, so the row
+   * stays open with the typed values still in it and the note explains
+   * why. Closing the editor on an error would throw the correction away
+   * and leave the old text on screen looking saved.
+   */
+  async function saveEdit(row) {
+    if (!row || s.editSaving) return;
+    const term_en = s.editDraft.term_en.trim();
+    const term_bn = s.editDraft.term_bn.trim();
+    if (!term_en && !term_bn) return flash("Enter at least one of English or Bengali.", false);
+    s.editSaving = true;
+    render();
+    try {
+      const updated = await api.patch(`/keywords/${row.id}`, { term_en, term_bn });
+      if (!alive) return;
+      Object.assign(row, updated);
+      s.editingId = null;
+      s.editSaving = false;
+      flash("Saved.");
+    } catch (err) {
+      if (!alive) return;
+      s.editSaving = false;
+      flash("Couldn't save: " + fmtErr(err), false);
+    }
   }
 
   async function remove(row) {
@@ -315,6 +401,27 @@ export function mountKeywords(root) {
     </div>`;
   }
 
+  /**
+   * A FAILURE IS NOT AUTOMATICALLY A MISSING ENDPOINT.
+   *
+   * The section-list branch below used to be two-way: `forbidden`, or
+   * else `notWiredBanner("GET /keywords/sections")`. That banner says,
+   * in as many words, that the route "isn't implemented on the API yet"
+   * and that the screen will populate itself once it ships. It is true
+   * of exactly one failure, a 404 from a stub router, and it is a lie
+   * about every other one. A 500 from the database, an expired session,
+   * or a dropped connection all rendered the same calm blue "not
+   * implemented yet" notice, which tells an admin that the fix is a
+   * backend deploy rather than a refresh — and, because the banner
+   * carries no control at all, leaves the screen with no way back
+   * except navigating away and returning.
+   *
+   * `review.js` and `sources.js` already gate that banner on
+   * `err.kind === "not_found"` and give everything else a red banner
+   * with a Retry. This is the same three-way split, with the same
+   * `#...Retry` id convention, so the row-level failure below also
+   * gets the Retry it never had.
+   */
   function render() {
     root.innerHTML = `
       <div class="page page-md" style="max-width:1080px;">
@@ -338,7 +445,7 @@ export function mountKeywords(root) {
         </div>
 
         ${s.formatOpen ? formatHelp() : ""}
-        ${s.note ? `<div class="banner ${s.noteOk ? "banner-ok" : "banner-error"}"><span>${s.noteOk ? "&#10003;" : "&#10005;"}</span><div style="flex:1;">${escapeHtml(s.note)}</div></div>` : ""}
+        ${s.note ? `<div id="kwNote" class="banner ${s.noteOk ? "banner-ok" : "banner-error"}"><span>${s.noteOk ? "&#10003;" : "&#10005;"}</span><div style="flex:1;">${escapeHtml(s.note)}</div></div>` : ""}
         ${s.rematchNote ? `<div class="banner banner-info">${escapeHtml(s.rematchNote)}</div>` : ""}
         ${s.ioNote ? `<div class="banner banner-info">${escapeHtml(s.ioNote)}</div>` : ""}
 
@@ -346,7 +453,11 @@ export function mountKeywords(root) {
           s.sectionsError
             ? s.sectionsError.kind === "forbidden"
               ? `<div class="banner banner-error"><span>&#128274;</span><div>Keywords are admin-only. Your account doesn't have the admin role.</div></div>`
-              : notWiredBanner("GET /keywords/sections")
+              : s.sectionsError.kind === "not_found"
+              ? notWiredBanner("GET /keywords/sections")
+              : `<div class="banner banner-error"><span>&#10005;</span><div style="flex:1;">${escapeHtml(
+                  fmtErr(s.sectionsError)
+                )}</div><button id="kwSectionsRetry" class="btn-ghost" style="color:var(--red);text-decoration:underline;">Retry</button></div>`
             : `<div class="row wrap" style="gap:8px;margin-bottom:10px;align-items:center;">
               ${s.sections
                 .map(
@@ -389,7 +500,9 @@ export function mountKeywords(root) {
                   : s.error
                   ? s.error.kind === "not_found"
                     ? `<div style="padding:16px 22px;">${notWiredBanner("GET /keywords")}</div>`
-                    : `<div style="padding:16px 22px;"><div class="banner banner-error"><span>&#10005;</span><div>${escapeHtml(fmtErr(s.error))}</div></div></div>`
+                    : `<div style="padding:16px 22px;"><div class="banner banner-error"><span>&#10005;</span><div style="flex:1;">${escapeHtml(
+                        fmtErr(s.error)
+                      )}</div><button id="kwRowsRetry" class="btn-ghost" style="color:var(--red);text-decoration:underline;">Retry</button></div></div>`
                   : s.rows.length
                   ? s.rows.map((k) => keywordRow(k)).join("")
                   : `<div class="state-block"><div class="state-title">No keywords in this section</div></div>`
@@ -402,8 +515,30 @@ export function mountKeywords(root) {
     bind();
   }
 
+  /**
+   * One keyword, either as a read-only row or as the inline edit form.
+   *
+   * THE EDIT CONTROL IS NEW, and it closes a gap that had a real cost.
+   * `PATCH /keywords/{id}` has existed since ADMIN-API and accepts a
+   * partial body (app/api/schemas/admin.py's KeywordUpdate: section,
+   * term_en, term_bn, enabled, every one optional), but the only
+   * controls on a row were enable/disable and delete. So the way to fix
+   * a one-character typo in a term was delete-and-re-add, which is not
+   * an equivalent operation: the DELETE drops the row and its id, and
+   * `app.services.admin.import_keywords_xlsx` matches an imported row
+   * by `id` first. A keyword that was fixed by re-adding therefore
+   * comes back with a NEW id, and the next spreadsheet round-trip that
+   * still carries the old one inserts a duplicate rather than updating
+   * in place. A typo fix should not be able to fork a keyword.
+   *
+   * Editing happens in the row itself rather than in a modal, because
+   * the thing being corrected is almost always visible in the row next
+   * to it (the English and the Bengali term are a pair, and a typo in
+   * one is usually spotted while reading the other).
+   */
   function keywordRow(k) {
     const on = !!k.enabled;
+    if (s.editingId === k.id) return keywordEditRow(k);
     return `<div class="table-row keywords-cols" style="opacity:${on ? 1 : 0.55}">
       <div style="font-size:13.5px;font-weight:600;">${escapeHtml(k.term_en || "n/a")}</div>
       <div style="font-size:13.5px;color:var(--tx2);">${escapeHtml(k.term_bn || "n/a")}</div>
@@ -411,40 +546,79 @@ export function mountKeywords(root) {
       on ? "var(--ac2)" : "var(--tx4)"
     }"></span>${on ? "on" : "off"}</span></div>
       <div class="row" style="gap:6px;justify-content:flex-end;">
+        <button class="btn-sm" data-edit="${k.id}">edit</button>
         <button class="btn-sm" data-toggle="${k.id}">${on ? "disable" : "enable"}</button>
         <button class="btn-sm btn-sm-danger" data-delete="${k.id}">delete</button>
       </div>
     </div>`;
   }
 
+  function keywordEditRow(k) {
+    // Both terms are editable and both may end up blank, exactly as on
+    // the Add form: a keyword is allowed to be English-only or
+    // Bangla-only, and only "both blank" is rejected. The row keeps its
+    // own column grid so the two boxes stay under the two headings they
+    // belong to.
+    return `<div class="table-row keywords-cols" style="align-items:center;">
+      <div><input id="kwEditEn" class="text-input" style="padding:7px 10px;font-size:13px;width:100%;"
+                  aria-label="English term for this keyword" value="${escapeHtml(s.editDraft.term_en)}" /></div>
+      <div><input id="kwEditBn" class="text-input" style="padding:7px 10px;font-size:13px;width:100%;"
+                  aria-label="Bengali term for this keyword" value="${escapeHtml(s.editDraft.term_bn)}" /></div>
+      <div><span class="mono" style="font-size:10.5px;color:var(--tx3);">editing</span></div>
+      <div class="row" style="gap:6px;justify-content:flex-end;">
+        <button class="btn-sm btn-sm-on" data-edit-save="${k.id}" ${s.editSaving ? "disabled" : ""}>${
+      s.editSaving ? "saving…" : "save"
+    }</button>
+        <button class="btn-sm" data-edit-cancel="${k.id}">cancel</button>
+      </div>
+    </div>`;
+  }
+
+  /**
+   * The Add-keyword form.
+   *
+   * Every field renders from `s.form`, so a re-render (a note
+   * appearing, a note expiring, a toggle response landing) redraws what
+   * was typed instead of three empty boxes. See `s.form`'s comment for
+   * what that cost before.
+   *
+   * Each `<label>` carries `for=`, matching its control's id. A
+   * `field-label` next to an input is a visual label only: without
+   * `for=` a screen reader announces the box as unnamed, and clicking
+   * the words does not focus the field. `tests/frontend/a11y.test.mjs`
+   * now requires a real name on every input, so this is enforced rather
+   * than remembered.
+   */
   function keywordForm() {
     const newMode = s.addFormSectionMode === "new";
     return `<div class="card" style="margin-bottom:16px;">
       <h3>Add keyword</h3>
       <div class="stack" style="gap:10px;max-width:520px;">
         <div>
-          <label class="field-label">Section</label>
           ${
             newMode
-              ? `<input id="kwFormNewSection" class="text-input" style="padding:9px 12px;font-size:13px;" placeholder="New section name" />
+              ? `<label class="field-label" for="kwFormNewSection">Section</label>
+                 <input id="kwFormNewSection" class="text-input" style="padding:9px 12px;font-size:13px;"
+                        placeholder="New section name" value="${escapeHtml(s.form.newSection)}" />
                  <button id="kwFormSectionBack" class="btn-sm" style="margin-top:6px;">&larr; pick an existing section instead</button>`
-              : `<select id="kwFormSection" class="text-input" style="padding:9px 12px;font-size:13px;">
+              : `<label class="field-label" for="kwFormSection">Section</label>
+                 <select id="kwFormSection" class="text-input" style="padding:9px 12px;font-size:13px;">
                   <option value="${UNCATEGORIZED_OPTION}">No section (Uncategorized)</option>
                   ${s.sections
                     .filter((t) => t.section !== "Uncategorized")
-                    .map((t) => `<option value="${escapeHtml(t.section)}" ${t.section === s.activeSection ? "selected" : ""}>${escapeHtml(t.section)}</option>`)
+                    .map((t) => `<option value="${escapeHtml(t.section)}" ${t.section === s.form.section ? "selected" : ""}>${escapeHtml(t.section)}</option>`)
                     .join("")}
                   <option value="${NEW_SECTION_OPTION}">+ New section…</option>
                 </select>`
           }
         </div>
         <div>
-          <label class="field-label">English term (leave blank if Bangla-only)</label>
-          <input id="kwFormEn" class="text-input" style="padding:9px 12px;font-size:13px;" />
+          <label class="field-label" for="kwFormEn">English term (leave blank if Bangla-only)</label>
+          <input id="kwFormEn" class="text-input" style="padding:9px 12px;font-size:13px;" value="${escapeHtml(s.form.term_en)}" />
         </div>
         <div>
-          <label class="field-label">Bengali term (leave blank if English-only)</label>
-          <input id="kwFormBn" class="text-input" style="padding:9px 12px;font-size:13px;" />
+          <label class="field-label" for="kwFormBn">Bengali term (leave blank if English-only)</label>
+          <input id="kwFormBn" class="text-input" style="padding:9px 12px;font-size:13px;" value="${escapeHtml(s.form.term_bn)}" />
         </div>
         <div class="row" style="gap:9px;">
           <button id="kwFormSave" class="btn btn-primary" style="padding:9px 16px;">Add keyword</button>
@@ -462,7 +636,26 @@ export function mountKeywords(root) {
       })
     );
     const addBtn = root.querySelector("#addKeywordBtn");
-    if (addBtn) addBtn.addEventListener("click", () => { s.addingOpen = true; s.addFormSectionMode = "existing"; render(); });
+    if (addBtn)
+      addBtn.addEventListener("click", () => {
+        s.addingOpen = true;
+        s.addFormSectionMode = "existing";
+        // A fresh draft each time the form is OPENED, which is the one
+        // moment a person expects empty boxes. Everything between
+        // opening and saving preserves what is in them.
+        s.form = {
+          section: s.activeSection && s.activeSection !== "Uncategorized" ? s.activeSection : "",
+          newSection: "",
+          term_en: "",
+          term_bn: "",
+        };
+        render();
+      });
+
+    const sectionsRetry = root.querySelector("#kwSectionsRetry");
+    if (sectionsRetry) sectionsRetry.addEventListener("click", () => loadSections());
+    const rowsRetry = root.querySelector("#kwRowsRetry");
+    if (rowsRetry) rowsRetry.addEventListener("click", () => loadRows());
     const rematchBtn = root.querySelector("#rematchBtn");
     if (rematchBtn) rematchBtn.addEventListener("click", rematch);
     const formatBtn = root.querySelector("#kwFormatBtn");
@@ -530,32 +723,81 @@ export function mountKeywords(root) {
     root.querySelectorAll("[data-toggle]").forEach((b) => b.addEventListener("click", () => toggle(s.rows.find((x) => x.id == b.getAttribute("data-toggle")))));
     root.querySelectorAll("[data-delete]").forEach((b) => b.addEventListener("click", () => remove(s.rows.find((x) => x.id == b.getAttribute("data-delete")))));
 
+    root.querySelectorAll("[data-edit]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const row = s.rows.find((x) => x.id == b.getAttribute("data-edit"));
+        if (!row) return;
+        s.editingId = row.id;
+        s.editDraft = { term_en: row.term_en || "", term_bn: row.term_bn || "" };
+        s.editSaving = false;
+        render();
+        root.querySelector("#kwEditEn")?.focus();
+      })
+    );
+    root.querySelectorAll("[data-edit-cancel]").forEach((b) =>
+      b.addEventListener("click", () => {
+        s.editingId = null;
+        render();
+      })
+    );
+    root.querySelectorAll("[data-edit-save]").forEach((b) =>
+      b.addEventListener("click", () => saveEdit(s.rows.find((x) => x.id == b.getAttribute("data-edit-save"))))
+    );
+    // Same draft-preserving pattern as the Add form: keystrokes update
+    // state and deliberately do NOT re-render, so the caret stays put.
+    const editEn = root.querySelector("#kwEditEn");
+    if (editEn) editEn.addEventListener("input", () => (s.editDraft.term_en = editEn.value));
+    const editBn = root.querySelector("#kwEditBn");
+    if (editBn) editBn.addEventListener("input", () => (s.editDraft.term_bn = editBn.value));
+    for (const box of [editEn, editBn]) {
+      if (!box) continue;
+      box.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") saveEdit(s.rows.find((x) => x.id === s.editingId));
+        if (e.key === "Escape") {
+          s.editingId = null;
+          render();
+        }
+      });
+    }
+
     const sectionSelect = root.querySelector("#kwFormSection");
     if (sectionSelect)
       sectionSelect.addEventListener("change", () => {
         if (sectionSelect.value === NEW_SECTION_OPTION) {
           s.addFormSectionMode = "new";
           render();
+          root.querySelector("#kwFormNewSection")?.focus();
+          return;
         }
+        s.form.section = sectionSelect.value;
       });
+    const newSectionInput = root.querySelector("#kwFormNewSection");
+    if (newSectionInput) newSectionInput.addEventListener("input", () => (s.form.newSection = newSectionInput.value));
+    const formEn = root.querySelector("#kwFormEn");
+    if (formEn) formEn.addEventListener("input", () => (s.form.term_en = formEn.value));
+    const formBn = root.querySelector("#kwFormBn");
+    if (formBn) formBn.addEventListener("input", () => (s.form.term_bn = formBn.value));
+
     const sectionBack = root.querySelector("#kwFormSectionBack");
     if (sectionBack) sectionBack.addEventListener("click", () => { s.addFormSectionMode = "existing"; render(); });
 
     const saveBtn = root.querySelector("#kwFormSave");
     if (saveBtn)
       saveBtn.addEventListener("click", async () => {
-        const section =
-          s.addFormSectionMode === "new"
-            ? (root.querySelector("#kwFormNewSection")?.value || "").trim()
-            : root.querySelector("#kwFormSection").value;
-        const term_en = root.querySelector("#kwFormEn").value.trim();
-        const term_bn = root.querySelector("#kwFormBn").value.trim();
+        // Read from the draft, not from the DOM. The two agree while
+        // the form is on screen, but only the draft still exists after
+        // the render that a failed save triggers, and the retry after
+        // that failure has to submit the same values.
+        const section = s.addFormSectionMode === "new" ? s.form.newSection.trim() : s.form.section;
+        const term_en = s.form.term_en.trim();
+        const term_bn = s.form.term_bn.trim();
         if (!term_en && !term_bn) return flash("Enter at least one of English or Bengali.", false);
         if (s.addFormSectionMode === "new" && !section) return flash("Enter a name for the new section.", false);
         try {
           await api.post("/keywords", { section: section || null, term_en, term_bn, enabled: true });
           s.addingOpen = false;
           s.addFormSectionMode = "existing";
+          s.form = { section: "", newSection: "", term_en: "", term_bn: "" };
           s.activeSection = section || "Uncategorized";
           loadRows();
           loadSections();
@@ -564,12 +806,21 @@ export function mountKeywords(root) {
         }
       });
     const cancelBtn = root.querySelector("#kwFormCancel");
-    if (cancelBtn) cancelBtn.addEventListener("click", () => { s.addingOpen = false; render(); });
+    if (cancelBtn)
+      cancelBtn.addEventListener("click", () => {
+        s.addingOpen = false;
+        s.form = { section: "", newSection: "", term_en: "", term_bn: "" };
+        render();
+      });
   }
 
   return {
     destroy() {
       alive = false;
+      // The note timer outlives the mount otherwise, and its callback
+      // reaches into `root` — which by then belongs to whichever screen
+      // replaced this one.
+      clearTimeout(noteTimer);
     },
   };
 }
