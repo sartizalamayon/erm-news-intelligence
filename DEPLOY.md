@@ -30,8 +30,8 @@ resolves to Anaconda's and dies at import.
 
 | Check | State |
 |---|---|
-| Python test suite | **1493 passed, 1 skipped** — `.venv/bin/python -m pytest -q` |
-| Frontend test suite | **137 passed** — `node --test "tests/frontend/"*.test.mjs`, and it now runs in CI (it did not until 2026-08-24, and had been red for the life of the long-term dashboard) |
+| Python test suite | **1591 passed, 1 skipped** — `.venv/bin/python -m pytest -q` |
+| Frontend test suite | **148 passed** — `node --test "tests/frontend/"*.test.mjs`, and it now runs in CI (it did not until 2026-08-24, and had been red for the life of the long-term dashboard) |
 | `ruff check app tests` | clean — a CI gate |
 | `mypy app` | clean, 149 source files |
 | Migrations | every file in `migrations/` applies cleanly from empty, via `python -m app.db.migrate` |
@@ -234,6 +234,22 @@ first table in §2 and fill in that one value.
 ## Known limitations and things that go stale
 
 These are outstanding, deliberately, and none of them blocks a deploy.
+
+- **Two areas never got a pass of their own, and you should know which.**
+  The pre-deploy work ran four audits (fabricated data, deployment
+  configuration, frontend completeness, and an independent review of the
+  changes) plus an edge-case sweep covering hostile input on the API
+  surface and every route against an empty database. NOT covered by a
+  dedicated pass: **concurrency** (two users deciding the same article,
+  a bulk action overlapping a single decision, the reaper firing while a
+  run is live) and **failure injection on outbound calls** (timeout,
+  TLS failure, 429, redirect loop, HTML where XML was expected). A
+  backend-robustness audit aimed at exactly these was started twice and
+  died to session limits both times; it was never completed. Individual
+  pieces are covered by unit tests and the migration-concurrency suite
+  is real, but nobody has gone looking for trouble in those two places.
+  The first production incident, if there is one, is likelier to come
+  from there than from anywhere else in this document.
 
 - **Nine LLM tuning knobs bypass the settings module.** `LLM_TRANSLATE`,
   `LLM_DEDUP`, `LLM_JUDGE`, `LLM_TOPIC`, `LLM_BATCH`, `LLM_TOPIC_CHUNK`,
