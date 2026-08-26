@@ -19,7 +19,8 @@ the API side of that wiring is complete either way.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 
 from app.api.deps import AuthenticatedUser, get_current_user
 from app.api.schemas.core import ExportDownloadBody, ExportPresetIn, ExportPresetOut, ExportPreviewOut
@@ -119,7 +120,7 @@ def do_export(
     format: str = "xlsx",
     body: ExportDownloadBody | None = None,
     user: AuthenticatedUser = Depends(get_current_user),
-) -> Response:
+) -> StreamingResponse:
     # frontend/js/screens/export.js sends every param via the query
     # string with no JSON body at all (body stays None, every eff_*
     # below falls straight through to its query default — unchanged
@@ -140,11 +141,30 @@ def do_export(
     if eff_format not in ("xlsx", "csv"):
         raise HTTPException(status_code=422, detail="format must be one of xlsx, csv")
 
-    writer = export_service.export_xlsx if eff_format == "xlsx" else export_service.export_csv
+    # STREAMED, not buffered. app.services.export.iter_export_rows
+    # carries the measurements: buffering peaked at 270 MB for a single
+    # CSV of one year of the dev corpus, on a Render FREE instance with
+    # 512 MB total and a ~53 MB baseline. Two concurrent downloads, or
+    # one alongside the nightly batch, was an OOM.
+    #
+    # No `with get_connection()` here on purpose, and it is not an
+    # oversight. The writers below read through a server-side cursor and
+    # therefore need the connection to stay open for as long as the
+    # response body is being produced -- long after this function has
+    # returned. A block opened here would close it the moment the
+    # generator was handed to Starlette. Each writer opens and owns its
+    # own connection instead; see stream_csv's docstring, including what
+    # that means for a client that disconnects mid-download.
+    #
+    # `_filename` is a pure function of the request parameters, so the
+    # Content-Disposition header is known before a single row is read --
+    # which is what makes the header/body split work at all.
+    streamer = export_service.stream_xlsx if eff_format == "xlsx" else export_service.stream_csv
     media_type = XLSX_MEDIA_TYPE if eff_format == "xlsx" else "text/csv"
-    with get_connection() as conn:
-        content, filename = writer(
-            conn,
+    filename = export_service.filename_for(eff_filter, eff_top_n, eff_scope, eff_format)
+    return StreamingResponse(
+        streamer(
+            get_connection,
             filter=eff_filter,
             top_n=eff_top_n,
             scope=eff_scope,
@@ -153,9 +173,7 @@ def do_export(
             sections=_as_list(eff_sections),
             sort=eff_sort,
             columns=_as_list(eff_columns),
-        )
-    return Response(
-        content=content,
+        ),
         media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
