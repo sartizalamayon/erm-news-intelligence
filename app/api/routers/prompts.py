@@ -57,6 +57,7 @@ from app.api.schemas.admin import (
     RoutingConfigIO,
 )
 from app.db.connection import get_connection
+from app.errors import ConfigurationError
 from app.services import admin as admin_service
 
 router = APIRouter(prefix="/prompts", tags=["admin", "prompts"])
@@ -179,8 +180,57 @@ def get_candidates(admin: AuthenticatedUser = Depends(require_admin)) -> list[Pr
 
 @router.post("/suggest", response_model=PromptSuggestOut)
 def suggest(admin: AuthenticatedUser = Depends(require_admin)) -> PromptSuggestOut:
-    with get_connection() as conn:
-        suggestion = admin_service.suggest_refinement(conn)
+    """Ask the configured LLM to propose refined guidance.
+
+    The `ConfigurationError` catch is the whole point of this being more
+    than two lines, and it is here because of what this route did on an
+    empty, freshly deployed database.
+
+    `app.services.llm.registry.build_client_for_feature` raises
+    `ConfigurationError` when no provider can serve the `summarization`
+    feature — which is the NORMAL state of a new deployment, before any
+    admin has visited the Providers tab and entered a key. Uncaught, it
+    reached `app/api/error_handlers.py`'s ConfigurationError handler,
+    which answers `500 {"error": "configuration_error"}` and writes the
+    explanation to the server log only.
+
+    That handler is right about its own case and should not change: its
+    comment states that a ConfigurationError is meant to fail the
+    process at startup and "never reach a request handler", so when one
+    does, a loud 500 is the correct fail-safe. The defect was that THIS
+    route made that assumption false. Nothing is broken on the server
+    when no API key has been entered yet; the admin simply has not
+    finished setting the product up, on a screen one click away from
+    where they would fix it.
+
+    What it cost, measured against a real migrated schema with no rows
+    and no reachable provider: clicking "Suggest a refinement" on the
+    Prompts screen returned an opaque `internal_error` with no
+    indication of cause or remedy, on the single most likely day for an
+    admin to press it — the first one. The registry had already composed
+    exactly the sentence they needed ("no LLM provider is configured for
+    feature 'summarization' (checked: gemini, mistral) — enter an API
+    key via the admin console or set GROQ_API_KEY/GEMINI_API_KEY") and
+    it was being discarded one frame above the response.
+
+    Re-raised as 422 rather than 503: the request cannot be served, but
+    not because anything is unavailable — an input to the system is
+    missing, and the caller is the person who supplies it. That matches
+    what the sibling `POST /provider-definitions/{provider}/probe`
+    already does for the same underlying state ("no API key is stored
+    for groq"), so the two admin actions now agree instead of one
+    reporting a server fault for what the other calls configuration.
+    """
+    try:
+        with get_connection() as conn:
+            suggestion = admin_service.suggest_refinement(conn)
+    except ConfigurationError as exc:
+        # Literal 422, matching app/api/routers/export.py and review.py.
+        # `status.HTTP_422_UNPROCESSABLE_ENTITY` is deprecated in the
+        # installed Starlette and emits a DeprecationWarning on every
+        # access; the numeric form is what the majority of this codebase
+        # already uses and adds no new warning noise to the suite.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return PromptSuggestOut(suggestion=suggestion)
 
 

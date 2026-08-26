@@ -239,7 +239,31 @@ def _apply_migrations(conn: DictConnection, migrations_dir: Path) -> list[str]:
                 (path.name, checksum),
             )
         newly_applied.append(path.name)
-        logger.info("migration_applied", extra={"filename": path.name})
+        # `migration_file`, NOT `filename`. `filename` is an attribute the
+        # stdlib LogRecord already defines (the source file the log call
+        # came from), and `logging.Logger.makeRecord` raises
+        # `KeyError: "Attempt to overwrite 'filename' in LogRecord"` on any
+        # `extra` key that collides with one. It does not drop the field or
+        # warn — it raises, on the caller's own code path.
+        #
+        # This line crashed the migration runner, and it would have done so
+        # for the first time on the production deploy. `Logger.info()` tests
+        # `isEnabledFor(INFO)` before building the record, so at the suite's
+        # LOG_LEVEL=WARNING (tests/conftest.py) the record was never built
+        # and never raised; render.yaml sets LOG_LEVEL=INFO. 1560 tests
+        # therefore could not see it.
+        #
+        # The cost had it shipped: the raise happens AFTER this migration's
+        # transaction has committed and its schema_migrations row has been
+        # written, so deploy #1 applies 0001, records it, then dies with a
+        # KeyError mentioning nothing about migrations. Retry skips 0001,
+        # applies 0002, dies identically. One migration per deploy attempt,
+        # each looking like a fresh unexplained crash, with the schema in a
+        # different partial state each time — the thing that broke (a log
+        # line) is nowhere near the thing that looks broken (the runner).
+        # tests/test_logging_reserved_record_keys.py scans for the whole
+        # class of collision so a future one cannot reintroduce this.
+        logger.info("migration_applied", extra={"migration_file": path.name})
 
     if not newly_applied:
         logger.info("migrations_up_to_date", extra={"count": len(already)})

@@ -187,6 +187,62 @@ def _set_note(conn: Any, article_id: int, note: str) -> None:
 # ── query building ────────────────────────────────────────────────────
 
 
+def _like_escape(value: str) -> str:
+    """Neutralise LIKE metacharacters so the analyst's typing is searched
+    for as literal text rather than executed as pattern syntax.
+
+    WHY THIS EXISTS. `_build_where` wraps the free-text filter as
+    `f"%{q}%"` and hands it to `ILIKE`. Wrapping is correct; passing the
+    raw value through was not. `%` ("any run of characters") and `_`
+    ("exactly one character") are pattern syntax to Postgres, so
+    whatever the analyst typed was reinterpreted on the way to the
+    database. Found by fuzzing the live API before the first production
+    deploy, measured against a real migrated schema:
+
+        GET /articles?q=%     -> 200, total = EVERY ROW IN THE ARCHIVE
+        GET /articles?q=_     -> 200, total = EVERY ROW IN THE ARCHIVE
+
+    What that COST is the part worth stating plainly. It was never an
+    error and never an empty list — it was a confident 200 carrying the
+    entire archive back as though it were a search result. The review
+    queue prints "N of Total" directly off that number and groups the
+    rows under real date headers, so the screen asserted a specific,
+    wrong count with no signal that the filter had not applied. This
+    codebase has been bitten by the silently-wrong-answer pattern
+    repeatedly (see `list_articles`' own note on `status=bogus` and
+    `top_n=-1`, both found the same way); an archive-wide over-match is
+    the most expensive version of it, because the surplus rows are
+    indistinguishable from genuine hits and can be approved straight
+    into a brief.
+
+    The trigger in normal use is not a hostile `%` at all — it is a
+    percentage, which is ordinary vocabulary across this corpus in both
+    languages (tariffs, spectrum fees, network coverage, inflation).
+    Searching `100%` for the "100% network coverage" story also
+    returned the "100 crore taka" story, because `%100%%` reads as
+    "contains 100, then anything". One character of the analyst's own
+    query silently widened the result set.
+
+    Escaping rather than rejecting is the right call here: `%` and `_`
+    are legitimate characters to want to find in a headline, so the fix
+    must make them searchable, not refuse them. Backslash is replaced
+    FIRST because it is the escape character itself — doing it after
+    `%`/`_` would escape the backslashes this function had just
+    inserted, turning a search for `a%b` into a search for a literal
+    backslash. No `ESCAPE` clause is needed alongside this: backslash is
+    already LIKE's default escape character in Postgres, and the pattern
+    travels as a bound parameter, so `standard_conforming_strings` (which
+    governs string LITERALS) does not enter into it.
+
+    `GET /search` is deliberately untouched — it runs through
+    `plainto_tsquery('simple', ...)` (app/services/search.py), which
+    parses its input as a search query rather than as a pattern, so `%`
+    is simply punctuation there and matches nothing. Only the ILIKE path
+    ever had the hole.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _build_where(
     *,
     status: str | None,
@@ -221,7 +277,9 @@ def _build_where(
         clauses.append(
             "(a.title ILIKE %(q)s OR a.title_en ILIKE %(q)s OR a.source ILIKE %(q)s OR a.sections ILIKE %(q)s)"
         )
-        params["q"] = f"%{q}%"
+        # `_like_escape`, not the raw value — see that function for the
+        # archive-wide over-match this prevents.
+        params["q"] = f"%{_like_escape(q)}%"
     if date_from is not None:
         clauses.append("a.day >= %(date_from)s")
         params["date_from"] = date_from

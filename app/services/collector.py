@@ -398,9 +398,27 @@ def reconcile_source_registry_keys(conn: DictConnection) -> dict[str, str]:
         if matched_key is None or matched_key in already_taken:
             continue
         if unkeyed_name_counts.get(name, 0) > 1:
+            # `source_name`, NOT `name`: `name` is an attribute the stdlib
+            # LogRecord already defines (the logger's own name), and
+            # `logging.Logger.makeRecord` raises KeyError on any `extra`
+            # key colliding with one rather than dropping it. So this
+            # diagnostic — the one that exists to explain why a source was
+            # skipped — would itself have thrown, converting a deliberately
+            # survivable "skip and carry on" into a crash of the whole
+            # collection run.
+            #
+            # Unlike the identical collision in app/db/migrate.py this one
+            # is a `warning`, which IS enabled under test; it survived only
+            # because the branch is unreachable on the current schema
+            # (`sources.name` is UNIQUE per migration 0002, so two unkeyed
+            # rows cannot share a name — see this function's docstring,
+            # which says the guard is here against that constraint being
+            # lost later). That is exactly the scenario in which the log
+            # line would finally run, and it would have failed at the worst
+            # possible moment: the first time the guard was needed.
             logger.warning(
                 "source_registry_key_ambiguous_name",
-                extra={"name": name, "rows": unkeyed_name_counts[name], "registry_key": matched_key},
+                extra={"source_name": name, "rows": unkeyed_name_counts[name], "registry_key": matched_key},
             )
             continue
         conn.execute("UPDATE sources SET registry_key = %s WHERE id = %s", (matched_key, row["id"]))

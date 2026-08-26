@@ -97,7 +97,16 @@ async def import_keywords_xlsx(
     """
     content = await request.body()
     if not content:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="no file content in request body")
+        # NOTE ON 422: the numeric literal, not `status.HTTP_422_UNPROCESSABLE_ENTITY`.
+        # That constant is deprecated in the installed Starlette (renamed to
+        # HTTP_422_UNPROCESSABLE_CONTENT, matching the RFC 9110 wording) and
+        # emits a DeprecationWarning on every ACCESS -- which meant the suite
+        # carried a warning whose origin pointed at fastapi/routing.py rather
+        # than at any file in this repo, so it read as third-party noise and
+        # survived. The literal is what most of this codebase already uses
+        # (export.py, review.py, prompts.py), it cannot be renamed out from
+        # under us again, and 422 is not a number anyone has to look up.
+        raise HTTPException(status_code=422, detail="no file content in request body")
     with get_connection() as conn:
         result = admin_service.import_keywords_xlsx(conn, content)
     return KeywordImportResultOut(**result)

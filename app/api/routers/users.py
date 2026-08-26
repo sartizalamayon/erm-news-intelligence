@@ -35,21 +35,28 @@ def create_user(body: UserCreate, admin: AuthenticatedUser = Depends(require_adm
         with get_connection() as conn:
             row = users_service.create_user(conn, email=body.email, password=body.password, role=body.role)
     except ValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        # NOTE ON 422: the numeric literal, not `status.HTTP_422_UNPROCESSABLE_ENTITY`.
+        # That constant is deprecated in the installed Starlette (renamed to
+        # HTTP_422_UNPROCESSABLE_CONTENT, matching the RFC 9110 wording) and
+        # emits a DeprecationWarning on every ACCESS -- which meant the suite
+        # carried a warning whose origin pointed at fastapi/routing.py rather
+        # than at any file in this repo, so it read as third-party noise and
+        # survived. The literal is what most of this codebase already uses
+        # (export.py, review.py, prompts.py), it cannot be renamed out from
+        # under us again, and 422 is not a number anyone has to look up.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return UserOut(**row)
 
 
 @router.patch("/{user_id}/role", response_model=UserOut)
-def update_user_role(
-    user_id: int, body: UserRoleUpdate, admin: AuthenticatedUser = Depends(require_admin)
-) -> UserOut:
+def update_user_role(user_id: int, body: UserRoleUpdate, admin: AuthenticatedUser = Depends(require_admin)) -> UserOut:
     if user_id == admin.id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="cannot change your own role")
     try:
         with get_connection() as conn:
             row = users_service.set_user_role(conn, user_id, body.role)
     except ValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user not found")
     return UserOut(**row)
@@ -63,7 +70,7 @@ def delete_user(user_id: int, admin: AuthenticatedUser = Depends(require_admin))
         with get_connection() as conn:
             deleted = users_service.delete_user(conn, user_id)
     except ValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user not found")
 
@@ -78,7 +85,7 @@ def update_user_active(
         with get_connection() as conn:
             row = users_service.set_user_active(conn, user_id, body.is_active)
     except ValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user not found")
     return UserOut(**row)
