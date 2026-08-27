@@ -294,7 +294,21 @@ def test_long_range_tabs_say_no_data_rather_than_showing_a_number(empty_db_clien
 
     economy = client.get("/dashboard/long/economy").json()
     for card in economy["macro"]:
-        assert card["status"] in ("no_data", "not_configured"), card
+        # The three literals the code can actually emit for "nothing to
+        # show", from app/api/routers/dashboard_long.py:
+        #
+        #   no_data       queried, nothing stored
+        #   unconfigured  no OILPRICEAPI_KEY, so Brent was never asked for
+        #
+        # This asserted ("no_data", "not_configured") -- the second is a
+        # spelling that appears nowhere in the codebase, and the real
+        # "unconfigured" was missing. It passed locally only because the
+        # author's .env carries an OILPRICEAPI_KEY, which sends Brent
+        # down the `no_data` branch; the first CI run, with no .env and
+        # no key, took the `unconfigured` branch and failed. A test whose
+        # expected set is wrong AND whose environment hides it is worth
+        # the extra comment.
+        assert card["status"] in ("no_data", "unconfigured"), card
         assert card["value"] == "—", f"{card['key']} showed a value with no data behind it: {card}"
         assert card["series"] == [], f"{card['key']} manufactured a series: {card}"
         assert card["hasSeries"] is False

@@ -17,6 +17,7 @@ CI-shaped regression check for the same code path.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -128,7 +129,23 @@ def test_legacy_migration_end_to_end(tmp_path) -> None:
         row_a = pg_conn.execute("SELECT published, review_status, body_status FROM articles WHERE id = 100").fetchone()
         assert row_a["review_status"] == "pending"
         assert row_a["body_status"] == "fetched"
-        assert row_a["published"].utcoffset().total_seconds() == 6 * 3600
+        # Asserted as an INSTANT, not as a displayed UTC offset.
+        #
+        # This used to read `utcoffset().total_seconds() == 6 * 3600` and
+        # passed on the machine it was written on and nowhere else. A
+        # `timestamptz` stores an instant; the offset psycopg hands back
+        # is whatever the SESSION's timezone is, which follows the
+        # server's, which follows the host's. On the author's machine
+        # that is Asia/Dhaka (+06:00) and the assertion held; the first
+        # CI run, on a UTC runner, got 0.0 and failed. The importer was
+        # never wrong -- the test was measuring the runner's clock
+        # settings rather than the data.
+        #
+        # What actually matters is `_parse_published`'s contract: legacy
+        # `published` is Dhaka-local wall time with no timezone field, so
+        # "2026-08-05 08:42" is 02:42 UTC. Comparing aware datetimes
+        # compares instants, so this holds in any session timezone.
+        assert row_a["published"] == datetime(2026, 8, 5, 8, 42, tzinfo=timezone(timedelta(hours=6)))
         body = pg_conn.execute("SELECT content_text FROM article_bodies WHERE article_id = 100").fetchone()
         assert body["content_text"] == "Full article body text."
 

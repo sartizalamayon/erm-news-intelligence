@@ -98,16 +98,39 @@ def test_the_batch_step_blocks_the_curl_subprocess_too(batch_step: dict):
     lowercase and uppercase spellings, because `curl` reads the
     lowercase ones and much of the Python ecosystem reads either.
     """
-    env = batch_step.get("env") or {}
+    # Asserted against the SHELL SCRIPT, not against a workflow `env:`
+    # block, and that distinction is the whole reason this test changed.
+    #
+    # These names were originally declared in the step's `env:`. GitHub
+    # Actions reserves http_proxy / https_proxy / no_proxy for the
+    # runner's own proxy configuration and rejects them there by
+    # refusing to parse the ENTIRE workflow file -- every push then
+    # failed in 0 seconds having scheduled no jobs, with no log and no
+    # annotation, and `gh run list` showed the workflow's name as its
+    # path because GitHub never read `name:`. Exporting them inside the
+    # script is equivalent for the subprocess (a child inherits the
+    # exported environment either way) and is not policed.
+    script = batch_step.get("run") or ""
     for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
-        assert name in env, f"the batch smoke step does not set {name}, so curl can still reach the internet"
-        assert env[name].startswith("http://127.0.0.1:"), (
+        assert f"export {name}=" in script, (
+            f"the batch smoke step does not export {name}, so curl can still reach the internet"
+        )
+        value = script.split(f"export {name}=", 1)[1].split("\n", 1)[0].strip()
+        assert value.startswith("http://127.0.0.1:"), (
             f"{name} must point at a closed LOCAL port so an attempt is refused "
-            f"instantly and no packet leaves the runner; got {env[name]!r}"
+            f"instantly and no packet leaves the runner; got {value!r}"
         )
     for name in ("no_proxy", "NO_PROXY"):
-        assert name in env, f"{name} must be set explicitly"
-        assert env[name] == "", f"a non-empty {name} punches a hole straight back through the proxy block"
+        assert f"export {name}=" in script, f"{name} must be exported explicitly"
+        value = script.split(f"export {name}=", 1)[1].split("\n", 1)[0].strip()
+        assert value == "", f"a non-empty {name} punches a hole straight back through the proxy block"
+
+    assert "env" not in batch_step or not (batch_step["env"].keys() & {
+        "http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY"
+    }), (
+        "proxy variables are back in the step's `env:` block. GitHub Actions "
+        "reserves those names and will refuse to parse the whole workflow file."
+    )
 
 
 def test_no_ci_step_runs_the_batch_unguarded():

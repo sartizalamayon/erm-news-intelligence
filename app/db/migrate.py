@@ -40,6 +40,7 @@ from pathlib import Path
 
 import psycopg
 
+from app.db.collation_guard import verify_bangla_word_boundaries
 from app.db.connection import DictConnection, get_connection
 from app.logging import get_logger
 
@@ -215,6 +216,17 @@ def _run_migrations(conn: DictConnection, migrations_dir: Path) -> list[str]:
 
 
 def _apply_migrations(conn: DictConnection, migrations_dir: Path) -> list[str]:
+    # Before any schema work: refuse a database whose locale silently
+    # breaks every Bangla pattern in the product. See
+    # app/db/collation_guard.py for the measurements and for why this is
+    # a hard failure rather than a warning -- the short version is that
+    # the broken state throws no error anywhere and looks exactly like a
+    # quiet news day. Checked HERE because render.yaml chains
+    # `python -m app.db.migrate && uvicorn`, so this is already the
+    # point where a bad database stops the deploy instead of serving
+    # traffic against it.
+    verify_bangla_word_boundaries(conn)
+
     ensure_migrations_table(conn)
     already = applied_migrations(conn)
     newly_applied: list[str] = []

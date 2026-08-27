@@ -231,6 +231,33 @@ first table in §2 and fill in that one value.
 
 ---
 
+## The database locale, before you create it
+
+**Create the Supabase database with a UTF-8 aware locale.** `C.UTF-8`
+and `en_US.UTF-8` are both verified working on Postgres 17; plain `C`
+and `POSIX` are not usable and will stop the deploy.
+
+This is not a preference. Postgres `\y` (word boundary) decides what
+counts as a word character from `LC_CTYPE`, roughly half this corpus is
+Bangla, and every pattern in `app/db/econaxes.py` and
+`app/db/watchlist.py` uses `\y`. Under `C` or `POSIX`, Bangla letters
+are not word characters, so those patterns match **nothing** in Bangla
+and **nothing raises**. Collection runs, the pipeline completes, the
+dashboard renders, and every Bangla-derived number is quietly near
+zero, which looks exactly like a quiet news day.
+
+You should not have to remember this: `app/db/collation_guard.py` runs
+on every deploy and every cold start, as the first thing
+`python -m app.db.migrate` does, and refuses to migrate such a database
+at all. Since the start command is
+`python -m app.db.migrate && uvicorn ...`, a wrong locale fails the
+deploy loudly with the offending `LC_CTYPE` named, instead of serving
+traffic against it.
+
+It is worth knowing anyway, because the fix is to **recreate** the
+database, not to change a setting: a database's locale is fixed at
+creation.
+
 ## Known limitations and things that go stale
 
 These are outstanding, deliberately, and none of them blocks a deploy.

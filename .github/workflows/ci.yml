@@ -38,6 +38,25 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: erm_ci_test
+          # NOT COSMETIC. Postgres `\y` (word boundary) decides what is
+          # a word character from LC_CTYPE, and roughly half this
+          # corpus is Bangla. Under plain `C` or `POSIX`, Bangla letters
+          # are not word characters, so every `\y` pattern in
+          # app/db/econaxes.py and app/db/watchlist.py matches NOTHING
+          # and no error is raised anywhere.
+          #
+          # This container had exactly that, and it is how the first CI
+          # run of this project failed: two Bangla matching tests failed
+          # while all 1589 others passed. Nothing local could have caught
+          # it -- the developer machine runs en_US.UTF-8. Verified on
+          # Postgres 17: C.UTF-8 and en_US.UTF-8 both work, C and POSIX
+          # both silently match nothing.
+          #
+          # app/db/collation_guard.py now refuses to migrate a database
+          # like that at all, so a wrong locale here fails loudly rather
+          # than as two puzzling test failures.
+          LANG: C.UTF-8
+          POSTGRES_INITDB_ARGS: "--locale=C.UTF-8"
         ports:
           - 5432:5432
         # GitHub Actions will not start dependent steps until this
