@@ -96,9 +96,34 @@ def verify_bangla_word_boundaries(conn: DictConnection) -> None:
     collate = detail["datcollate"] if detail else "unknown"
     ctype = detail["datctype"] if detail else "unknown"
 
+    # WHY the boundary failed, not just that it did.
+    #
+    # `\y` sits at a transition between an alphabetic and a
+    # non-alphabetic character, so what these patterns actually depend on
+    # is: Bangla CONSONANTS are alphabetic and Bangla VOWEL SIGNS
+    # (matras) are not. That is what puts a boundary after the ক in
+    # ব্যাংকের, and what keeps ব্যাংকক (Bangkok) out.
+    #
+    # Whether a matra is alphabetic is a libc judgement, not a Unicode
+    # one, and the two disagree. Printing the actual classification per
+    # character turns "it does not work" into "your libc calls the
+    # vowel sign alphabetic, so there is no boundary after the
+    # consonant", which is the difference between a puzzling failure and
+    # an actionable one.
+    probe_chars = [("ক", "consonant KA"), ("ব", "consonant BA"),
+                   ("ে", "vowel sign E"), ("া", "vowel sign AA"),
+                   ("্", "virama"), ("ং", "anusvara")]
+    classification = {}
+    for ch, label in probe_chars:
+        try:
+            row_c = conn.execute("SELECT %s ~ '^[[:alpha:]]$' AS a", (ch,)).fetchone()
+            classification[label] = bool(row_c["a"]) if row_c else None
+        except Exception:  # noqa: BLE001 - diagnostics must never mask the real error
+            classification[label] = None
+
     logger.error(
         "bangla_word_boundary_check_failed",
-        extra={"datcollate": collate, "datctype": ctype},
+        extra={"datcollate": collate, "datctype": ctype, "alpha_classification": classification},
     )
     raise ConfigurationError(
         f"This database cannot match Bangla word boundaries. Its LC_CTYPE is {ctype!r} "
@@ -110,5 +135,9 @@ def verify_bangla_word_boundaries(conn: DictConnection) -> None:
         "classifies Bangla letters as alphabetic: on Linux/glibc that is en_US.UTF-8 "
         "(or another full language locale). C, POSIX and -- on glibc specifically -- "
         "C.UTF-8 are all unusable, though C.UTF-8 does work on macOS, so do not port "
-        "a locale choice between platforms without re-checking it here."
+        "a locale choice between platforms without re-checking it here. "
+        f"This database classifies: {classification}. The patterns need Bangla "
+        "consonants alphabetic and vowel signs (matras) NOT alphabetic -- that is "
+        "what puts a word boundary after the consonant in ব্যাংকের while keeping "
+        "ব্যাংকক (Bangkok) out."
     )
