@@ -1,14 +1,5 @@
 name: CI
 
-# Runs on every push and PR. Must stay green with the current test suite
-# (DoD #5) and must NEVER call a real LLM provider or reach the live
-# internet for anything business-relevant — every provider key below is
-# blank/fake on purpose, and tests/conftest.py enforces the same for a
-# local `pytest` run that skips this workflow's env block entirely. The
-# Postgres `services:` container below is a disposable, CI-local
-# container (no data, no external exposure) — pulling its image is the
-# same category of "internet access" as `actions/checkout` or
-# `pip install` already require, not a live external system.
 on:
   push:
   pull_request:
@@ -20,31 +11,15 @@ jobs:
       matrix:
         python-version: ["3.10", "3.12"]
 
-    # Postgres 17 — pinned to match what app/db/**, migrations/**, and
-    # docs/storage-policy.md were actually built and measured against
-    # ("a real local PostgreSQL 17.4 server", storage-policy.md §"How
-    # these numbers were produced"; ADR §1/§9.4 targets Supabase, which
-    # is vanilla Postgres with no version-specific extensions used here
-    # — see storage-policy.md's "no Supabase-specific extensions"). The
-    # `:17` tag (not a pinned patch) tracks the latest 17.x point
-    # release, standard practice for CI service containers.
     services:
       postgres:
         image: postgres:17
         env:
-          # Disposable, CI-local credentials for a container with no
-          # data and no exposure beyond this job's own localhost network
-          # — not a secret, never used against Supabase or any real DB.
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: erm_ci_test
         ports:
           - 5432:5432
-        # GitHub Actions will not start dependent steps until this
-        # reports healthy — a first layer of "fail loudly if the
-        # database never comes up", underneath the explicit reachability
-        # guard step below (which checks something this can't: that
-        # THIS workflow's connection string actually reaches it).
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s
@@ -54,16 +29,7 @@ jobs:
     env:
       APP_ENV: test
       LOG_LEVEL: WARNING
-      # Deliberately blank at job scope: app.config.Settings.database_url
-      # (read from this exact env var) is production/app-boot config,
-      # and tests/test_config.py asserts it defaults to "" for
-      # non-production environments. Only the "Apply database
-      # migrations" step below overrides it, scoped to that step alone.
       DATABASE_URL: ""
-      # This is the var app/db/testing.py's pg_available()/
-      # migrated_schema() actually check FIRST (see its _ENV_VARS
-      # tuple) — it's what every skipif-gated DB test in
-      # tests/test_db_*.py and tests/test_storage*.py resolves against.
       TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/erm_ci_test
       SECRET_KEY: ""
       GROQ_API_KEY: ""
@@ -86,20 +52,6 @@ jobs:
         run: mypy app
 
       - name: Verify database is reachable (fail loudly, not a silent skip)
-        # The actual bug this closes: tests/test_db_*.py and
-        # tests/test_storage*.py are (correctly) written to SKIP rather
-        # than fail when no Postgres is reachable, so a local
-        # `pytest` run without one degrades gracefully. In CI that same
-        # behavior let 25 database-backed tests report "passed" (by not
-        # running at all) on every push. This step calls the identical
-        # app.db.testing.pg_available() those tests gate on, BEFORE
-        # pytest starts — if the service isn't actually reachable
-        # through this job's TEST_DATABASE_URL, the job fails right
-        # here with a clear message instead of silently proceeding into
-        # 25 quiet skips. Nothing about this step runs outside CI, so a
-        # developer's local `pytest` without Postgres is unaffected —
-        # tests/conftest.py and the tests' own skipif markers are
-        # untouched.
         run: |
           python3 - <<'PY'
           import sys
@@ -118,11 +70,6 @@ jobs:
           PY
 
       - name: Apply database migrations
-        # DoD: migrations applied via the project's own runner
-        # (app/db/migrate.py), not hand-maintained SQL in this workflow
-        # — so this can never drift from migrations/*.sql. DATABASE_URL
-        # is overridden here, scoped to this step only (see the job-level
-        # env comment above for why it must NOT leak into later steps).
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/erm_ci_test
         run: python -m app.db.migrate
@@ -131,95 +78,21 @@ jobs:
         run: pytest
 
       - name: Set up Node (frontend tests)
-        # Only needed on ONE matrix leg: tests/frontend/** is pure
-        # JavaScript and has nothing to do with the Python version, so
-        # running it twice would just double the wall clock and give two
-        # identical results.
         if: matrix.python-version == '3.12'
         uses: actions/setup-node@v4
         with:
           node-version: "22"
 
       - name: Test (frontend)
-        # This step is the whole reason tests/frontend/** is worth
-        # having, and it did not exist until 2026-08-24. The suite ran
-        # only when somebody remembered to type the command by hand, so
-        # it had been RED for the life of the long-term-dashboard
-        # feature: `route.test.mjs` still asserted the two-key shape
-        # that predated `longTab`, and `copy.test.mjs` — a lint over the
-        # real source — was flagging six em dashes that had crept back
-        # into two screens. Both were invisible to every gate this
-        # workflow ran.
-        #
-        # No install step and no `npm ci` on purpose: these use
-        # `node:test`/`node:assert`, both built into Node, and
-        # `frontend/` deliberately has no package.json, no bundler and
-        # no node_modules (tests/frontend/README.md explains why that
-        # property is worth protecting). Nothing to cache, nothing to
-        # audit, no supply chain.
         if: matrix.python-version == '3.12'
         run: node --test "tests/frontend/"*.test.mjs
 
       - name: Batch entrypoint smoke check (offline)
-        # DoD #1: the batch CLI must be runnable independently of the web
-        # app. Still runs `python -m app.batch` for real, end to end —
-        # but with every outbound path closed first.
-        #
-        # WHAT THIS STEP USED TO DO, and why it had to change: `run:
-        # python -m app.batch` with this job's blank `DATABASE_URL` takes
-        # app/batch/run_daily.py's `run_collection(None, ...)` branch —
-        # fetch-only, no DB write, but REAL discovery against all ~45
-        # registered sources (app/sources/registry.py). tests/conftest.py's
-        # socket guard is a pytest fixture and pytest is not running here,
-        # so nothing stopped it. Every push and every PR update therefore
-        # sent live traffic from GitHub's IPs to 45 third-party news
-        # sites, and paid ~2.5 minutes of wall clock per matrix leg for
-        # the privilege — while THIS FILE's own header promises CI "must
-        # NEVER call a real LLM provider or reach the live internet for
-        # anything business-relevant". The promise was true of every
-        # other step and false of the last one.
-        #
-        # Two independent blocks, because one is not enough here:
-        #
-        #   1. The proxy env vars below. Every HTTP client in this
-        #      process tree honours them — `requests` (app/sources/http.py)
-        #      AND the system `curl` binary that
-        #      app/sources/_curl_sitemap.py deliberately shells out to for
-        #      the handful of sites that answer `requests` with 403. A
-        #      Python-level monkeypatch cannot reach into a subprocess;
-        #      an env var can. `127.0.0.1:1` is a closed local port, so an
-        #      attempt is refused instantly and locally, with no DNS
-        #      lookup and not one packet off the runner.
-        #   2. tests/helpers/network_guard.py, the project's own guard,
-        #      imported directly (it is deliberately importable without
-        #      pytest — see its module docstring). This makes an escaped
-        #      socket a loud, named `NetworkBlockedError` instead of a
-        #      slow timeout, and it is what keeps the step FAST: the
-        #      error is not a `requests.RequestException`, so it skips
-        #      app/sources/http.py's retry/backoff ladder entirely.
-        #      Measured locally: 3.9s for the full 45-source run, against
-        #      the ~2.5 min the live version cost.
-        #
-        # Every source failing is the intended outcome, not a degraded
-        # one. What this proves is exactly what the step is for: the
-        # module runs as `python -m`, config validation passes, the
-        # registry loads, the collector fans out, per-source isolation
-        # converts 45 hard failures into 45 recorded `failed` results
-        # instead of a crash, and `main()` returns 0. Deliberately run
-        # through `runpy` rather than by importing `main()` directly, so
-        # `app/batch/__main__.py` — the actual CLI surface — is what gets
-        # exercised. It is also robust to app/batch/** changing under it
-        # (LLM enrichment is being wired into this same entrypoint):
-        # whatever the batch grows, its outbound calls are closed at the
-        # transport layer, not at any one function's name.
         env:
           http_proxy: http://127.0.0.1:1
           https_proxy: http://127.0.0.1:1
           HTTP_PROXY: http://127.0.0.1:1
           HTTPS_PROXY: http://127.0.0.1:1
-          # Both spellings emptied explicitly: a non-empty no_proxy
-          # inherited from anywhere would punch a hole straight back
-          # through block 1.
           no_proxy: ""
           NO_PROXY: ""
         run: |
