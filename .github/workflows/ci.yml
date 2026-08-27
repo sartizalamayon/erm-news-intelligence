@@ -212,17 +212,39 @@ jobs:
         # (LLM enrichment is being wired into this same entrypoint):
         # whatever the batch grows, its outbound calls are closed at the
         # transport layer, not at any one function's name.
-        env:
-          http_proxy: http://127.0.0.1:1
-          https_proxy: http://127.0.0.1:1
-          HTTP_PROXY: http://127.0.0.1:1
-          HTTPS_PROXY: http://127.0.0.1:1
+        # THE PROXY VARS ARE EXPORTED IN THE SHELL, NOT DECLARED IN A
+        # WORKFLOW `env:` BLOCK. That is not a style choice.
+        #
+        # http_proxy / https_proxy / no_proxy (and their uppercase forms)
+        # are reserved by GitHub Actions for configuring the RUNNER's own
+        # proxy. Put them in a step or job `env:` and GitHub refuses to
+        # parse the entire FILE -- not the step, the file. Every push
+        # then produces a run that fails in 0 seconds having scheduled
+        # no jobs, with no log and no annotation to read, under the
+        # generic "This run likely failed because of a workflow file
+        # issue".
+        #
+        # The tell, if this ever recurs: `gh run list` shows the
+        # workflow's NAME as `.github/workflows/ci.yml` instead of `CI`,
+        # because GitHub could not read `name:`. Sibling workflows
+        # disappear from `gh workflow list` the same way. Nothing local
+        # catches it -- the file parses fine under PyYAML, with no
+        # duplicate keys, no BOM, no CRLF and no tabs.
+        #
+        # Exported inside the script instead, which the runner does not
+        # police and which reaches subprocesses identically, so block 1
+        # above keeps working for the `curl` that
+        # app/sources/_curl_sitemap.py shells out to.
+        run: |
+          export http_proxy=http://127.0.0.1:1
+          export https_proxy=http://127.0.0.1:1
+          export HTTP_PROXY=http://127.0.0.1:1
+          export HTTPS_PROXY=http://127.0.0.1:1
           # Both spellings emptied explicitly: a non-empty no_proxy
           # inherited from anywhere would punch a hole straight back
           # through block 1.
-          no_proxy: ""
-          NO_PROXY: ""
-        run: |
+          export no_proxy=
+          export NO_PROXY=
           python3 - <<'PY'
           import runpy
           import sys
