@@ -35,7 +35,32 @@ import sys
 from importlib.metadata import packages_distributions
 from pathlib import Path
 
-import tomllib
+# `tomllib` is stdlib from 3.11 only, and pyproject.toml declares
+# `requires-python = ">=3.10"`, so the 3.10 leg of the CI matrix has no
+# such module. Importing it unconditionally made this file fail at
+# COLLECTION on that leg, which aborts the whole run with exit code 2
+# before a single test executes -- pytest reported "1589 items / 1
+# error" and stopped. That is how the first CI run this project ever
+# performed failed: not on an assertion, on an import.
+#
+# `tomli` is the same parser under its pre-stdlib name and is a common
+# transitive dependency, so it is tried next. If neither is present the
+# module skips rather than errors: this test reads pyproject.toml to
+# check the manifest against real imports, and that check genuinely
+# runs on the 3.12 leg. A skip on 3.10 loses nothing; a collection
+# error there loses the entire suite.
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError:
+        import pytest
+
+        pytest.skip(
+            "needs tomllib (Python 3.11+) or tomli; the manifest check runs on the 3.12 matrix leg",
+            allow_module_level=True,
+        )
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _PYPROJECT = _REPO_ROOT / "pyproject.toml"
