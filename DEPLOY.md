@@ -233,9 +233,15 @@ first table in §2 and fill in that one value.
 
 ## The database locale, before you create it
 
-**Create the Supabase database with a UTF-8 aware locale.** `C.UTF-8`
-and `en_US.UTF-8` are both verified working on Postgres 17; plain `C`
-and `POSIX` are not usable and will stop the deploy.
+**Create the Supabase database with `en_US.UTF-8`** (or another full
+language locale). `C`, `POSIX` and `C.UTF-8` are all unusable on Linux
+and will stop the deploy.
+
+Note the trap in that list: `C.UTF-8` DOES work on macOS and does NOT
+work on Linux/glibc, which is where this deploys. That was measured the
+wrong way round once already, on a developer machine, and the guard
+below is what caught it on the first Linux run. Do not port a locale
+choice between platforms without re-checking it.
 
 This is not a preference. Postgres `\y` (word boundary) decides what
 counts as a word character from `LC_CTYPE`, roughly half this corpus is

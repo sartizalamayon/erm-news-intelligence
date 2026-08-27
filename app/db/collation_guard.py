@@ -19,10 +19,22 @@ Measured on Postgres 17, one real headline
 ("ডাচ-বাংলা ব্যাংকের দ্বিতীয় প্রান্তিকে মুনাফা বেড়েছে") against the real
 banking pattern:
 
-    C.UTF-8       matches
-    en_US.UTF-8   matches
-    C             DOES NOT MATCH
-    POSIX         DOES NOT MATCH
+    macOS libc      C.UTF-8      matches
+                    en_US.UTF-8  matches
+                    C            DOES NOT MATCH
+                    POSIX        DOES NOT MATCH
+
+    glibc (Linux)   C.UTF-8      DOES NOT MATCH   <-- differs from macOS
+                    en_US.UTF-8  matches
+
+WHICH LOCALE NAMES WORK IS NOT PORTABLE, and that is the sharpest part
+of this. `C.UTF-8` behaves differently on macOS libc and on glibc: it
+was measured working on the machine these patterns were written on and
+refused on the Linux container CI runs. Deployment targets are Linux.
+This is exactly why the check probes actual BEHAVIOUR against a real
+headline instead of comparing `datctype` against a list of blessed
+names -- a name-based check would have been written from the macOS
+result and would have passed the very database it needed to reject.
 
 The failure mode is the reason this is a hard startup check rather than
 a logged warning. Nothing errors. Collection runs, articles are stored,
@@ -94,6 +106,9 @@ def verify_bangla_word_boundaries(conn: DictConnection) -> None:
         "word characters, so every `\\y` pattern in app/db/econaxes.py and "
         "app/db/watchlist.py matches nothing. Roughly half the corpus is Bangla, so the "
         "product would run without a single error and report near-zero for every "
-        "Bangla-derived figure. Recreate the database with a UTF-8 aware locale "
-        "(C.UTF-8 and en_US.UTF-8 are both verified working); C and POSIX are not usable."
+        "Bangla-derived figure. Recreate the database with a locale whose LC_CTYPE "
+        "classifies Bangla letters as alphabetic: on Linux/glibc that is en_US.UTF-8 "
+        "(or another full language locale). C, POSIX and -- on glibc specifically -- "
+        "C.UTF-8 are all unusable, though C.UTF-8 does work on macOS, so do not port "
+        "a locale choice between platforms without re-checking it here."
     )
