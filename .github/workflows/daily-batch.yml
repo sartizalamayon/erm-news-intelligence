@@ -1,5 +1,15 @@
 name: Daily batch
 
+# Registered late. When the remote was first created, ci.yml carried
+# proxy variables in a step `env:` block, which GitHub reserves; it
+# refused to parse that file, and while that was true this workflow
+# never appeared in the Actions index either -- `gh workflow list`
+# showed only ci.yml (under its PATH rather than its name, the tell
+# that it had not parsed) and the API returned 404 for this one. Once
+# ci.yml parsed, a touch on this file was needed to make GitHub scan
+# it. Nothing here was ever wrong; noting it so a future 404 on a
+# schedule-only workflow is not mistaken for a fault in the file.
+
 # The scheduled production run (ADR §1: GitHub Actions cron is the batch
 # compute host — 360-min job cap vs. the measured ~2.5-min collection
 # phase, 2,000 free minutes/month on a private repo). Invokes
