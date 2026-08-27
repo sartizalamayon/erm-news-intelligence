@@ -81,11 +81,4 @@ jobs:
         run: node --test "tests/frontend/"*.test.mjs
 
       - name: Batch entrypoint smoke check (offline)
-        env:
-          http_proxy: http://127.0.0.1:1
-          https_proxy: http://127.0.0.1:1
-          HTTP_PROXY: http://127.0.0.1:1
-          HTTPS_PROXY: http://127.0.0.1:1
-          no_proxy: ""
-          NO_PROXY: ""
-        run: echo "env block only"
+        run: echo "no env block at all"
