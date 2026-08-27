@@ -50,4 +50,24 @@ jobs:
       - name: Type-check (mypy)
         run: mypy app
 
-      - run: echo "half B reached"
+      - name: Verify database is reachable (fail loudly, not a silent skip)
+        run: |
+          python3 - <<'PY'
+          import sys
+          from app.db.testing import pg_available
+
+          if not pg_available():
+              print("FATAL: Postgres unreachable via TEST_DATABASE_URL.", file=sys.stderr)
+              sys.exit(1)
+          print("Postgres reachable via TEST_DATABASE_URL -- proceeding.")
+          PY
+
+      - name: Apply database migrations
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/erm_ci_test
+        run: python -m app.db.migrate
+
+      - name: Test
+        run: pytest
+
+      - run: echo "half C reached"
