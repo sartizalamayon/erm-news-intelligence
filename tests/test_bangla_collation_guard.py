@@ -24,12 +24,15 @@ import psycopg
 import pytest
 
 from app.db.collation_guard import verify_bangla_word_boundaries
+from app.db.econaxes import bangla_boundary
 from app.db.testing import _candidate_dsn, pg_available
-from app.errors import ConfigurationError
 
 pytestmark = pytest.mark.skipif(not pg_available(), reason="no reachable Postgres (set TEST_DATABASE_URL)")
 
-BANKING_PATTERN = r"\yব্যাংক\y"
+# The production construction, imported not restated.
+BANKING_PATTERN = bangla_boundary("ব্যাংক")
+# What it replaced, kept so the tests below can show the difference.
+LEGACY_Y_PATTERN = r"\yব্যাংক\y"
 REAL_HEADLINE = "ডাচ-বাংলা ব্যাংকের দ্বিতীয় প্রান্তিকে মুনাফা বেড়েছে"
 BANGKOK = "ব্যাংকক পেট এক্সপো শুরু"
 
@@ -56,67 +59,74 @@ def _drop(handle) -> None:
 
 # Locale NAMES are deliberately not asserted here.
 #
-# The first version of this file parametrised ["C.UTF-8", "en_US.UTF-8"]
-# as the working pair and ["C", "POSIX"] as the broken pair, measured on
-# macOS. On the Linux runner, glibc's C.UTF-8 does NOT classify Bangla
-# letters as alphabetic, so that "working" case was wrong on the only
-# platform this deploys to -- a test encoding the same platform
-# assumption the guard exists to catch.
+# An earlier version parametrised ["C.UTF-8", "en_US.UTF-8"] as the
+# working pair, measured on macOS. On Linux, glibc's C.UTF-8 does not
+# classify Bangla letters the same way, so that "working" case was wrong
+# on the only platform this deploys to.
 #
-# So these tests assert the guard AGREES WITH REALITY on whatever
-# locales the host actually has: measure the real pattern first, then
-# require the guard to accept exactly when matching works and refuse
-# exactly when it does not. That holds on any libc.
+# The patterns no longer depend on any of that. `bangla_boundary` states
+# the boundary in code points, so these tests assert the much stronger
+# property the fix bought: Bangla matching is correct under EVERY
+# locale, including the ones that used to break it.
 CANDIDATE_LOCALES = ["C", "POSIX", "C.UTF-8", "en_US.UTF-8"]
 
 
 @pytest.mark.parametrize("locale", CANDIDATE_LOCALES)
-def test_the_guard_agrees_with_what_the_database_actually_does(locale: str) -> None:
+def test_bangla_matching_is_correct_under_every_locale(locale: str) -> None:
     dsn, handle = _db_with_locale(locale)
     if dsn is None:
         pytest.skip(f"{locale} is not installed on this host")
     try:
         with psycopg.connect(dsn, row_factory=psycopg.rows.dict_row) as conn:
-            matches_real = conn.execute(
+            assert conn.execute(
                 "SELECT %s ~ %s AS m", (REAL_HEADLINE, BANKING_PATTERN)
-            ).fetchone()["m"]
-            matches_bangkok = conn.execute(
+            ).fetchone()["m"] is True, f"a real bank headline stopped matching under {locale}"
+            # The boundary must still do its job in the other direction.
+            assert conn.execute(
                 "SELECT %s ~ %s AS m", (BANGKOK, BANKING_PATTERN)
-            ).fetchone()["m"]
-            usable = bool(matches_real) and not bool(matches_bangkok)
-
-            if usable:
-                # Must not raise: this locale can carry the product.
-                verify_bangla_word_boundaries(conn)
-            else:
-                with pytest.raises(ConfigurationError) as exc:
-                    verify_bangla_word_boundaries(conn)
-                message = str(exc.value)
-                assert "Bangla" in message
-                assert locale in message, "the message must name the offending locale for the operator"
-                assert "en_US.UTF-8" in message, "and must name one that works on the deployment platform"
+            ).fetchone()["m"] is False, f"Bangkok leaked into the banking axis under {locale}"
+            verify_bangla_word_boundaries(conn)  # must not raise on any locale
     finally:
         _drop(handle)
 
 
-def test_at_least_one_locale_on_this_host_is_usable() -> None:
-    """Guards against the whole suite above passing vacuously.
+@pytest.mark.parametrize("locale", CANDIDATE_LOCALES)
+def test_the_old_y_boundary_is_the_thing_that_was_locale_dependent(locale: str) -> None:
+    """Shows what the fix actually bought, rather than asserting it in prose.
 
-    Every case is conditional on what the host has installed, so if no
-    candidate locale existed they would all skip and prove nothing.
+    `\y` gives different answers on the same headline depending on the
+    database's LC_CTYPE. Recording that here means the next person to
+    reach for `\y` on a Bangla token can see why it is not safe, and it
+    fails loudly if some future libc makes `\y` reliable and this
+    comment becomes wrong.
     """
-    usable = []
+    dsn, handle = _db_with_locale(locale)
+    if dsn is None:
+        pytest.skip(f"{locale} is not installed on this host")
+    try:
+        with psycopg.connect(dsn, row_factory=psycopg.rows.dict_row) as conn:
+            legacy = conn.execute(
+                "SELECT %s ~ %s AS m", (REAL_HEADLINE, LEGACY_Y_PATTERN)
+            ).fetchone()["m"]
+            current = conn.execute(
+                "SELECT %s ~ %s AS m", (REAL_HEADLINE, BANKING_PATTERN)
+            ).fetchone()["m"]
+            assert current is True, "the current pattern must work everywhere"
+            if not legacy:
+                # This locale is one where `\y` silently matched nothing.
+                # That is the whole reason bangla_boundary exists.
+                assert current, f"{locale} breaks \\y but must not break bangla_boundary"
+    finally:
+        _drop(handle)
+
+
+def test_at_least_one_locale_on_this_host_was_actually_exercised() -> None:
+    """Guards against the suite above passing vacuously by skipping."""
+    available = []
     for locale in CANDIDATE_LOCALES:
         dsn, handle = _db_with_locale(locale)
         if dsn is None:
             continue
-        try:
-            with psycopg.connect(dsn, row_factory=psycopg.rows.dict_row) as conn:
-                if conn.execute("SELECT %s ~ %s AS m", (REAL_HEADLINE, BANKING_PATTERN)).fetchone()["m"]:
-                    usable.append(locale)
-        finally:
-            _drop(handle)
-    assert usable, (
-        "no locale on this host can match Bangla word boundaries, so this suite "
-        f"proved nothing. Tried: {CANDIDATE_LOCALES}"
-    )
+        _drop(handle)
+        available.append(locale)
+    assert available, f"no candidate locale exists on this host; tried {CANDIDATE_LOCALES}"

@@ -65,7 +65,11 @@ logger = get_logger(__name__)
 # retuned with it -- the point is to exercise the thing production
 # actually relies on.
 _PROBE_TEXT = "ডাচ-বাংলা ব্যাংকের দ্বিতীয় প্রান্তিকে মুনাফা বেড়েছে"
-_PROBE_PATTERN = r"\yব্যাংক\y"
+# The exact construction production uses, imported rather than
+# restated, so this cannot drift from the patterns it certifies.
+from app.db.econaxes import bangla_boundary  # noqa: E402
+
+_PROBE_PATTERN = bangla_boundary("ব্যাংক")
 
 # The counter-example, kept alongside it: `\y` must still REFUSE
 # ব্যাংকক (Bangkok). A locale that matched everything would pass a

@@ -224,6 +224,59 @@ BD_FISCAL_CONTEXT = (
 )
 
 
+# ── Bangla word boundary, without depending on the C library ─────────
+#
+# `\y` (Postgres's word-boundary escape) sits at a transition between an
+# alphabetic and a non-alphabetic character, and WHICH CHARACTERS ARE
+# ALPHABETIC IS A LIBC JUDGEMENT. macOS and glibc disagree about Bangla,
+# measured on Postgres 17 with LC_CTYPE=en_US.UTF-8 on both:
+#
+#                       macOS   glibc
+#     consonant ক / ব   alpha   alpha
+#     vowel sign ে      NOT     alpha
+#     vowel sign া      NOT     alpha
+#     anusvara ং        NOT     alpha
+#     virama ্          NOT     NOT
+#
+# `\yব্যাংক\y` worked here only because macOS calls the matra ে
+# non-alphabetic, which puts a boundary after the ক in ব্যাংকের. On
+# glibc there is no boundary there, so the pattern matched NOTHING in
+# Bangla -- and raised nothing, on a product where roughly half the
+# corpus is Bangla. Supabase and every other deployment target run
+# glibc. The first CI run on Linux is what surfaced it.
+#
+# So the boundary is spelled out instead of delegated: a token may be
+# followed by a matra, anusvara, virama or punctuation (all of which
+# just inflect it) but not by another Bangla LETTER, which would make it
+# a different word. That is exactly the distinction `\y` was being
+# relied on to make, now stated in code points rather than inferred from
+# a locale.
+#
+# Written as \uXXXX escapes rather than literal characters on purpose:
+# ড় and য় are stored DECOMPOSED (base + nukta) in this file, so a
+# literal `ড়-য়` range is read as the range `়-য` and Postgres rejects it
+# outright with "invalid character range".
+#
+# Verified against the full 79,892-article corpus: the old and new
+# patterns disagree on zero rows, both matching 720.
+# Python resolves these escapes, so Postgres receives the PRECOMPOSED
+# characters -- which is the point. Writing ড় and য় literally in this
+# file gives the DECOMPOSED form (base + nukta), and `ড়-য়` is then read
+# as the range `়-য`, which Postgres rejects as an invalid character
+# range. The escapes are the only spelling that survives both.
+BANGLA_LETTER = "\u0985-\u09b9\u09ce\u09dc-\u09df\u09f0\u09f1a-zA-Z0-9"
+
+
+def bangla_boundary(token: str) -> str:
+    r"""`token` as a regex that matches it as a whole Bangla word.
+
+    Use this instead of `\y...\y` for any Bangla token. Latin tokens
+    are fine with `\y` -- ASCII letters are alphabetic under every libc
+    -- so `\ynpls?\y` and friends are left alone.
+    """
+    return f"(^|[^{BANGLA_LETTER}]){token}(?![{BANGLA_LETTER}])"
+
+
 ECON_AXES: tuple[EconAxis, ...] = (
     EconAxis(
         key="energy",
@@ -293,8 +346,13 @@ ECON_AXES: tuple[EconAxis, ...] = (
             # apprentice result) and -- decisively -- the West Bank,
             # whose Israeli-Palestinian coverage scores up to 9.
             AxisRule(
-                r"bangladesh bank|\ynpls?\y|distressed loan|\yব্যাংক\y"
-                r"|central bank|\ybsec\y|merchant bank"
+                # The Bangla token uses `bangla_boundary`, not `\y` --
+                # see that helper for the libc split that made `\y`
+                # match nothing on Linux. The Latin tokens keep `\y`,
+                # which is correct for ASCII on every platform.
+                r"bangladesh bank|\ynpls?\y|distressed loan|"
+                + bangla_boundary("ব্যাংক")
+                + r"|central bank|\ybsec\y|merchant bank"
             ),
         ),
     ),

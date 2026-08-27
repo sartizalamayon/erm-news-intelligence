@@ -38,33 +38,21 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: erm_ci_test
-          # NOT COSMETIC. Postgres `\y` (word boundary) decides what is
-          # a word character from LC_CTYPE, and roughly half this
-          # corpus is Bangla. Under plain `C` or `POSIX`, Bangla letters
-          # are not word characters, so every `\y` pattern in
-          # app/db/econaxes.py and app/db/watchlist.py matches NOTHING
-          # and no error is raised anywhere.
+          # Deliberately NO locale pinning here any more.
           #
-          # This container had exactly that, and it is how the first CI
-          # run of this project failed: two Bangla matching tests failed
-          # while all 1589 others passed. Nothing local could have caught
-          # it -- the developer machine runs en_US.UTF-8. Verified on
-          # Postgres 17: C.UTF-8 and en_US.UTF-8 both work, C and POSIX
-          # both silently match nothing.
+          # This block briefly forced en_US.UTF-8 because Bangla matching
+          # used `\y`, whose behaviour comes from the C library: macOS
+          # and glibc disagree about whether a Bangla vowel sign is
+          # alphabetic, so the patterns worked on the authors' machines
+          # and matched NOTHING on Linux. Pinning a locale was treating
+          # the symptom, and it did not even work -- the guard rejected
+          # en_US.UTF-8 on this runner too.
           #
-          # app/db/collation_guard.py refuses to migrate a database like
-          # that at all, so a wrong locale here fails loudly rather than
-          # as two puzzling test failures.
-          #
-          # en_US.UTF-8, NOT C.UTF-8. The locale names that work are not
-          # portable: C.UTF-8 was measured working on macOS libc, and the
-          # guard rejected it on this very runner, because glibc's
-          # C.UTF-8 does not classify Bangla letters as alphabetic. The
-          # deployment target is Linux, so the Linux answer is the one
-          # that counts. `LANG` is what makes the official postgres image
-          # generate the locale before initdb runs.
-          LANG: en_US.UTF-8
-          POSTGRES_INITDB_ARGS: "--locale=en_US.UTF-8"
+          # `app.db.econaxes.bangla_boundary` now states the boundary in
+          # explicit code points, so matching is identical under C,
+          # POSIX, C.UTF-8 and en_US.UTF-8 alike. Running on the
+          # container's default locale is therefore the STRONGER test:
+          # it proves the patterns no longer care.
         ports:
           - 5432:5432
         # GitHub Actions will not start dependent steps until this
