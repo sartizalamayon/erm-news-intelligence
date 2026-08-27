@@ -70,4 +70,14 @@ jobs:
       - name: Test
         run: pytest
 
-      - run: echo "half C reached"
+      - name: Set up Node (frontend tests)
+        if: matrix.python-version == '3.12'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Test (frontend)
+        if: matrix.python-version == '3.12'
+        run: node --test "tests/frontend/"*.test.mjs
+
+      - run: echo "half D reached"
